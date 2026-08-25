@@ -1,0 +1,5 @@
+board_manager:
+    additional_urls:
+        - https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+directories:
+    user: /Volumes/EXPRESS_2TB_HD/code/i8080/arcade_arduino

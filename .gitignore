@@ -1,0 +1,22 @@
+# Third-party Arduino libraries -- installed via arduino-cli, not our code.
+# Reinstall with:
+#   arduino-cli lib install "PicoDVI - Adafruit Fork" "Adafruit TLV320 I2S" \
+#     "SdFat - Adafruit Fork" "Bounce2"
+# (their own dependencies -- Adafruit GFX Library, Adafruit BusIO, etc. --
+# are pulled in automatically)
+libraries/Adafruit_*/
+libraries/PicoDVI_-_Adafruit_Fork/
+libraries/SdFat_-_Adafruit_Fork/
+libraries/Bounce2/
+libraries/MIDI_Library/
+libraries/FlashStorage/
+
+# Build output / caches
+build/
+*.uf2
+*.elf
+*.bin
+*.hex
+
+# macOS
+.DS_Store

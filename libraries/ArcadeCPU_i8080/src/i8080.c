@@ -535,16 +535,16 @@ int HLT(Cpu_state *state) {
 }
 
 uint8_t read_memory(Cpu_state *state, uint16_t address) {
-    if (address >= 0x6000) return 0;
-    if (address >= 0x4000 && address < 0x6000) address -= 0x2000;
+    if (state->mirror_2000_at_4000 && address >= 0x4000 && address < 0x6000)
+        address -= 0x2000;
     return state->memory[address];
 }
 
 void write_memory(Cpu_state *state, uint16_t address, uint8_t value) {
-    if (address >= 0x2000) {
-        if (address >= 0x4000 && address < 0x6000) address -= 0x2000;
-        state->memory[address] = value;
-    }
+    if (address < 0x2000) return; // ROM is read-only
+    if (state->mirror_2000_at_4000 && address >= 0x4000 && address < 0x6000)
+        address -= 0x2000;
+    state->memory[address] = value;
 }
 
 int interrupt(Cpu_state *state, uint16_t offset) {

@@ -267,6 +267,267 @@ assuming it has adequate margin.
 
 ---
 
+## Lunar Rescue port (`ArcadeMachine_LunarRescue`, `lrescue_fruitjam/`)
+
+Same "8080bw" board family as Space Invaders (confirmed via MAME's shared
+`mw8080bw_root()` machine_config — same 1.9968MHz CPU clock, same RST1/RST2
+interrupt pair), but different ROM layout and, uniquely among ports so far,
+one genuinely *synthesized* (not sampled) sound channel. Problems 12-16
+below are specific to this port; several (14-16) are really lessons about
+the shared framework, surfaced by Lunar Rescue's heavier asset set and its
+one bit-banged audio channel rather than being Lunar-Rescue-specific bugs.
+
+### 12. ROM chip layout doesn't fit the "sort filenames, place consecutively" SD loader convention
+
+**Symptom:** Following Invaders' loading convention (sort ROM filenames
+reverse-alphabetically, place each at the next consecutive address starting
+at 0x0000) works for `lrescue.1`-`lrescue.4`, but silently produces garbage
+once code reaches `lrescue.5`/`lrescue.6`.
+
+**Cause:** Invaders' loader convention only works when a ROM set's chips
+map to consecutive address blocks. Lunar Rescue's real board doesn't:
+`lrescue.5`/`lrescue.6` map starting at 0x4000, leaving a gap (0x2000-0x3FFF
+is RAM, not ROM) that a naive "next chip starts right after the previous
+one" scheme can't express.
+
+**Fix:** `lrescue_assets.cpp` uses an explicit filename→address manifest
+instead of Invaders' sort-and-pack convention. **Any future 8080bw-family
+port needs to check its real chip map against this same assumption before
+reusing Invaders' loader as-is** — this is the same limitation Space
+Invaders Deluxe would hit for the same reason.
+
+### 13. `Cpu_state.memory` baked in a Space-Invaders-specific address-decoding quirk
+
+**Symptom:** Reads from Lunar Rescue's `lrescue.5`/`lrescue.6` ROM (mapped
+at 0x4000) returned stale RAM contents instead of ROM data.
+
+**Cause:** Space Invaders' PCB incompletely decodes its address bus,
+aliasing RAM 0x2000-0x3FFF onto 0x4000-0x5FFF — real hardware behavior the
+original interpreter needs to reproduce. `ArcadeCPU_i8080`'s
+`read_memory`/`write_memory` baked this in unconditionally, and
+`Cpu_state.memory` was only sized `[0x4000]` to match. Lunar Rescue's own
+board maps real ROM into that exact range instead, with no such aliasing.
+
+**Fix:** Grew `memory[]` to the full `[0x10000]` (64K) address space, and
+added a `mirror_2000_at_4000` flag to `Cpu_state` that gates the mirroring
+behavior — `invaders_machine.cpp` sets it `true` explicitly (preserving
+exact prior behavior), `lrescue_machine.cpp` leaves it `false` (the
+memset default). **A shared CPU core must not bake in a single game's
+board-specific quirk as unconditional behavior — check every existing
+"this is always true" assumption in `ArcadeCPU_i8080` before trusting it
+generalizes to a new port.** (Fixing this also incidentally corrected a
+latent out-of-bounds write for any address ≥0x6000, previously unreachable
+because nothing had ever needed memory beyond that mirror.)
+
+### 14. Streaming WAV resampler: `uint32_t` Q16.16 position silently wrapped past 65536 source frames
+
+**Symptom:** Some sample files loaded and played correctly; others didn't
+play at all, with no obvious pattern — and whichever files were listed
+*after* a bad one in the load order also failed, even though they were
+fine on their own.
+
+**Cause:** Lunar Rescue's real sample set (~895KB of 44.1kHz 16-bit PCM) is
+nowhere near Invaders' ~90KB budget, so `lrescue_audio_load_samples()`
+streams and downsamples each file through a nearest-neighbor resampler
+tracking source position in Q16.16 fixed point. That position was a
+`uint32_t` — only 16 *integer* bits — so any file needing to represent a
+source-frame position ≥65536 silently wrapped back through 0 and never
+reached (let alone exceeded) its own `total_frames`, so the conversion loop
+never terminated. It kept writing until it exhausted the *entire remaining*
+`pcm_ram` budget, which is what actually broke every file loaded after it —
+not file corruption, not an SD card problem (confirmed by swapping cards,
+no effect) — just this one file that never stopped. Found via direct
+per-file logging (`data_bytes`/`written`/`ram_off_after`), not by guessing:
+every affected file happened to be the ones whose real frame count
+exceeded 65536, an exact match.
+
+**Fix:** Widened the position variable to `uint64_t` (48 integer bits at
+this Q16.16 scale — comfortably enough for any real WAV file). **Any
+Q16.16 position tracker must be sized for the worst-case source length a
+future asset might need, not just what today's asset set happens to fit
+under — this bug was invisible with Invaders' small samples and only
+surfaced once a real port needed genuinely large ones.**
+
+### 15. Bit-banged square-wave synthesis: two different ways to get the event-timestamp clock domain wrong
+
+Lunar Rescue's port 5 bit 3 drives a bare 1-bit speaker (MAME:
+`SPEAKER_SOUND`) for two "bitstream" jingles (end-of-level, bonus1) — the
+first genuinely *synthesized*, not sampled, channel in this codebase.
+Reported as "sounds crumbly/crunchy, only during these two jingles" and
+took the most investigation of anything in this port; worth reading in
+full since a future synthesized-channel port will hit the same class of
+problem.
+
+**Why polling doesn't work at all:** A mixer that just reads "what level is
+the speaker at right now" once per audio sample cannot reconstruct a
+bit-banged tune correctly on this hardware. Core 0 executes an *entire
+video frame's* worth of i8080 instructions in a real-time burst of only a
+couple milliseconds (this interpreter runs far faster than the original
+1.9968MHz chip), then blocks on the video queue for the rest of that
+frame's real ~16.7ms — frame pacing has no explicit timer, it comes
+entirely from that blocking (see problem #10's `HAL_VIDEO_SCANLINES_PER_FRAME`
+scheme). A live-polled level would see an entire frame's worth of port-5
+transitions collapse into that few-millisecond burst, then freeze — the
+original hardware spread those same transitions smoothly across the full
+16.7ms. The fix (`lrescue_audio_speaker_event()`/`speaker_level_at()`) is to
+timestamp every transition in i8080 *cycle* units (well-defined regardless
+of how fast this interpreter races through them) into a ring buffer, and
+have the audio ISR — which runs at a real, hardware-paced rate — convert
+its own output-sample position into the same cycle axis to ask "what was
+the level at that cycle." Two distinct real bugs surfaced getting the two
+sides of that scheme to actually agree on "now":
+
+**15a — an isolation test's own clock had the wrong epoch.** A standalone
+test sketch (`lrescue_speaker_isolation_test`, driving the real production
+mixer with a synthetic event pattern, no CPU emulator) derived its cycle
+timestamps from `micros()` since *boot*. The audio ISR's own cycle clock
+starts counting from 0 only once it's first invoked — some ~645ms *after*
+boot, however long `hal_audio_init()` takes. That fixed, non-closing ~645ms
+offset meant every pushed event looked like it was ~645ms in that clock's
+future; bridging a gap that size at real toggle rates (500-2000
+events/sec) would need holding ~1300 events in flight at once — 5x the
+ring buffer's 256-slot capacity — so it filled and started dropping events
+within the first ~130ms of every single repetition, identically, every
+time. **Lesson: two independent clocks feeding one reconstruction scheme
+must be epoch-aligned at the same real moment, not just each internally
+self-consistent** — confirmed by adding direct ring-buffer health counters
+(`lrescue_audio_debug_isr_stats()`, `lrescue_audio_speaker_debug_stats()`)
+rather than inferring it from what the speaker audibly did.
+
+**15b — the real game's clock had the right epoch but the wrong *rate*
+(the actual root cause of the reported bug).** `system->total_cycles`
+(what port writes were timestamped against) only advances by
+`CYCLES_PER_FRAME` once per *emulated* video frame — an accurate stand-in
+for real elapsed time only if this hardware's actual achieved DVI frame
+rate exactly matches the assumed `FRAMERATE` constant. It measurably
+doesn't: `FRAMERATE` was the *original arcade CRT's* exact 59.541985Hz
+rate, copied from Space Invaders' shared machine_config, but this board's
+real PicoDVI-driven rate turned out to be ~0.83% faster. That let
+`total_cycles` drift, *unboundedly* (not a fixed offset — it kept growing
+the whole session), away from the audio ISR's own real-time-paced clock —
+explaining why the bug got worse the longer a session ran and was never
+audible right after boot. Confirmed directly by comparing
+`system->total_cycles` against `lrescue_audio_debug_target_cycle()` once
+per second over multi-minute sessions, not inferred.
+
+An attempted fix for 15b made things *worse* in an instructive way: since
+`total_cycles` was drifting, switching the timestamp source to a genuine
+real-time clock (`lrescue_audio_now_cycles()`, built on `timer_hw` — see
+#17 below for why *not* `time_us_64()`) seemed like the obvious correction.
+It stopped the drift, but broke something more fundamental: because Core 0
+executes a whole frame's writes in that few-millisecond real-time burst
+(same fact as above), a *real-time* timestamp collapses them all to nearly
+the same instant instead of spreading them across the frame — reproducing,
+in a different guise, the exact "phrase happens all at once" failure the
+cycle-timestamp scheme exists to prevent, heard as a buzz rather than a
+crumble. **The actual fix was recalibrating `FRAMERATE` itself** (measured
+from the same total_cycles-vs-target_cycle comparison, averaged over
+multiple play sessions: `59.541985 → 60.0368`), leaving the timestamp
+source as `total_cycles`. **For a frame-batched CPU emulator sharing this
+execute-fast-then-block design, a synthesized channel's event timestamps
+must use the emulator's own cycle-accounting clock, not a real-time
+clock — the fix for a cycle clock found drifting from real time is
+calibrating what it assumes about real frame timing, not swapping which
+clock domain the timestamp uses.** (`lrescue_audio_now_cycles()` is still
+the right tool for a producer with no frame-batching structure at all —
+the isolation-test sketch itself — and for this kind of calibration
+diagnostic specifically.)
+
+### 16. Red horizontal lines are PicoDVI's own explicit queue-starvation fallback, not a mystery glitch
+
+**Symptom:** After fixing #15, red lines persisted during Lunar Rescue's
+bonus1 jingle and, less predictably, during ordinary two-player gameplay
+with several sounds triggering close together (simultaneous shots).
+
+**What it actually is, confirmed from the vendored library's own source
+(not inferred):** `libraries/PicoDVI_-_Adafruit_Fork/src/libdvi/dvi.c`'s
+scanline-encode IRQ handler has an explicit branch, with its own comment —
+*"No valid scanline was ready (generates solid red scanline)"* — for when
+its `q_tmds_valid` queue is empty at the moment it needs the next encoded
+scanline. Confirmed by disassembling the *linked* binary that this
+library's entire hot path (the DMA IRQ handler, the TMDS encoder, its
+lookup table) is 100% RAM-resident — ruling out an XIP-stall explanation on
+the video side entirely, unlike problem #7's cause.
+
+**What did and didn't help**, in the order tried:
+- Removing debug `Serial.printf()` calls that were still active in the hot
+  paths (`lrescue_ports.cpp`'s per-port-write logging, `lrescue_draw_frame()`'s
+  per-scanline record tracking) — these had served their diagnostic
+  purpose and were themselves adding real overhead exactly during the
+  highest-audio-activity moments they were trying to measure.
+- Raising `opt=Optimize2` (`-O2`) to `Optimize3` (`-O3`) for this sketch
+  specifically — measurably reduced red-line *frequency* in practice, even
+  though it didn't move the measured per-frame timing numbers much.
+  `lrescue_fruitjam/sketch.yaml` now pins `Optimize3`; other sketches stay
+  at `Optimize2` (#11) since none of them showed this specific tightness —
+  **there's no single project-wide "right" optimization level; test each
+  sketch's own real-time margin rather than assuming one setting fits
+  every game's workload.**
+- Optimizing `render_scanline()`'s tate-mode paths (group columns by the
+  VRAM byte they share instead of recomputing color per pixel — see
+  `lrescue_video.cpp`) cut real render-compute time ~3x, but had **zero**
+  effect on overall per-frame time. `hal_video_acquire_scanline()`/
+  `hal_video_submit_scanline()` deliberately *block* to pace Core 0 against
+  Core 1's fixed real DVI rate, so freed compute time just becomes more
+  time spent waiting — the total (compute + wait) for those scanline
+  handoffs is bounded below by Core 1's fixed hardware pace no matter how
+  fast Core 0's own code runs. **Before optimizing a loop for real-time
+  margin, check whether it's actually blocked on a fixed external pacing
+  source — cutting compute time inside a `queue_*_blocking_u32()`-paced
+  loop moves time from one column to another, it doesn't shrink the
+  total.** (Still a legitimate, verified improvement on its own terms —
+  freed real CPU time — just not one that touches this particular symptom.)
+- Confirmed, via new ISR-side instrumentation
+  (`lrescue_audio_debug_isr_stats()`), that the audio mixer's own
+  per-invocation cost scales smoothly and proportionally with how many
+  sample channels are concurrently active (~146-158us at 0 active, up to
+  ~209us avg/248us worst-single at 5) — real, but *not* a hidden
+  single-call outlier (the worst-single figure tracks the average closely
+  the whole way through), and capping concurrency
+  (`MAX_CONCURRENT_CHANNELS = 4`, down from the channel array's full 10
+  slots) had no measurable effect on red-line frequency once tested either.
+
+**Where this stands:** every Core-0-measurable, software-controllable
+hypothesis has been tested and either fixed something real (problem #15)
+or shown to not be the (sole) cause of the residual red line. What
+remains is very likely below what Core 0's software, or Serial-based
+instrumentation running on it, can see at all — most plausibly contention
+on the shared SRAM bus between the audio I2S DMA and the video HSTX DMA,
+or a rare Core-1-side hiccup with no exposed counter. **Getting further
+would need hardware-level tools (a logic analyzer on the DMA/DVI lines, or
+Picoprobe/GDB) or patching the vendored PicoDVI library's own Core-1
+pipeline for internal instrumentation — not attempted.** Accepted as a
+rare, brief cosmetic artifact under the most demanding audio conditions.
+
+### 17. `time_us_64()`/`time_us_32()` are not the trivial inline they're often assumed to be — they're flash-resident
+
+**Symptom:** No visible symptom yet — caught by checking the *linked*
+binary's own symbol table before the code this affected ever reached real
+hardware, precisely because problem #7 already established how expensive
+an unnoticed flash call inside the audio ISR is.
+
+**Cause:** Instrumenting `fill_audio_buffer()`'s own duration (for problem
+#16's ISR-cost investigation) first used `time_us_64()`, on the assumption
+it's a trivial inline over a hardware register the way it's used elsewhere
+in this codebase's *non-ISR* code
+(`lrescue_audio_now_cycles()`). It isn't: `arm-none-eabi-nm` on the linked
+`.elf` placed `time_us_64` at `0x10010a9c` — flash's address range — while
+`dvi_dma_irq_handler` (confirmed RAM-resident, problem #16) sat at
+`0x20000658`. Calling it from inside `fill_audio_buffer()` would have
+reintroduced exactly the class of bug problem #7 already fixed once.
+
+**Fix:** Used `timer_hw->timerawl` (`hardware/timer.h`) directly — a raw
+MMIO register read, genuinely no function call at all — instead of the
+SDK's own timestamp helper functions, anywhere inside ISR-context code.
+**Never assume a pico-sdk convenience function is flash-safe for ISR use
+just because its name suggests a trivial register read — check the linked
+binary's actual symbol address (flash is `0x10xxxxxx`, RAM is `0x20xxxxxx`
+on this chip) before trusting it, the same way every other RAM-residency
+claim in this file has been verified by disassembly rather than by
+reading source and assuming.**
+
+---
+
 ## Reference: HAL contract quirks specific to this board
 
 - **`N_SCANBUF` is hard-capped at 8** by the vendored PicoDVI fork's
@@ -284,6 +545,43 @@ assuming it has adequate margin.
   fruitjam.ino`. The board only knows raw `HAL_BTN_*` indices; only the
   sketch (the one place that knows both which game and which board) knows
   that `HAL_BTN_START1` means "player 1 start" for *this* game.
+- **Red horizontal lines are PicoDVI's own explicit "no valid scanline was
+  ready" fallback** (`libraries/PicoDVI_-_Adafruit_Fork/src/libdvi/dvi.c`),
+  not necessarily an XIP-stall bug like problem #7 — that library's hot
+  path was independently confirmed (by disassembly) to be 100% RAM-resident
+  already. See problem #16 before assuming this symptom's cause without
+  checking the real-time budget first.
+- **Never trust a pico-sdk timestamp helper (`time_us_64()`/`time_us_32()`)
+  to be flash-safe for ISR use without checking the linked binary's own
+  symbol address** — see problem #17. `timer_hw->timerawl` is the safe,
+  register-only alternative.
+
+## Reference: shared-code quirks any new game or CPU port should check
+
+These came out of the Lunar Rescue port (problems #12-15) precisely because
+Invaders' own port never happened to exercise them — a future port sharing
+the same CPU core, Machine-layer conventions, or board is likely to hit the
+same class of surprise if it doesn't check these explicitly rather than
+assuming Invaders' port already covers them.
+
+- **`ArcadeCPU_i8080`'s `mirror_2000_at_4000` flag defaults `false`** —
+  Space Invaders' PCB-specific RAM-mirroring quirk (problem #13) is opt-in,
+  not baked into the shared core unconditionally. A new game sets it `true`
+  only if its own real board actually mirrors that range; check the real
+  ROM/RAM map first, don't assume.
+- **A Q16.16 (or similar fixed-point) position tracker must be sized for
+  the worst-case source length a future asset might need** (problem #14) —
+  Invaders' small sample set never exercised the 65536-frame boundary a
+  `uint32_t`'s 16 integer bits allow; Lunar Rescue's real assets did.
+- **A synthesized (bit-banged) audio channel's event timestamps must use
+  the emulator's own cycle-accounting clock (e.g. `system->total_cycles`),
+  never a real-time clock** (problem #15) — Core 0 executes a whole video
+  frame's instructions in a few-millisecond real-time burst then blocks for
+  the rest of that frame's real duration; only a cycle-domain timestamp
+  survives being "unpacked" back across the full frame correctly on the
+  consumer side. If that cycle clock is found drifting from real time,
+  recalibrate what it assumes about real frame timing (`FRAMERATE`) —
+  don't change which clock domain the timestamp itself uses.
 
 ## Reference: build/tooling gotchas specific to Arduino (not the board)
 
@@ -301,8 +599,11 @@ assuming it has adequate margin.
 - This board's default optimization level (`-Os`) is not necessarily fast
   enough for real-time work — always sanity-check timing-sensitive code at
   `-Os` before assuming a fix that works at `-O2` will also work at the
-  project's actual shipped setting, or just pin `-O2` explicitly as this
-  project now does (#11).
+  project's actual shipped setting, or just pin an explicit level via that
+  sketch's own `sketch.yaml` as this project does (#11). There's no single
+  project-wide "right" level, either — `lrescue_fruitjam` needed `-O3`
+  where `-O2` sufficed for everything else (#16); test each sketch's own
+  margin rather than assuming one setting fits every game's workload.
 
 ## Confirmed working on real hardware (as of this writing)
 
@@ -310,3 +611,12 @@ assuming it has adequate margin.
 `sd_test_fruitjam`, and the full `invaders_fruitjam` game — all five, in
 that order, on an actual Adafruit Fruit Jam with the standard Space Invaders
 ROM/sample set from `invaders_assets/`.
+
+`lrescue_fruitjam` (the full Lunar Rescue game, two-player, extended
+sessions) and `lrescue_speaker_isolation_test` (a standalone diagnostic
+sketch exercising the real production speaker-synthesis mixer against a
+synthetic event pattern, no CPU emulator or SD card involved), with the
+real Lunar Rescue ROM/sample set — audio confirmed clean end-to-end;
+red-line frequency reduced to a rare, brief, cosmetic occurrence under peak
+simultaneous-sound load (see problem #16 for why this wasn't fully
+eliminated, and what it would take to try further).

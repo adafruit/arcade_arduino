@@ -18,6 +18,12 @@
 void invaders_init(arcade_system *system) {
     memset(&system->state, 0, sizeof(system->state));
 
+    // Space Invaders' original PCB incompletely decodes its address bus,
+    // aliasing RAM at 0x2000-0x3fff onto 0x4000-0x5fff; the self-test code
+    // relies on this. See i8080.h's Cpu_state.mirror_2000_at_4000 doc comment
+    // -- other 8080bw-family games (e.g. Lunar Rescue) must NOT set this.
+    system->state.mirror_2000_at_4000 = true;
+
     system->left   = 0;
     system->right  = 0;
     system->shot   = 0;

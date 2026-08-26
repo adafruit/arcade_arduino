@@ -293,8 +293,16 @@ int sd_read_blocks(uint8_t *buf, uint32_t sector, uint32_t count) {
             spi_recv_byte();
             spi_recv_byte();
         }
-        /* Stop transmission */
+        /* Stop transmission -- the card goes busy after CMD12 and needs
+         * that period to clear before it can accept the next command; skip
+         * this wait and a command issued too soon after a multi-block read
+         * (e.g. the very next file's CMD17/CMD18) can be misread or
+         * dropped. Single-block ROM-chip-sized reads left enough natural
+         * slack between transfers to never expose this; a tight streaming
+         * loop issuing many back-to-back multi-block reads (see
+         * ArcadeMachine_LunarRescue's WAV loader) does not. */
         sd_send_cmd(CMD12, 0);
+        sd_wait_ready(500);
         cs_deselect();
         spi_send_byte(0xFF);
     }

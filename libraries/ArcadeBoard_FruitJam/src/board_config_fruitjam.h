@@ -20,6 +20,8 @@ enum {
     HAL_BTN_LEFT,       // GPIO 8  (header D8)
     HAL_BTN_RIGHT,      // GPIO 9  (header D9)
     HAL_BTN_SHOOT,      // GPIO 10 (header D10)
+    HAL_BTN_UP,         // GPIO 43 (header A3) -- added for Pac-Man's 4-way joystick
+    HAL_BTN_DOWN,       // GPIO 44 (header A4) -- added for Pac-Man's 4-way joystick
 };
 
 // I2C0 (GPIO 20/21) -- TLV320DAC3100 DAC control

@@ -605,6 +605,258 @@ assuming Invaders' port already covers them.
   where `-O2` sufficed for everything else (#16); test each sketch's own
   margin rather than assuming one setting fits every game's workload.
 
+## Pac-Man port (`ArcadeCPU_Z80`, `ArcadeMachine_Pacman`, `pacman_fruitjam/`)
+
+The project's first Z80-based machine, and first tile+sprite video
+hardware. Built from scratch against the real ROM/PROM dump, with every
+hardware fact (memory map, I/O map, interrupt scheme, tile/sprite decode,
+palette decode, Namco WSG registers) verified against MAME's actual
+`pacman` driver source rather than inferred — see
+`ArcadeMachine_Pacman/src/*.cpp`'s header comments for citations. Two real
+bugs found on first real-hardware bring-up, both instructive beyond this
+one port:
+
+### 18. Rendering the whole frame before the first `hal_video_acquire_scanline()` call starves Core 1's DVI queue
+
+**Symptom:** Most of the screen (~4/5 in tate mode) showing solid red,
+with only a narrow sliver of real game picture visible; the boundary
+between them "vibrated" slightly frame to frame.
+
+**Cause:** `pacman_video.cpp`'s `pacman_draw_frame()` originally rendered
+all 224 native rows into a full-frame cache in one uninterrupted loop
+*before* calling `hal_video_acquire_scanline()`/`hal_video_submit_scanline()`
+even once for that frame. `HAL_VIDEO_SCANLINES_PER_FRAME`'s queue depth
+(`N_SCANBUF` = 8, see the "Reference: HAL contract quirks" section below)
+only gives Core 0 a few hundred microseconds of slack before Core 1's
+"valid" scanline queue runs dry — a multi-row render burst with zero
+acquire/submit calls interleaved blows through that easily, and PicoDVI's
+own "no valid scanline ready" fallback (problem #16, below) fires for
+every scanline Core 1 wants during the stall.
+
+**Fix:** For tate/CW rotation (the default — cases 1/3), each output
+scanline now computes its one needed native row *inside*
+`pacman_video_render_scanline()`, correctly interleaved with the acquire/submit pump,
+same shape as `invaders_video.cpp`/`lrescue_video.cpp`'s per-call
+renderers. Landscape/180-degree rotation (cases 0/2) genuinely can't avoid
+a full-frame pass — a single physical scanline in those orientations reads
+one pixel from *every* native row (a column slice) — so they still build
+the full cache upfront; this is a known, not-yet-fixed stall risk for
+those two orientations specifically, untested as of this writing. **Any
+renderer built on this framework must call `hal_video_acquire_scanline()`/
+`hal_video_submit_scanline()` from inside its own per-scanline loop, never
+do a large uninterrupted compute burst before the first call in a frame**
+— this generalizes past Pac-Man to any future tile/sprite-based port.
+
+### 19. The vendored Z80 core's memory-access indirection needs `-O3`, not `-O2`, for this game's per-frame instruction count
+
+**Symptom:** After fixing #18, a *consistent* (not vibrating) red band
+remained — reported as exactly the left 25% of the tate-mode screen, same
+size every frame.
+
+**Cause:** Consistent with the CPU-execution phase itself being the
+stall, not the renderer: `pacman_run_frame()` runs all ~50,688 Z80 cycles
+via `z80_step()` in an uninterrupted loop before `pacman_draw_frame()` is
+called — same "no acquire/submit calls during this burst" risk as problem
+#18, just in the CPU loop instead of the renderer. A consistent stall
+duration (the Z80 executes roughly the same instruction count every frame)
+produces a consistent-size red band, unlike #18's render-cost-driven
+vibration. Two real factors make this core's per-frame burst more
+expensive than `ArcadeCPU_i8080`'s: `ArcadeCPU_Z80` (vendored from
+superzazu/z80) wires memory access through **function pointers**
+(`cpu->read_byte(...)`) rather than i8080's directly-linked extern
+functions — an indirect call on the single hottest path in the whole
+emulator (every instruction fetch and operand access) that the compiler
+cannot inline — and the Z80 instruction set itself is more expensive to
+decode (prefixed CB/DD/ED/FD opcodes) than i8080's flatter one.
+
+**Fix:** Pinned `pacman_fruitjam/sketch.yaml` to
+`opt=Optimize3`, unlike every other sketch in this project except
+`lrescue_fruitjam` (same class of finding as problem #11/#16 — "there's no
+single project-wide right optimization level"). **Confirmed on real
+hardware to help but not fully close the gap:** the red band shrank from
+25% to ~10% of the tate-mode screen, still visibly covering real gameplay
+— see problem #20 for the actual fix.
+
+### 20. -O3 alone wasn't enough — the CPU-execution phase itself needed to stop being one uninterrupted burst
+
+**Symptom:** After #19's `-O3` change, a smaller (~10%) but still
+gameplay-covering red band remained in tate mode, confirmed on real
+hardware.
+
+**Cause:** `-O3` sped up the CPU-execution burst but didn't eliminate the
+underlying structural problem #19 already diagnosed: `pacman_run_frame()`
+still ran the *entire* frame's ~50,688 Z80 cycles in one uninterrupted
+loop, with zero `hal_video_acquire_scanline()`/`hal_video_submit_scanline()`
+calls happening until every cycle was done. Making that burst faster
+shrinks the stall; it doesn't remove it.
+
+**Fix:** Split `pacman_run_frame()` into two paths (`pacman_machine.cpp`).
+Tate/CW rotation now uses `run_frame_interleaved()`, which spreads the
+frame's cycle budget evenly across the `HAL_VIDEO_SCANLINES_PER_FRAME`
+acquire/submit calls — a few Z80 cycles, one scanline render+submit, a few
+more cycles, next scanline, and so on — so Core 1's queue is fed
+continuously through the whole frame instead of only during a render tail.
+This is only safe for tate/CW because their renderer already reads LIVE
+VRAM/sprite state on demand (problem #18's fix) rather than a
+frame-final snapshot. Landscape/180 rotation keeps the old fully-sequential
+`run_frame_sequential()` path (run all cycles, then call
+`pacman_draw_frame()`), since their renderer structurally needs the
+frame's *final* VRAM state before it can emit even one physical scanline
+(a column slice reads every native row at once) — interleaving isn't
+possible there without a bigger redesign (e.g. double-buffering: rendering
+frame N+1 while displaying frame N). Not yet attempted, since tate is this
+project's supported orientation for this game and landscape/180 remain a
+known, deprioritized limitation (a real Pac-Man cabinet is always
+portrait).
+
+One consequence worth knowing about, called out in
+`run_frame_interleaved()`'s own comment: since each scanline now renders
+from whatever VRAM/sprite state exists at that exact point in the frame's
+CPU execution rather than the frame's *final* state, a scanline near the
+top of the picture can reflect very slightly older game state than one
+near the bottom. This isn't a new inaccuracy invented by emulation — real
+scanline-order CRT hardware behaves exactly this way — and Pac-Man's
+sprites move only a few pixels per frame, so it was expected to be
+imperceptible.
+
+**Confirmed on real hardware:** this fully eliminated the red band in tate
+mode (zero remaining, down from #19's ~10%) — no tearing observed either,
+consistent with the prediction above. Joystick control (all four
+directions, not just COIN/START) also confirmed working end-to-end on
+real hardware in the same session. Landscape/180-degree rotation remain
+untested/unfixed as noted above.
+
+### 21. Landscape rotation was a mirror image of tate, not a rotation, because a required axis reversal was dropped when porting from invaders_video.cpp
+
+**Symptom:** With `mirror_x` off throughout, pressing ROTATE to go from
+tate to landscape (Yoko) flipped the image left-right — a genuine mirror,
+not the expected 90-degree turn.
+
+**Cause:** `pacman_video_render_scanline()`'s case 0 (landscape) was
+modeled on `invaders_video.cpp`'s case 0, which computes
+`col = 255 - dy` — a deliberate reversal of one axis, present specifically
+because a 90-degree rotation must flip the direction of exactly one axis
+relative to the other rotation case (case 1/tate, which does *not* reverse
+its equivalent axis) or the result is a mirror image rather than a
+rotation. This file's case 0 was written as `col = dy` directly, dropping
+that reversal — confirmed real (not just a docs mismatch) by this
+symptom. Case 2 (180 degrees) then compounded it: since it was built as
+"the opposite of this file's own case 0" rather than checked against
+`invaders_video.cpp`'s actual case 2, it added an *extra* reversal that
+happened to keep 0/180 self-consistent with each other while both stayed
+mirrored relative to tate.
+
+**Fix:** Restored the exact reversal pattern from `invaders_video.cpp`
+(real-hardware-verified there): case 0 computes the raw stretch value
+(`dy`) separately and then reverses it (`col = (W-1) - dy`); case 2 uses
+the *un*-reversed raw value directly, relying on its already-correct
+opposite `dx` ternary (unchanged by this fix) to supply the second axis
+flip a 180 needs. **General lesson for any future per-rotation-case
+renderer built on this framework: when one rotation case's axis-reversal
+choice is copied from a reference implementation, every other rotation
+case must be checked against that same reference's corresponding case,
+not derived by treating one's own (possibly wrong) case as ground truth
+and deriving the others as "the opposite of it."**
+
+### 22. `pacman_run_frame()` permanently hung after ~23 minutes of continuous play (e.g. left idle in attract mode)
+
+**Symptom:** The game would freeze completely -- picture static, no
+longer responding to input -- if left running uninterrupted for a while.
+Reported specifically after leaving the attract loop idle, but the
+mechanism doesn't care whether a human is playing; any sufficiently long
+continuous session would trigger it.
+
+**Cause:** `run_frame_sequential()`/`run_frame_interleaved()`
+(`pacman_machine.cpp`) computed each frame's cycle budget as an absolute
+target -- `target = system->cpu.cyc + PACMAN_CYCLES_PER_FRAME` -- and
+compared `system->cpu.cyc < target` directly. `system->cpu.cyc` is the
+vendored Z80 core's own field (`unsigned long cyc; // cycle count
+(t-states)`), which is a running total of every T-state executed since
+boot -- neither the core nor this file ever resets it. `unsigned long` is
+32 bits on this platform, and at Pac-Man's real 3.072MHz clock,
+real-time-paced play advances it by ~3,072,000/sec, so it wraps roughly
+every 2^32/3,072,000 ~= 1398 seconds (~23.3 minutes). Once `cyc` gets
+within one frame's budget (50,688) of that wraparound, `target` (computed
+via unsigned addition) wraps around to a small value while `cyc` itself
+is still a huge value just under the boundary -- so `cyc < target`
+(comparing a near-4-billion value against a near-zero one) is false
+immediately, `z80_step()` never runs that frame, and `cyc` can never
+advance past this point on any later frame either, since `start` reads
+the same stuck value every time. The video side kept submitting scanlines
+the whole time (which is why this showed as a frozen *picture*, not a
+crash or a red screen) -- only the CPU was actually stuck.
+
+**Fix:** Compare *elapsed cycles this frame* (`system->cpu.cyc - start`,
+a subtraction) against the budget, instead of comparing `system->cpu.cyc`
+directly against a precomputed absolute target. Unsigned subtraction
+wraps modulo 2^32 exactly like the counter itself does, so the computed
+delta is correct even when `cyc` wraps mid-frame -- this works
+indefinitely, for any session length, with no periodic reset needed,
+as long as the actual elapsed delta being measured never approaches half
+of 2^32 (a single frame's ~50,688-cycle budget is nowhere close).
+**General lesson: never compare a monotonically-increasing hardware/
+emulator cycle counter against a precomputed absolute future value if
+that counter is never reset -- compare the elapsed delta instead, which
+is naturally wraparound-safe.** `invaders_machine.cpp`'s own `cyc` avoids
+this entire class of bug differently -- it's a small local variable
+explicitly reset to a bounded leftover value every frame
+(`cyc = CYCLES_PER_FRAME - cyc`), never left to accumulate across the
+whole session at all; either approach works, but a CPU core's own
+built-in cycle-count field (as opposed to a locally-scoped one a Machine
+author controls entirely) should be assumed to run forever unless its
+own docs say otherwise.
+
+**Confirmed on real hardware:** the attract loop ran unattended overnight
+(many hours -- comfortably clearing the ~23-minute wraparound threshold
+dozens of times over) with no hang.
+
+### 23. Landscape rotation's aspect ratio and pixel-column sampling are both off, worse than Invaders' equivalent, and a regular test-pattern grid makes it obvious
+
+**Symptom:** In Yoko/landscape mode, the picture's proportions look
+visibly wrong (stretched/squashed), and a startup test screen with a
+regular grid pattern showed uneven, inconsistent-looking line spacing --
+not just uniformly distorted, genuinely irregular.
+
+**Cause -- two distinct effects, both rooted in reusing
+`invaders_video.cpp`'s landscape formula shape (`col = dvi_y *
+GAME_WIDTH / HAL_VIDEO_HEIGHT`) without re-deriving it for Pac-Man's
+different native width:**
+
+1. **Aspect ratio.** Invaders' landscape stretch ratio (256 native
+   columns spread across 480 DVI lines, ~1.875x) was hand-calibrated
+   against this specific monitor's non-square DVI pixel geometry (~2x
+   physical size difference between a DVI-x step and a DVI-y step,
+   per that file's own header comment) -- close to, but a deliberate
+   compromise short of, the ~2x that would be ideally needed. Pac-Man's
+   native width (288, not 256) run through the identical formula produces
+   a smaller ratio (~1.667x), which is a *worse* compromise -- the wider
+   the source resolution relative to the fixed 480-line budget, the
+   further short of the needed 2x compensation this formula shape falls.
+2. **Column sampling/aliasing.** Only `HAL_VIDEO_SCANLINES_PER_FRAME`
+   (240) physical scanlines actually exist to sample the native width
+   axis from in landscape mode (one distinct `col` value is computed per
+   physical scanline, via truncating integer division). Invaders' native
+   width (256) is only 16 short of that 240-sample budget (~1 column
+   dropped in 16); Pac-Man's (288) is 48 short (~1 column dropped in 6)
+   -- three times the drop rate. Truncating division doesn't distribute
+   those dropped columns evenly, so the result is an irregular skip
+   pattern rather than uniform shrinkage -- invisible on organic game art
+   (a missing column here and there in Pac-Man's rounded sprites), glaring
+   on any regular repeating pattern (a grid, a brick texture) because
+   human vision is very sensitive to irregularities in otherwise-uniform
+   spacing.
+
+**Status: diagnosed, not fixed.** Both effects are downstream of the same
+root cause (the formula shape was tuned for Invaders' specific 256 value,
+not re-derived generally), and neither is a stall/starvation issue like
+problems #18/#20 -- fixing them would mean deriving a landscape-mode
+transform from first principles for Pac-Man's actual 288-wide native
+resolution (and ideally computing the true dropped-column rate rather
+than accepting truncating-division aliasing), not a quick constant swap.
+Left as a known limitation alongside problem #18's landscape/180 stall
+risk, since tate remains this project's supported orientation for this
+game.
+
 ## Confirmed working on real hardware (as of this writing)
 
 `input_test_fruitjam`, `dvi_test_fruitjam`, `audio_test_fruitjam`,
@@ -620,3 +872,17 @@ real Lunar Rescue ROM/sample set — audio confirmed clean end-to-end;
 red-line frequency reduced to a rare, brief, cosmetic occurrence under peak
 simultaneous-sound load (see problem #16 for why this wasn't fully
 eliminated, and what it would take to try further).
+
+`pacman_fruitjam` (the full Pac-Man game) in **tate rotation** — video
+(tile+sprite decode, palette), audio (Namco WSG synthesis), and full
+4-way-joystick control all confirmed clean end-to-end with the real
+`pacman_assets/rom/` ROM/PROM set, after fixing problems #18-20 above; no
+red-line/queue-starvation artifacts, no visible tearing from problem #20's
+interleaved-rendering trade-off. The attract loop has also run unattended
+overnight with no hang (problem #22 fixed and confirmed). Problem #21's
+mirror-orientation fix was applied but not independently re-confirmed by
+observation afterward -- worth a quick visual check next time tate/Yoko
+switching comes up. **Not yet tested/fixed:** landscape/180-degree
+rotation (known stall risk from problem #18, plus the separate aspect-
+ratio/aliasing issues in problem #23), two-player mode, extended sessions
+across multiple levels.

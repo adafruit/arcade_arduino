@@ -24,10 +24,12 @@ to one game or one board are reusable for the next port:
   the one place that knows both "this game" and "this board," wiring the
   two together.
 
-A future Z80-based game, or a future different board, would each add a
-sibling library alongside these — see `../CLAUDE.md` in the parent `i8080/`
-checkout (if you have it) for the full architecture rationale, or just read
-`ArcadeHAL/src/*.h` for the contracts themselves.
+`ArcadeCPU_Z80`/`ArcadeMachine_Pacman` (below) added the project's first
+Z80-based game this way — a sibling library alongside the i8080 axis, not a
+replacement for it. A future different board would add a sibling
+`ArcadeBoard_*` library the same way — see `../CLAUDE.md` in the parent
+`i8080/` checkout (if you have it) for the full architecture rationale, or
+just read `ArcadeHAL/src/*.h` for the contracts themselves.
 
 ## Games
 
@@ -35,6 +37,7 @@ checkout (if you have it) for the full architecture rationale, or just read
 |---|---|---|
 | Space Invaders | [`invaders_fruitjam/`](invaders_fruitjam/README.md) | The original port; sample-based sound only. |
 | Lunar Rescue | [`lrescue_fruitjam/`](lrescue_fruitjam/README.md) | Same "8080bw" board family, plus one genuinely *synthesized* (bit-banged) audio channel — see its README and `DEVNOTES.md` problems #12-17 for what that took. |
+| Pac-Man | [`pacman_fruitjam/`](pacman_fruitjam/README.md) | The project's first **Z80**-based port (`ArcadeCPU_Z80`) and first tile+sprite video hardware (`ArcadeMachine_Pacman`), with fully synthesized Namco WSG sound — built from scratch against the real ROM/PROM dump and verified against MAME's driver source; see its README for citations. |
 
 Each game's own README covers its specific ROM/sample layout, controls, and
 any known quirks. Both share the building steps below.
@@ -94,6 +97,12 @@ are non-obvious and worth reading before touching `ArcadeBoard_FruitJam`,
 
 - Original Space Invaders emulator: [shotto42/invaders](https://github.com/shotto42/invaders)
 - 8080 CPU core: [intarga/i8080e](https://github.com/intarga/i8080e) (MIT)
+- Z80 CPU core: [superzazu/z80](https://github.com/superzazu/z80) (MIT)
+- Pac-Man's memory map, I/O map, tile/sprite/palette decode, and Namco WSG
+  sound register map were all verified against
+  [MAME](https://github.com/mamedev/mame)'s `pacman` driver source, not
+  ported from any existing emulator — see `ArcadeMachine_Pacman/src/`'s own
+  file-header comments for exact citations.
 - Pico SDK port this was ported from: [adafruit/invaders_pico](https://github.com/adafruit/invaders_pico)
 - DVI output: [PicoDVI](https://github.com/Wren6991/PicoDVI) by Luke Wren, via [Adafruit's fork](https://github.com/adafruit/PicoDVI)
 - I2S PIO program: [pico-infoNES](https://github.com/xrp-works/pico-infoNES)

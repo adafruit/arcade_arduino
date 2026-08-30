@@ -52,3 +52,32 @@ Audio is entirely sample-based (10 WAV files, MAME's own `0.wav`-`9.wav`
 naming) — Space Invaders has no synthesized sound channel, unlike Lunar
 Rescue. See `../DEVNOTES.md` problem #7 for the one real audio-related bug
 found on this port (a dropped `__not_in_flash_func` on the mixer callback).
+
+`invaders_run_frame()` interleaves i8080 execution with scanline output
+rather than running a whole frame's emulation and only then rendering — see
+`../DEVNOTES.md` problem #36, and #34 for the red lines the un-interleaved
+shape caused in Lunar Rescue. This game's lighter audio meant it never
+showed the symptom, but it had the same ~200us of margin.
+
+The sketch carries a once-per-second `[invaders] frame ...` heartbeat
+printing `frame`/`work`/`blocked`/`work_max`. `work` (frame time minus time
+blocked in `hal_video_acquire_scanline()`) is the only one that means
+anything on its own — see the comment at the call site. Safe to delete once
+the number is recorded in DEVNOTES.
+
+## Testing without hardware
+
+`../tools/invaders_host/` builds this game's machine library — the real i8080
+core, real ROMs, real port decode, real frame interleaving — into a native
+executable. See `../tools/README.md`.
+
+```sh
+./../tools/invaders_host/build.sh
+../tools/invaders_host/invaders_host --frames 4000 --ppm-every 1000 \
+    --input 100:coin,160:start1,400:shoot,600:left,900:right
+```
+
+It finds `invaders_assets/` (both `rom/` and `samples/`) by searching
+upward, or takes `--assets DIR`. `--digest-every N` hashes the whole
+emulated machine, which is how problem #36's interleave was shown not to
+change emulation.

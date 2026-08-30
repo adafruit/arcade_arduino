@@ -1481,9 +1481,103 @@ built once in `galaga_video_begin_frame()` would cut that.
 `galaga_debug_take_starvation()` (peak per-scanline render time, longest
 mid-frame run of non-blocking acquires) in `galaga_machine.cpp`.
 
+### 36. Space Invaders: the same interleave as #34, applied before the symptom rather than after
+
+`invaders_run_frame()` had the identical structure #34 fixed in Lunar
+Rescue -- the whole frame's i8080 emulation in one uninterrupted loop, then
+`invaders_draw_frame()`, i.e. zero `hal_video_acquire_scanline()` calls
+until every cycle was done. Same board family, same CPU clock, same ~1.8ms
+burst against Core 1's ~2ms of cover (8 scanline buffers ≈ 555us, a hard
+libdvi ceiling, plus ~1.4ms of vblank), so the **same ~200us of margin**.
+
+It has never shown red lines, and the reason is worth stating precisely,
+because it is the whole justification for touching a working game: Space
+Invaders' audio is far lighter. It plays short WAV samples triggered by port
+writes, with no synthesized speaker channel and no cycle-timestamped event
+queue, so its audio ISR does much less per invocation than Lunar Rescue's.
+The margin was always this thin; nothing had reliably exceeded it. Fixed on
+that basis rather than on a reproduction.
+
+**Fix:** identical in shape to #34 and to problem #20's Pac-Man version --
+the cycle budget spread across the 240 scanline submissions, with the
+CPU-stepping body factored into one `step_cpu()` helper so the two call
+sites cannot drift from each other or from the original semantics. `cyc`
+remains an absolute running count and both interrupt thresholds remain
+absolute, so RST1 and RST2 fire at the same emulated instants as before.
+No second sequential path is needed for any rotation: `invaders_video.cpp`'s
+`render_scanline()` reads live VRAM on demand for all four rotations and
+keeps no frame cache. The 32-bit proportional target is deliberate, for
+#34's reason -- an `int64` divide 240 times a frame is a flash-resident
+library call and cost ~700us/frame when Lunar Rescue was first written that
+way.
+
+**Verified by A/B digest, not by eye.** Rendered output is *supposed* to
+change here (each scanline now reflects mid-frame VRAM, as real CRT hardware
+does), so a byte-identical PPM comparison is the wrong instrument and would
+report a failure that is not one -- see #32 for what a proxy measurement has
+already cost on this project. What must not change is the emulation itself.
+`tools/invaders_host/` was built for this: `--digest-every N` hashes the
+whole emulated machine (registers, SP, PC, condition codes, interrupt-enable,
+the full 64K address space including VRAM, external shift register). Over
+**4000 frames with a scripted coin/start/move/shoot session, all 161
+checkpoints matched bit-for-bit** between binaries built from the old and new
+`invaders_machine.cpp`, with only that one file differing.
+
+**The negative control mattered, and the first one failed.** Shifting a
+`shoot` press by one frame changed *nothing* -- not because the digest was
+insensitive but because at that frame the machine was still in attract mode,
+with no game to shoot in. Shifting the **coin** press by one frame diverges
+at that exact checkpoint and stays diverged for all 156 that follow. A
+control that does not diverge proves nothing about a comparison that
+matches; check the control before trusting the result.
+
+**Instrument left in place:** a `work`/`blocked`/`work_max` heartbeat in
+`invaders_fruitjam.ino`, the same one Lunar Rescue and Galaga carry. This
+game had never been measured at all.
+
+**First frame-budget numbers for this game, measured on hardware after the
+interleave:**
+
+```
+[invaders] frame 2940, frame 16661us (work 5275us, blocked 11386us), work_max 5491us
+```
+
+`work` sits at **4766-5296us of the 16660us budget (~32%)**, peaking at
+5491us, with `frame` pinned at 16660-16665us and the counter advancing
+exactly 60 per report — a flat 60fps with no dropped frames across ~2900
+frames. Gameplay on the physical display confirmed good, no tearing. Note `blocked` is the majority of every frame: Core 0 spends two
+thirds of its time waiting on Core 1's DVI pump, which is exactly the shape
+a healthy pipeline has and exactly why `frame` alone tells you nothing
+(problem #25).
+
+Worth knowing for later: this is roughly **twice** Lunar Rescue's 2660-3321us
+under a comparable load, despite the simpler machine. The likely reason is
+that `lrescue_video.cpp`'s tate paths render through a `uint16_t *out = buf +
+TATE_BX` fast path while `invaders_video.cpp` still indexes `buf[TATE_BX +
+col]` per pixel — lever 4 in the port playbook, never applied here. Not worth
+doing at 32% of budget; worth remembering if this game ever needs headroom.
+
+**Serial.begin() is required and was missed the first time.** The heartbeat
+produced nothing at all on the first flash because this sketch had never had
+a `Serial.begin(115200)` — it had no debug output before. It goes before
+`set_sys_clock_khz()`, with lrescue's `delay(1500)`, since before Core 1
+starts the DVI pump is the one safe place to block.
+
+**Not changed, and worth knowing about.** `FRAMERATE` in
+`invaders_machine.cpp` is still 59.541985, the original arcade board's
+vertical refresh. Lunar Rescue's is 60.0368, an empirical measurement of
+what this hardware's DVI output actually achieves (see that constant's long
+doc comment) -- the two games share a board family and a display path, so
+Invaders is presumably running ~0.83% fast for the same reason. It is
+invisible here because nothing in this game times audio against emulated
+cycles, which is what made the mismatch matter in Lunar Rescue. Left alone
+deliberately: it is a gameplay-speed change to a game confirmed working, and
+it is not what this entry set out to fix.
+
 ### The host harness — the highest-leverage thing built during this port
 
-`tools/galaga_host/` (and `tools/pacman_host/`, sharing `tools/host_common/`)
+`tools/galaga_host/` (and `tools/pacman_host/` and `tools/invaders_host/`,
+sharing `tools/host_common/`)
 compiles the **real** `ArcadeMachine_Galaga` sources natively on macOS
 against a stub ArcadeHAL. This is possible only because SAMP's
 architecture rule actually holds: machine libraries talk exclusively
@@ -1550,6 +1644,12 @@ behaviour to the extent its *types* match the device's. See #27.
 `sd_test_fruitjam`, and the full `invaders_fruitjam` game — all five, in
 that order, on an actual Adafruit Fruit Jam with the standard Space Invaders
 ROM/sample set from `invaders_assets/`.
+
+Re-confirmed after problem #36's CPU/scanline interleave: flashed, boots
+clean (assets load, no error screen), runs a flat 60fps with `work` at ~32%
+of budget (see #36 for the numbers), and **confirmed playing correctly on
+the physical display** — no tearing, consistent with Pac-Man and Lunar
+Rescue after the same change.
 
 `lrescue_fruitjam` (the full Lunar Rescue game, two-player, extended
 sessions) and `lrescue_speaker_isolation_test` (a standalone diagnostic

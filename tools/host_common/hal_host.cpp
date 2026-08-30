@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 
 HostSerial Serial;
 
@@ -86,27 +87,58 @@ extern "C" void host_audio_fill(int32_t *out, int count) {
 
 struct hal_file { FILE *fp; };
 
-static const char *g_rom_dir = ".";
-// extern "C": main.cpp declares it that way (it is harness plumbing, not
-// part of the HAL contract, so it gets no header of its own).
+static const char *g_rom_dir     = ".";
+static const char *g_samples_dir = NULL; // NULL -> no /samples/ on this harness
+// extern "C": main.cpp declares them that way (harness plumbing, not part
+// of the HAL contract, so they get no header of their own).
 extern "C" void host_storage_set_rom_dir(const char *dir) { g_rom_dir = dir; }
+// Only the 8080bw games load WAV samples off storage (Pac-Man and Galaga
+// synthesize everything from PROM data baked into their ROM sets), so a
+// harness that never calls this behaves exactly as before.
+extern "C" void host_storage_set_samples_dir(const char *dir) { g_samples_dir = dir; }
+
+// Maps a machine-layer virtual path ("/rom/invaders.h", "/samples/0.wav")
+// onto whichever host directory backs that prefix. Everything that is not
+// under /samples/ resolves against the ROM directory, which preserves the
+// original flatten-to-g_rom_dir behaviour for the two harnesses that
+// predate this.
+static const char *host_dir_for(const char *path) {
+    if (g_samples_dir && !strncmp(path, "/samples/", 9)) return g_samples_dir;
+    return g_rom_dir;
+}
 
 bool hal_storage_mount(void) { return true; }
 void hal_storage_unmount(void) {}
 
+// Real directory listing. ArcadeMachine_Galaga and ArcadeMachine_Pacman load
+// by explicit manifest and never call this, but the two 8080bw machines
+// (Invaders, Lunar Rescue) discover their ROM chips by listing /rom and
+// sorting the names reverse-alphabetically -- that sort IS their address
+// mapping (see invaders_assets.cpp), so a harness for those games cannot
+// work without this.
+//
+// Deliberately does NOT filter dotfiles: the machine layer does its own
+// filtering, for a documented reason (macOS AppleDouble sidecars on FAT32),
+// and hiding them here would hide a regression in that filter.
 bool hal_storage_list_dir(const char *dir, hal_storage_dirent_cb cb, void *ctx) {
-    // ArcadeMachine_Galaga loads by explicit manifest, not by listing, so
-    // this is unused; implemented as a clean failure rather than a lie.
-    (void)dir; (void)cb; (void)ctx;
-    return false;
+    DIR *d = opendir(host_dir_for(dir));
+    if (!d) return false;
+    for (struct dirent *e = readdir(d); e; e = readdir(d)) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        cb(e->d_name, ctx);
+    }
+    closedir(d);
+    return true;
 }
 
-// Machine code asks for "/rom/<name>"; map that onto the host directory.
+// Machine code asks for "/rom/<name>" or "/samples/<name>"; map that onto
+// the corresponding host directory.
 hal_file_t *hal_storage_open(const char *path) {
+    const char *dir   = host_dir_for(path);
     const char *slash = strrchr(path, '/');
     const char *name  = slash ? slash + 1 : path;
     char full[2048];
-    snprintf(full, sizeof(full), "%s/%s", g_rom_dir, name);
+    snprintf(full, sizeof(full), "%s/%s", dir, name);
     FILE *fp = fopen(full, "rb");
     if (!fp) return NULL;
     hal_file_t *f = (hal_file_t *)malloc(sizeof(hal_file_t));

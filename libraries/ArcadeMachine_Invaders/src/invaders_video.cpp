@@ -90,6 +90,10 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
     }
 }
 
+void invaders_video_render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *system) {
+    render_scanline(dvi_y, buf, system);
+}
+
 void invaders_draw_frame(arcade_system *system) {
     // HAL_VIDEO_SCANLINES_PER_FRAME may be less than HAL_VIDEO_HEIGHT (see
     // arcade_hal_video.h) -- `step` maps each submission index back onto

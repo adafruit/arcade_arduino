@@ -6,18 +6,23 @@ ROMs, real port decode, real per-scanline frame interleaving — on your
 development machine.
 
 ```
-host_common/     shared stub ArcadeHAL + <Arduino.h>/<pico.h> shims
+host_common/     shared stub ArcadeHAL + <Arduino.h>/<pico.h>/<pico/stdlib.h> shims
 galaga_host/     ArcadeMachine_Galaga   (3x Z80)
 pacman_host/     ArcadeMachine_Pacman   (1x Z80)
+invaders_host/   ArcadeMachine_Invaders (1x i8080)
 ```
 
 ```sh
-./galaga_host/build.sh && ./galaga_host/galaga_host --frames 5000
-./pacman_host/build.sh && ./pacman_host/pacman_host --frames 5000
+./galaga_host/build.sh   && ./galaga_host/galaga_host     --frames 5000
+./pacman_host/build.sh   && ./pacman_host/pacman_host     --frames 5000
+./invaders_host/build.sh && ./invaders_host/invaders_host --frames 5000
 ```
 
-Each harness searches upward for its own `*_assets/rom/` directory, or
-takes `--rom DIR`.
+Each harness searches upward for its own `*_assets/` directory, or takes an
+explicit path (`--rom DIR` for the two Namco games, `--assets DIR` for
+Invaders, which needs both `rom/` and `samples/` — its machine layer loads
+WAV samples off storage and `invaders_load_assets()` fails outright if none
+load, exactly as it shows the yellow boot-error screen on hardware).
 
 ## Why these exist
 
@@ -39,15 +44,28 @@ functions. So `host_common/hal_host.cpp` is simply a fourth "board"
 alongside `ArcadeBoard_FruitJam`, backed by stdio and plain memory instead
 of DVI/GPIO/SD, and an entire machine compiles and runs unmodified.
 
-The two shims in `host_common/shim/` cover the only places a machine
-library reaches outside that contract: `<Arduino.h>` for DEBUG
-`Serial.print` instrumentation, and `<pico.h>` for `__not_in_flash_func()`
-in the audio files (a deliberate, documented exception — see DEVNOTES.md
-problem #7).
+The shims in `host_common/shim/` cover the only places a machine library
+reaches outside that contract: `<Arduino.h>` for DEBUG `Serial.print`
+instrumentation, and `<pico.h>` for `__not_in_flash_func()` in the audio
+files (a deliberate, documented exception — see DEVNOTES.md problem #7).
+`<pico/stdlib.h>` was added for the Invaders harness and is a CPU-library
+need, not a machine-library one: `ArcadeCPU_i8080`'s `i8080.c` includes it
+for `tight_loop_contents()` in a `cpu_panic()` that is currently
+unreachable (undocumented opcodes and `HLT` are 4-cycle NOPs instead).
+`ArcadeCPU_Z80` needs no equivalent.
 
 **If a new machine library needs more than those shims, that is a signal
 worth heeding**: it means board-specific code has leaked into the machine
 layer, and the fix belongs in the library, not here.
+
+`hal_host.cpp`'s storage stub also implements a real `hal_storage_list_dir()`
+(it used to return `false`, since both Namco games load by explicit
+manifest). The two 8080bw games discover their ROM chips by **listing**
+`/rom` and sorting the names reverse-alphabetically — that sort *is* their
+address mapping, so a harness for those games cannot work without it. It
+deliberately does not filter dotfiles: `invaders_assets.cpp` does its own
+filtering for a documented reason (macOS AppleDouble sidecars on FAT32), and
+hiding them here would hide a regression in that filter.
 
 ## `--seed-cyc`: testing cycle-counter wraparound in seconds
 
@@ -93,6 +111,58 @@ cmp after_12720.ppm before_12720.ppm && echo IDENTICAL
 Every performance change in the Galaga port (interleave quantum, per-frame
 sprite decode, RAM-resident code, render fast path, pen LUTs) was validated
 this way before flashing.
+
+### `--digest-every`: when rendered output is *supposed* to change
+
+Rendered-frame comparison is the wrong instrument for one specific and
+recurring class of change: **interleaving CPU execution with scanline
+submission** (DEVNOTES.md problems #20, #34, #36). That change deliberately
+makes each scanline reflect mid-frame VRAM instead of the frame's final
+state — as real scanline-order CRT hardware does — so the picture legitimately
+differs and a PPM `cmp` reports a failure that is not one.
+
+What must *not* change is which instructions run and when the per-frame
+interrupts fire. `invaders_host --digest-every N` prints an FNV-1a hash of
+the whole emulated machine (registers, SP, PC, condition codes,
+interrupt-enable, the full 64K address space including VRAM, and the
+external shift register), which measures exactly that:
+
+```sh
+# build a second binary from a copy of the library at the previous revision
+MACHINE_SRC=/tmp/old/src OUT=/tmp/invaders_host_old ./invaders_host/build.sh
+
+for b in ./invaders_host/invaders_host /tmp/invaders_host_old; do
+  $b --frames 4000 --digest-every 25 --press-frames 12 \
+     --input 100:coin,160:start1,400:shoot,600:left,900:right,1200:shoot \
+     | tail -n +3 > "$(basename $b).log"
+done
+diff invaders_host.log invaders_host_old.log && echo IDENTICAL
+```
+
+**Run the negative control too.** A digest that never differs proves
+nothing, and this project has already paid once for a comparison among
+answers that were all wrong (#32). Moving the *coin* press by one frame
+diverges the digest at that frame and stays diverged; moving a `shoot` press
+by one frame during attract mode changes nothing at all, because there is no
+game running to shoot in. If your control does not diverge, fix the control
+before trusting the result.
+
+### PPM dumps and the half-width buffer
+
+`HAL_VIDEO_WIDTH` is 640, but only the **first 320** pixels of each scanline
+buffer are ever displayed: the vendored libdvi's 16bpp path encodes
+`h_active_pixels / 2` source pixels across the full line
+(`_dvi_prepare_scanline_16bpp()` in
+`PicoDVI - Adafruit Fork/src/libdvi/dvi.c`), doubling horizontally exactly as
+`dvi_vertical_repeat = 2` doubles vertically. That is why every renderer in
+this project lays its picture out against a 320-wide visible axis — see the
+`TATE_BX`/`LAND_BX` constants, all written as `(320 - N) / 2`.
+
+`invaders_host`'s `--ppm-every` doubles accordingly, so its dumps look like
+the monitor. `pacman_host`/`galaga_host` dump the raw 640-wide buffer, which
+puts the picture in the left half against black — a dump artifact, not a
+rendering fault, and harmless for the byte-identical comparison those
+harnesses use it for.
 
 ## Counting what you actually care about
 

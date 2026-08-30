@@ -65,24 +65,95 @@ bool invaders_load_assets(arcade_system *system, uint16_t *out_error_color) {
     return true;
 }
 
+// One emulated instruction plus the two per-frame interrupt checks --
+// lifted VERBATIM out of invaders_run_frame()'s old single loop when that
+// loop was split to interleave scanline output (see the comment there).
+// Factored into one place precisely so the two call sites cannot drift
+// apart from each other, or from the original semantics: `cyc` is an
+// absolute running cycle count and both thresholds are absolute, so the
+// mid-frame (RST1) and vblank (RST2) interrupts fire at exactly the same
+// emulated instants as before the split.
+static inline void step_cpu(arcade_system *system, int *cyc, int *int_state) {
+    *cyc += exec_opcode(&system->state);
+    if (*cyc >= (int)(CYCLES_PER_FRAME / 2) && *int_state == 0) {
+        *int_state = 1;
+        *cyc += interrupt(&system->state, 1);
+    }
+    if (*cyc >= (int)CYCLES_PER_FRAME && *int_state == 1) {
+        *int_state = 2;
+        *cyc += interrupt(&system->state, 2);
+    }
+}
+
 void invaders_run_frame(arcade_system *system) {
     // `cyc` persists across frames -- any cycles run past this frame's
     // budget are carried forward and subtracted from the next frame's
-    // budget, matching the reference clone's timing exactly.
+    // budget, matching the reference clone's timing exactly. Its arithmetic,
+    // and both interrupts' absolute cycle thresholds, are UNCHANGED by the
+    // interleaving below: `cyc` is still an absolute running count, so
+    // `CYCLES_PER_FRAME / 2` and `CYCLES_PER_FRAME` still fire at exactly
+    // the same emulated instants they always did.
     static int cyc = 0;
     int int_state = 0;
-    while (int_state != 2) {
-        cyc += exec_opcode(&system->state);
-        if (cyc >= (int)(CYCLES_PER_FRAME / 2) && int_state == 0) {
-            int_state = 1;
-            cyc += interrupt(&system->state, 1);
-        }
-        if (cyc >= (int)CYCLES_PER_FRAME && int_state == 1) {
-            int_state = 2;
-            cyc += interrupt(&system->state, 2);
-        }
-    }
-    cyc = (int)CYCLES_PER_FRAME - cyc;
 
-    invaders_draw_frame(system);
+    // INTERLEAVED CPU + scanline output. This function used to run the
+    // whole frame's emulation in one uninterrupted loop and only then call
+    // invaders_draw_frame(), i.e. with ZERO
+    // hal_video_acquire_scanline()/hal_video_submit_scanline() calls until
+    // every cycle was done -- the same shape DEVNOTES.md problem #20 fixed
+    // for Pac-Man and problem #34 fixed for Lunar Rescue. During that burst
+    // Core 1 can only coast on the 8-buffer scanline queue (~555us, a hard
+    // ceiling in the vendored libdvi) plus the vertical blanking interval
+    // (~1.4ms): about 2ms of cover for a ~1.8ms burst, i.e. ~200us of
+    // margin, which a single audio ISR invocation can exceed outright. That
+    // is what produced Lunar Rescue's red lines under heavy audio. This game
+    // has the identical structure and the identical margin; it has never
+    // shown the symptom only because its audio is far lighter (short WAV
+    // samples triggered by port writes, no synthesized speaker channel), so
+    // this is the same fix applied before the symptom rather than after.
+    //
+    // Like Lunar Rescue and unlike Pac-Man, no second sequential path is
+    // needed for any rotation: invaders_video.cpp's render_scanline() reads
+    // live VRAM on demand for all four rotations and keeps no frame cache,
+    // so every rotation can interleave.
+    //
+    // Consequence, and it is the intended one: a scanline now renders from
+    // whatever VRAM state exists at that point in the frame's execution
+    // rather than the frame's final state. That is MORE faithful, not less
+    // -- real scanline-order CRT hardware behaves exactly this way -- and
+    // the same change on Pac-Man and Lunar Rescue produced no visible
+    // tearing.
+    const int cyc_start = cyc;
+    const int cyc_total = (int)CYCLES_PER_FRAME - cyc_start;
+    const uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
+
+    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+        // Exact proportional target (not repeated addition) so the final
+        // slice lands precisely on CYCLES_PER_FRAME however that divides by
+        // the scanline count -- same shape as lrescue_machine.cpp's and
+        // pacman_machine.cpp's interleaved loops.
+        // Deliberately 32-bit: cyc_total is ~33,500 and the scanline count
+        // 240, so the product peaks around 8e6 and cannot overflow int32.
+        // An int64 divide here would be a flash-resident library call run
+        // 240 times per frame -- precisely the cost DEVNOTES.md problem #17
+        // warns about, measured at ~700us/frame when it was written that way
+        // in Lunar Rescue first (problem #34).
+        int target = cyc_start +
+            (cyc_total * (int)(i + 1)) / (int)HAL_VIDEO_SCANLINES_PER_FRAME;
+        while (int_state != 2 && cyc < target) {
+            step_cpu(system, &cyc, &int_state);
+        }
+
+        uint16_t *buf = hal_video_acquire_scanline();
+        invaders_video_render_scanline(i * step, buf, system);
+        hal_video_submit_scanline(buf);
+    }
+
+    // Integer rounding above can leave the last few cycles (and therefore
+    // the vblank interrupt) unrun. Finish them.
+    while (int_state != 2) {
+        step_cpu(system, &cyc, &int_state);
+    }
+
+    cyc = (int)CYCLES_PER_FRAME - cyc;
 }

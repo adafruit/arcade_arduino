@@ -100,7 +100,9 @@ library talks exclusively through ArcadeHAL's 13 functions, so the host stub
 is just a fourth "board".
 
 ```sh
-./tools/galaga_host/build.sh && ./tools/galaga_host/galaga_host --frames 5000
+./tools/galaga_host/build.sh   && ./tools/galaga_host/galaga_host     --frames 5000
+./tools/pacman_host/build.sh   && ./tools/pacman_host/pacman_host     --frames 5000
+./tools/invaders_host/build.sh && ./tools/invaders_host/invaders_host --frames 5000
 ```
 
 A hardware iteration costs minutes; this costs about a second, with unlimited

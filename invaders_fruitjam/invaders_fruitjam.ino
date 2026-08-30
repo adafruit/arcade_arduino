@@ -30,6 +30,15 @@ static bool            g_assets_ok   = false;
 static uint16_t        g_error_color = 0;
 
 void setup() {
+    // Serial for the frame-budget heartbeat in loop(). Same placement as
+    // lrescue_fruitjam.ino: before Core 1 starts the DVI pump is the one
+    // safe place to block briefly, giving a connecting serial monitor time
+    // to attach. Note that this board's USB may be wired to a PIO host
+    // peripheral rather than a device link to a PC (see CLAUDE.md), in which
+    // case nothing shows up on a monitor; harmless either way.
+    Serial.begin(115200);
+    delay(1500);
+
     // PicoDVI's 640x480 mode requires the system clock to equal the TMDS
     // bit clock (252 MHz) -- must happen before any other peripheral init.
     set_sys_clock_khz(252000, true);
@@ -70,7 +79,44 @@ void loop() {
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
 
     invaders_input_update(&g_system, coin, start1, start2, left, right, shoot, rotate, mirror);
+
+    // Frame-budget instrument -- the same one lrescue_fruitjam.ino and
+    // galaga_fruitjam.ino carry. `frame` alone tells you nothing, because
+    // hal_video_acquire_scanline() BLOCKS until Core 1's DVI pump frees a
+    // buffer: the loop measures max(work, DVI frame period) and pins at
+    // ~16.7ms as soon as the work fits. `work` (frame minus the blocked
+    // time, via hal_video_take_blocked_us()) is the real Core 0 cost, and
+    // DEVNOTES.md problem #16 dead-ended for sessions precisely because that
+    // split did not exist yet.
+    //
+    // This game had never been measured at all before the problem #34
+    // interleave was back-applied to it; this is here to give that number
+    // and to confirm the interleave did not add per-frame cost (Lunar
+    // Rescue's first attempt did, via an int64 divide in the 240-iteration
+    // loop -- ~700us/frame). Safe to delete once that is on record in
+    // DEVNOTES.md.
+    static uint32_t frame_count = 0;
+    static uint32_t work_max = 0;
+    uint32_t t0 = micros();
     invaders_run_frame(&g_system);
+    uint32_t frame_us   = micros() - t0;
+    uint32_t blocked_us = hal_video_take_blocked_us();
+    uint32_t work_us    = (frame_us > blocked_us) ? (frame_us - blocked_us) : 0;
+    if (work_us > work_max) work_max = work_us;
+
+    if ((++frame_count % 60u) == 0) {
+        Serial.print("[invaders] frame ");
+        Serial.print(frame_count);
+        Serial.print(", frame ");
+        Serial.print(frame_us);
+        Serial.print("us (work ");
+        Serial.print(work_us);
+        Serial.print("us, blocked ");
+        Serial.print(blocked_us);
+        Serial.print("us), work_max ");
+        Serial.print(work_max);
+        Serial.println("us");
+    }
 }
 
 void setup1() {

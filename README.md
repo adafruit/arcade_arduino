@@ -40,6 +40,7 @@ just read `ArcadeHAL/src/*.h` for the contracts themselves.
 | Pac-Man | [`pacman_fruitjam/`](pacman_fruitjam/README.md) | The project's first **Z80**-based port (`ArcadeCPU_Z80`) and first tile+sprite video hardware (`ArcadeMachine_Pacman`), with fully synthesized Namco WSG sound — built from scratch against the real ROM/PROM dump and verified against MAME's driver source; see its README for citations. |
 | Galaga | [`galaga_fruitjam/`](galaga_fruitjam/README.md) | The project's first **multi-CPU** machine — three Z80s sharing RAM — plus a Namco 06XX/51XX/54XX custom I/O chain and a fourth video layer (the 05XX starfield). Synthesized WSG *and* 54XX explosion audio. |
 | Ms. Pac-Man | [`mspacman_fruitjam/`](mspacman_fruitjam/README.md) | The project's first machine that is another machine **plus a daughterboard**: stock Pac-Man hardware with the aux board's three extra ROMs, an address/data-line **encrypted** program bank, and eight address ranges that flip banks on any access. First **banked** address space and first ROM decode in the project. |
+| Donkey Kong | [`dkong_fruitjam/`](dkong_fruitjam/README.md) | The project's first **Nintendo** board and first **DMA-driven** sprites — the Z80 never writes sprite RAM, an i8257 controller does. Also its first **active-high** inputs, first **NMI** interrupt, and first **resistor-network** palette. **Video and input only: no sound yet** (an 8035 MCU plus a discrete analog network — see its README). |
 
 Each game's own README covers its specific ROM/sample layout, controls, and
 any known quirks. They all share the building steps below.
@@ -105,6 +106,7 @@ is just a fourth "board".
 ./tools/pacman_host/build.sh   && ./tools/pacman_host/pacman_host     --frames 5000
 ./tools/invaders_host/build.sh && ./tools/invaders_host/invaders_host --frames 5000
 ./tools/mspacman_host/build.sh && ./tools/mspacman_host/mspacman_host --frames 5000
+./tools/dkong_host/build.sh    && ./tools/dkong_host/dkong_host       --frames 5000
 ```
 
 A hardware iteration costs minutes; this costs about a second, with unlimited
@@ -157,3 +159,8 @@ are non-obvious and worth reading before touching `ArcadeBoard_FruitJam`,
   against [MAME](https://github.com/mamedev/mame)'s `midw8080` driver
   source, not inferred by analogy — see `ArcadeMachine_LunarRescue/src/`'s
   own file-header comments for the exact formulas and where each came from.
+- Donkey Kong's memory map, i8257 DMA wiring, tile/sprite layouts,
+  per-scanline sprite selection and resistor-network palette were verified
+  against the same project's `dkong` driver (`dkong.cpp`, `dkong_v.cpp`)
+  plus `i8257.cpp` and `resnet.cpp` — see `ArcadeMachine_DKong/src/`'s own
+  file-header comments.

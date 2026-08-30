@@ -530,6 +530,31 @@ reading source and assuming.**
 
 ## Reference: HAL contract quirks specific to this board
 
+**Button table (`board_config_fruitjam.h` + `hal_input_fruitjam.cpp`).** The
+HAL_BTN_* enum and the `pins[]` table are designated-initialiser paired on
+purpose, so they cannot silently drift apart. It has grown once per game
+that needed something new, and each addition is a board fact, not a game
+one -- the board layer says which buttons EXIST, the sketch says what they
+mean:
+
+| Button | GPIO | Added for |
+|---|---|---|
+| ROTATE / MIRROR | 4 / 5 | original port (display meta-controls) |
+| COIN | 45 (A5) | original port |
+| START1 / START2 | 6 / 7 (D6/D7) | original port |
+| LEFT / RIGHT | 8 / 9 (D8/D9) | original port |
+| SHOOT | 10 (D10) | original port |
+| UP / DOWN | 43 / 44 (A3/A4) | Pac-Man's 4-way joystick |
+
+Donkey Kong is worth noting as the game that did NOT extend this table. Its
+cabinet has a jump button, which sounds like new hardware and briefly was
+planned as one (header A2 / GPIO 42), but a 4-way stick plus one action
+button is a shape the board already had: jump is `HAL_BTN_SHOOT`, mapped in
+`dkong_fruitjam.ino`. The machine library still calls the action `jump`,
+because the Machine axis knows game semantics and the sketch owns the
+physical mapping. Extending the board is for buttons that genuinely do not
+exist yet, as UP/DOWN did not before Pac-Man.
+
 - **`N_SCANBUF` is hard-capped at 8** by the vendored PicoDVI fork's
   `dvi_init()` — see problem #9. Do not raise it without first patching
   `ArcadeBoard_FruitJam`'s vendored copy of `libdvi`.
@@ -1739,6 +1764,162 @@ Two things worth keeping from that:
   files in both sets matched, which eliminated a whole branch of the search
   in one step. Worth doing first for any new port, not last.
 
+## Donkey Kong port (`ArcadeMachine_DKong`, `dkong_fruitjam/`)
+
+The project's fifth machine and its first **Nintendo** board. Video and
+input are complete; **sound is not implemented** (see #42). Every hardware
+fact was verified against MAME's `dkong` driver
+(src/mame/nintendo/dkong.cpp, dkong_v.cpp) plus src/devices/machine/i8257.cpp
+and src/emu/video/resnet.cpp, fetched and read.
+
+Frame timing lands on the same 50,688 Z80 cycles per frame Pac-Man has --
+3.072MHz CPU, 6.144MHz pixel clock over 384x264 -- but from a different
+master clock (61.44MHz here, 18.432MHz there), so it is derived in
+`dkong_machine.cpp` rather than borrowed.
+
+### 40. Four firsts in one machine, and each is a different failure mode
+
+- **Sprites arrive by DMA.** The Z80 never writes sprite RAM. It programs an
+  i8257 at 0x7800-0x780F and pulses 0x7D85; the controller then copies the
+  sprite list a byte at a time through a latch (channel 0 reads memory into
+  it, channel 1 writes it back out -- the classic 8257 memory-to-memory
+  pairing). MAME's `p8257_drq_w()` comments "transfer occurs immediately",
+  so this port runs the whole transfer synchronously at the instant of that
+  write. **Failure mode: a perfectly good background tilemap with no Mario,
+  no barrels and no Kong** -- which reads as a renderer bug and is not one.
+- **Inputs are ACTIVE HIGH**, unlike every other game here. A zeroed shadow
+  byte is therefore the correct idle state, the exact inverse of the
+  all-zero-means-everything-pressed trap recorded in `hal_host.cpp` for
+  Galaga. Failure mode: every control jammed on.
+- **The interrupt is an NMI**, not an IM0/IM1 IRQ, gated by a software mask
+  at 0x7D84. Failure mode: fire it unconditionally and the game works until
+  it deliberately masks the NMI off; never fire it and nothing happens after
+  the title screen.
+- **The palette is a resistor network, not a lookup.** Two PROMs feed
+  weighted resistors through darlington and emitter-follower stages into a
+  Sanyo monitor model. `dkong_video.cpp` transcribes `compute_res_net()`
+  specialised to this board's exact configuration rather than porting
+  MAME's general solver, because the general one carries a dozen branches
+  this board never takes and every one would be dead code that still has to
+  be trusted. Two constants in there are worth not fumbling: the
+  **per-channel** darlington uses minout 0.7 where the **global** one uses
+  0.9, and `normalize_range()` at the end is load-bearing -- without it the
+  whole picture is dim in a way that looks like a monitor problem.
+
+Also emulated because the game depends on it: the hardware buffers one
+scanline into a 64x9 line RAM and so draws at most **16 sprites per
+scanline**. `draw_sprites()` is called per scanline via `update_partial()`,
+which suits this project's per-scanline renderer exactly.
+
+`--dma` in `tools/dkong_host/` reports transfers, bytes moved and peak
+sprites per scanline, for the same reason Ms. Pac-Man's `--banks` exists
+(#38): the piece of hardware whose failure looks like success needs a
+counter, not an impression. A healthy run is ~1 transfer/frame of ~384
+bytes.
+
+### 43. A boot failure that could not be seen: two instrumentation gaps, one wasted cycle
+
+Donkey Kong's first flash produced **zero serial output**, which was
+indistinguishable from a hang. Three reflashes went into finding out why,
+and neither cause was in the emulation:
+
+1. **The boot-time diagnostic was lost to an attach race.** USB CDC
+   discards writes while no host is attached, and a host attaching after
+   `arduino-cli upload` returns is already several seconds too late. A print
+   in `setup()` is therefore invisible to any workflow that flashes and
+   *then* opens the port -- which is every scripted workflow here.
+2. **The error path printed nothing at all.** `loop()`'s asset-failure
+   branch draws a solid colour and returns. That is correct behaviour for
+   the screen, but over the wire a failed asset load looked exactly like a
+   crash in `setup()`.
+
+**Fixes, both of which every other sketch in this project could still use:**
+report the failure from inside `loop()` **once per second** rather than once
+at boot, so it is observable whenever someone looks; and have the loader
+name the FILES it could not open, not just report a category.
+
+The second one mattered more than expected. "Required ROM files missing" is
+a category; `could not load: c_5et_g.bin, c_5ct_g.bin, c_5bt_g.bin,
+c_5at_g.bin` is an answer -- all four program ROMs absent means the SD card
+does not have this game's set at all, which is a one-line fix rather than an
+investigation. `dkong_debug_missing_files()` in `dkong_assets.cpp` records
+them, tagging `(short)` for a file that opened but read fewer bytes than the
+manifest expected (a truncated copy, which otherwise presents identically to
+a missing one).
+
+The general lesson is the same one #38 and #40 keep paying for in different
+costumes: **when a failure mode is silent by design, the diagnostic has to
+be designed too.** A boot-error colour is for the person looking at the
+cabinet; it is not instrumentation.
+
+### 41. The rotation default was 180 degrees off, and "it is a portrait cabinet like Pac-Man" is why
+
+`dkong_init()` first set `rotation = 3`, reasoning that Donkey Kong is a
+portrait cabinet like Pac-Man and Ms. Pac-Man, which both default to 3. The
+first rendered frame came out 180 degrees off.
+
+This is DEVNOTES #33 recurring, in the opposite direction: there the
+mistake was copying Space Invaders' default into Pac-Man, here it was
+copying Pac-Man's into Donkey Kong. The lesson #33 records -- that a
+rotation default is a hardware claim about how a real cabinet mounted its
+monitor, not a house style -- was written down and still did not prevent
+the same class of error, because "same manufacturer era, same portrait
+cabinet" felt like evidence. It is not evidence.
+
+**The invariant that does hold** is about the framebuffer rather than the
+game, and is now stated in `dkong_init()` so the next port can check it in
+one step:
+
+> the TOP of the game's picture must land on the RIGHT-hand side of the DVI
+> framebuffer.
+
+Space Invaders reaches that at rotation 1, Pac-Man and Ms. Pac-Man at
+rotation 3, Donkey Kong at rotation 1. Three machines, two values, one
+physical result -- because their native raster orientations differ.
+
+**How to check it in a minute, without hardware:** render the same frame at
+each candidate rotation in the game's host harness and compare where the
+score text lands against a known-good frame from a game already confirmed
+upright. That is what settled it here.
+
+### 42. Sound: what is missing, and why the main CPU does not notice
+
+Donkey Kong has no sound chip. It has an MB8884 (8035-class MCS-48 MCU)
+running its own 2KB program, driving a DAC through port 1 and playing voice
+samples from a second ROM in banked 256-byte pages -- that is the music and
+the walking sound -- **plus** a discrete analog network (LFSR noise, RC
+filters, a custom mixer) for jump, boom and spring. See MAME's
+`dkong2b_audio()` and `DISCRETE_SOUND_START(dkong2b_discrete)`.
+
+Emulating it needs a third CPU axis (`ArcadeCPU_MCS48`) plus an
+approximation of the discrete network, tuned by ear the way Galaga's 54XX
+explosion channel was. That is a port of its own and was deliberately
+deferred.
+
+The main CPU runs fine without it, and the reason is worth recording so
+nobody re-derives it: **every sound path in `dkong_map()` is write-only.**
+The one readable line is IN2 bit 6, the sound CPU's status, which MAME
+wires to the *inverted* bit 4 of the 8035's port-2 latch. With no sound CPU
+that latch is always zero, so the inverted line reads **1** -- the
+idle/ready state -- and that is what `dkong_input.cpp` reports. If this
+game ever hangs waiting on something, that bit is the first suspect.
+
+The two sound ROMs are deliberately not loaded (they would occupy 4KB of
+SRAM holding bytes nothing reads) but ARE listed as required in the sketch
+README, so a card prepared today still works unchanged when the 8035 lands.
+`dkong_audio.cpp` registers a fill callback that writes silence rather than
+skipping `hal_audio_init()`, so the DAC/I2S path is exercised on every boot
+and whoever adds the MCU finds a working pipeline instead of an untested
+one.
+
+One real bug caught while writing that stub, worth repeating because it
+would have been invisible: `hal_audio_fill_cb`'s `count` is the number of
+`int32_t` ENTRIES to write, each packing both channels as
+`(sample << 16) | (uint16_t)sample`. It is **not** a frame count. The first
+version of the silent fill wrote `count * 2 * sizeof(int32_t)` and would
+have overrun every audio buffer by 2x, on a path that produces silence
+either way.
+
 ## Confirmed working on real hardware (as of this writing)
 
 `input_test_fruitjam`, `dvi_test_fruitjam`, `audio_test_fruitjam`,
@@ -1830,3 +2011,30 @@ Pac-Man, problems #18/#23), two-player mode, and the later game stages —
 challenging stage, boss capture and dual fighter are unreached by scripted
 harness input, so it is not confirmed whether any of them drive the 54XX
 differently than the player-explosion path that was tuned.
+
+`dkong_fruitjam` (the full Donkey Kong game) in **portrait (rotation 1)**,
+with the real `dkong_assets/rom/` set -- Z80, the i8257 sprite DMA, the
+tilemap+sprite renderer, the resistor-network palette, and 4-way joystick +
+jump (the existing SHOOT button; this game needed no new board wiring).
+**Sound is not implemented at all** for this game (see #42), so there is
+nothing to verify there yet.
+
+Frame budget, measured on hardware over ~60,000 frames:
+
+```
+[dkong] frame 60060, frame 16664us (work 9340us, blocked 7324us), work_max 10289us
+```
+
+`work` sits at **9340-9747us of the 16660us budget (~56-58%)**, peaking at
+10289us, with `frame` pinned at 16663-16664us -- a flat 60fps with no
+dropped frames. That makes this the **second-heaviest game in the project**,
+behind only Galaga's 14946us peak and well above Ms. Pac-Man/Pac-Man. Two
+reasons, both structural rather than fixable by tuning: the renderer walks
+every sprite for every scanline (the hardware's own per-scanline selection,
+faithfully emulated), and the 8257 moves ~384 bytes a frame through the
+CPU's own read/write path. Comfortable at 60%, but this is the game to
+measure first if anything is ever added to its frame.
+
+**Not yet separately verified:** two-player mode, landscape/180 rotation
+(same known sequential-path limitation as Pac-Man and Ms. Pac-Man --
+problems #18/#19/#20), and the later stages (rivets, elevators, conveyors).

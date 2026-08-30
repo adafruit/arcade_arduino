@@ -136,6 +136,25 @@ and in comments at the relevant code:
   fires one bullet per frame it reads the bit set, so every press fired two
   shots. Now a read-confirmed one-shot pulse — see `galaga_51xx.cpp`.
 
+## Known issue — a red line under extreme load
+
+With an entire enemy formation on screen *and* the player firing or being
+destroyed, a brief red line can appear. Normal play rarely reaches this —
+most players shoot the formation down as it assembles — which is why it went
+unseen through all earlier testing.
+
+It is **not** the frame budget (peak `work` is 14946 µs of 16660, never
+over), not sprite count alone (64 sprites with no red line), not the audio
+buffer size (reproduced at 256, 128 and 64), and not the optimisation level
+(already `-O3`). See `../DEVNOTES.md` problem #35 for the full list of what
+has been ruled out, two instruments that gave misleading answers, and the
+best remaining hypothesis — Galaga's audio ISR, the only one in this project
+never instrumented, and the heaviest per sample.
+
+The instruments needed for that work are already in place: `work`/`blocked`
+and `work_MAX`/`sprites_max` in the sketch, and
+`galaga_debug_take_starvation()` in `galaga_machine.cpp`.
+
 Most of that was diagnosed on the host harness
 (`../tools/galaga_host`), which runs this exact machine code natively in
 under a second per test rather than minutes per hardware flash. Use it

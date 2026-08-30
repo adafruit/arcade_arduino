@@ -2,6 +2,21 @@
 // and an honest statement of which parts are derived vs approximated.
 #include "galaga_54xx.h"
 
+// NO printf/Serial ANYWHERE IN THIS FILE. Two were left here from bringing
+// the channel up on the host harness -- one in galaga_54xx_write() (every
+// command byte from the CPU) and one in galaga_54xx_take_trigger(), which
+// runs INSIDE the audio ISR, inside hal_audio_enter_critical(). On the host
+// they cost nothing; on the device they block on USB CDC, and they fire
+// exactly when a sound is triggered. That produced red lines on real
+// hardware precisely when the player ship exploded -- the one moment this
+// channel is active -- and it was invisible to the frame-budget heartbeat,
+// because ISR time lands in whatever Core 0 was doing and gets charged to
+// `blocked` rather than `work`.
+//
+// Same class of bug DEVNOTES.md problem #16 already removed once from
+// Lunar Rescue's hot paths. Diagnostics for this file belong in the host
+// harness (tools/galaga_host), which can print freely.
+
 // Build with -DGALAGA_54XX_TRACE (host harness only) to log the command
 // stream and envelope triggers -- that is how Galaga was confirmed to use
 // only sound types A and B.
@@ -70,7 +85,6 @@ void galaga_54xx_init(galaga_54xx_state *s) {
 void galaga_54xx_write(galaga_54xx_state *s, uint8_t data) {
     s->last_command = data;
 #ifdef GALAGA_54XX_TRACE
-    printf("[54xx] cmd %02X (pending args %u)\n", data, (unsigned)s->pending_args);
 #endif
 
     // Mid parameter run: consume the byte rather than mistaking it for a
@@ -199,7 +213,6 @@ void galaga_54xx_take_trigger(galaga_54xx_state *s) {
     for (int v = 0; v < 2; v++)
         if (t & (1u << v)) { s->voice[v].env = ENV_ONE; s->voice[v].hold_ctr = 0; }
 #ifdef GALAGA_54XX_TRACE
-    printf("[54xx] TRIGGER type %u -> env armed\n", (unsigned)t);
 #endif
 }
 

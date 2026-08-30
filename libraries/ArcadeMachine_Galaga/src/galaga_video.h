@@ -81,6 +81,10 @@ void galaga_video_render_scanline(const galaga_system *system, uint32_t dvi_y, u
 // color, bypassing game VRAM entirely.
 void galaga_draw_error_frame(uint16_t color);
 
+// On-screen sprite count from the last decoded frame -- see the sketch's
+// frame-budget heartbeat.
+uint32_t galaga_video_debug_sprite_count(void);
+
 #ifdef __cplusplus
 }
 #endif

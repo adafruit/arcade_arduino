@@ -23,6 +23,15 @@ extern "C" {
 // system->screen_red.
 void lrescue_draw_frame(arcade_system *system);
 
+// Renders ONE physical scanline (dvi_y) into `buf`. Exposed so
+// lrescue_run_frame() can drive the scanline pump itself, interleaved with
+// CPU execution, instead of running a whole frame's emulation and only then
+// calling lrescue_draw_frame() -- see DEVNOTES.md problem #34 for why that
+// old shape caused red lines, and problem #20 for the same fix in Pac-Man.
+// lrescue_draw_frame() above remains for callers that genuinely want a
+// standalone frame with no CPU to interleave (the sketch's self-test).
+void lrescue_video_render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *system);
+
 // Boot-time asset-load error screen: floods every scanline with a solid
 // color, bypassing game VRAM entirely.
 void lrescue_draw_error_frame(uint16_t color);

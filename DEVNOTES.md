@@ -1320,91 +1320,166 @@ this project. A default copied between ports because the two looked similar
 is exactly the kind of thing that survives until someone puts both games on
 one screen.
 
-### 34. Lunar Rescue's residual red lines: problem #20's un-interleaved CPU burst, never back-applied to the i8080 games (DIAGNOSED, FIX NOT YET APPLIED)
+### 34. Lunar Rescue's red lines: problem #20's un-interleaved CPU burst, never back-applied to the i8080 games
 
 This closes out problem #16, which chased the same symptom at length and
-accepted it as an unexplained cosmetic artifact. It is explained now, and
-#16's conclusion — that the cause was below what Core 0 could see — was
-wrong in an interesting way: the cause *was* on Core 0, but invisible to the
-instrumentation available at the time.
+accepted it as unexplained. #16's conclusion — that the cause sat below what
+Core 0 could see — was wrong in an interesting way: the cause *was* on
+Core 0, but invisible to the instrumentation that existed then.
 
 **Symptom:** red lines during Lunar Rescue's bonus arpeggio (an astronaut
 returned to the ship) and, less predictably, whenever several sounds overlap.
 
-**What made this measurable at last.** #16 explicitly dead-ended on being
-unable to see real Core 0 headroom, because `hal_video_acquire_scanline()`
-blocks and a whole-frame timing therefore reads `max(work, DVI period)` no
-matter what. `hal_video_take_blocked_us()` (added later, during the Galaga
-port — see problem #25) splits that apart. Adding the same heartbeat
-`galaga_fruitjam.ino` carries to `lrescue_fruitjam.ino` gave the number
-nobody had ever had for this game:
+**What made it measurable.** #16 explicitly dead-ended on being unable to see
+real Core 0 headroom, because `hal_video_acquire_scanline()` blocks and a
+whole-frame timing therefore reads `max(work, DVI period)` regardless.
+`hal_video_take_blocked_us()` (added later, problem #25) splits that apart.
+Adding the same heartbeat `galaga_fruitjam.ino` carries gave the number
+nobody had ever had for this game: **`work` 2660-3321us of a 16660us
+budget** — 20% even at 4 active sample channels.
 
-```
-work 2660-3321us of a 16660us budget   (max 20%, even at 4 active channels)
-isr worst-single: 166us @ 0 channels -> 232us @ 4 channels
-```
+So it was never a throughput problem, which killed a plausible hypothesis on
+the spot: the i8080 core and all of `ArcadeMachine_LunarRescue` are still
+flash-resident, never having had problem #25's `.time_critical` treatment,
+and XIP thrashing under ISR preemption *looked* like a strong fit for a
+fault that scales with audio activity. It would have cost ~40KB of RAM and
+fixed nothing.
 
-**So it was never a throughput problem** — Core 0 had 13ms spare. That also
-killed a plausible-sounding hypothesis on the spot: the i8080 core and all
-of `ArcadeMachine_LunarRescue` are still entirely flash-resident, never
-having received problem #25's `.time_critical` treatment, and XIP-cache
-thrashing under ISR preemption *looked* like a strong fit for a fault that
-scales with audio activity. It would have cost ~40KB of RAM and fixed
-nothing. Measuring first was worth it.
+**Cause.** `lrescue_run_frame()` ran the whole frame's emulation (~1.8ms) in
+one loop with **zero** acquire/submit calls, then called
+`lrescue_draw_frame()` — verbatim problem #20, never back-applied to the two
+i8080 games. During that burst Core 1 coasts only on the 8-buffer scanline
+queue (~555us, a hard libdvi ceiling) plus vertical blanking (~1.4ms): about
+2ms of cover for a 1.8ms burst, i.e. **~200us of margin**, which a 232us
+audio ISR exceeds outright.
 
-**The actual cause.** `lrescue_run_frame()` runs the entire frame's i8080
-emulation — about 1.8ms — in one `while (int_state != 2)` loop with **zero**
-`hal_video_acquire_scanline()`/`hal_video_submit_scanline()` calls, and only
-then calls `lrescue_draw_frame()`. That is verbatim problem #20, the Pac-Man
-bug, which was fixed there with `run_frame_interleaved()` and never
-back-applied to the two i8080 games (both predate the finding).
+**Fix.** Spread the cycle budget across the 240 scanline submissions.
+Simpler here than in Pac-Man: this renderer reads live VRAM on demand for
+every rotation and keeps no frame cache, so no second sequential path is
+needed. The CPU-stepping body was factored into one `step_cpu()` helper so
+the two call sites cannot drift from each other or from the original
+semantics. **Red lines gone, confirmed on hardware.**
 
-Why it is marginal rather than constantly broken, which is what makes it
-correlate with audio: during that burst Core 1 coasts on the 8-buffer
-scanline queue (~555us; the depth is a hard ceiling in the vendored libdvi)
-plus the vertical blanking interval (~1.4ms at 640x480). That is ~2ms of
-cover for a 1.8ms burst — roughly **200us of margin**. A 232us audio ISR
-landing inside the burst exceeds it outright.
+Verified unchanged where it mattered: `cyc` carry and both interrupts still
+use absolute thresholds, so they fire at identical emulated instants; the
+producer/consumer clock drift measured 575 cyc/sec after versus 622 before,
+i.e. the pre-existing `FRAMERATE` mismatch, not something introduced.
 
-**Interim mitigation already applied:** `BUFFER_SAMPLES` in
-`hal_audio_fruitjam.cpp` halved, 256 -> 128. This is a pure
-interrupt-*latency* change: the same samples get mixed either way, just in
-twice as many half-length calls, so total ISR CPU is unchanged (measured:
-13196us/173 calls after vs 12968us/86 before). Worst-single dropped 166->81us
-at 0 channels and 202->91us at 2. On hardware that made the red lines
-markedly **better but not gone**, exactly as the ~200us margin predicts.
-Note this treats the trigger, not the cause.
+**A self-inflicted detour worth recording:** the first version put an
+`int64` division inside the 240-iteration loop. On Cortex-M33 that is a
+flash-resident library call — 240 per frame, precisely problem #17's trap —
+and cost ~700us of per-frame work. The values peak near 8e6, so 32-bit
+arithmetic is provably safe; switching recovered it.
 
-**The fix intended next, and its consequences.** Spread the frame's cycle
-budget across the 240 scanline submissions, as `pacman_machine.cpp`'s
-`run_frame_interleaved()` does. Lunar Rescue is actually *simpler* than
-Pac-Man here: its `render_scanline()` already reads live VRAM on demand for
-every rotation and it has no `frame_cache`, so it needs none of Pac-Man's
-two-path split. Expected to take the margin from ~200us to milliseconds.
+**An unresolved episode, recorded because it is unresolved.** After the
+interleave landed, the bonus arpeggio sounded crunchy and glitching on
+hardware. Investigation established, by measurement:
 
-Consequences to watch for, since this changes a confirmed-working game:
+- the speaker-event queue was healthy — `dropped=0`, `drain_hits=0`,
+  peak 183 of 256 — so neither overflow nor consumer-drain limiting;
+- Lunar Rescue's speaker channel is synthesized from cycle-timestamped
+  events, and the audio ISR fills a whole buffer at once, advancing the
+  consumer clock by `BUFFER_SAMPLES * cycles-per-sample` instantly, so the
+  emulated CPU must stay that far ahead or the tail of each buffer resolves
+  against emulated time the CPU has not reached;
+- that producer lead does **not** start at a designed value. It starts near
+  zero at boot and accumulates at ~581 cyc/sec, purely from the `FRAMERATE`
+  drift above. Measured directly (`min_lead` in the heartbeat).
 
-- **Scanlines will render from mid-frame CPU state rather than the frame's
-  final state.** This is more hardware-accurate, not less — a real
-  scanline-order CRT behaves exactly this way — and Pac-Man showed no
-  visible tearing after the same change. But it is a behavioural change,
-  and mid-screen artifacts are what to look for if something is wrong.
-- **The two interrupts must still fire at the same cycle counts**
-  (mid-frame at `CYCLES_PER_FRAME/2`, vblank at `CYCLES_PER_FRAME`). Getting
-  this wrong would show up as gameplay logic misbehaving, not as a visual
-  glitch.
-- **The `cyc` carry-across-frames must be preserved.** It is what keeps the
-  emulated clock aligned with real time, and problem #15 is a full account
-  of how easy it is to get that clock domain wrong here. Symptoms of
-  breaking it would be audio pitch or timing drift rather than anything
-  visual.
-- If the interleave works, `BUFFER_SAMPLES` can probably go back to 256,
-  since the ISR was only ever the trigger. Worth re-testing rather than
-  assuming.
+That last point looks like an explanation and is not one: at 64 samples the
+lead requirement is ~5805 cycles, reached in about 10 seconds, while
+reaching the arpeggio takes 30-60 seconds of play. **The vulnerable window
+and the symptom cannot overlap.** Tested on hardware — playing immediately
+after boot produced no crunch.
 
-**`invaders_fruitjam` has the identical structure** and should get the same
-treatment. It has never shown the symptom, its audio being far lighter, but
-the same ~200us margin is there.
+The crunching stopped, but the only functional change between the two tests
+was `BUFFER_SAMPLES` 128 -> 64, and it was already reported clean *before*
+that change; everything else in between was instrumentation. **So the cause
+is not established.** If it returns, the three instruments added here
+(`work`/`blocked`, the `spk:` queue counters, and `min_lead`) are the place
+to start, and this note is a warning against accepting the lead-accumulation
+story without evidence that the timing windows actually line up.
+
+**Kept regardless:** `BUFFER_SAMPLES` is now 64. That is justified
+independently of the audio question — it took the ISR's worst-case block on
+Core 0 from 232us (256 samples) to 81us (128) to **40-52us (64)**, a 5x
+improvement on the exact quantity that caused the red lines, at no cost in
+total ISR CPU (the same samples are mixed, in more and shorter calls).
+
+**`invaders_fruitjam` has the identical burst structure** and should get the
+same interleave. It has never shown the symptom, its audio being far
+lighter, but the same ~200us margin is there.
+
+### 35. Galaga: a red line under extreme sprite+audio load — OPEN, with two instruments that lied along the way
+
+**Symptom:** a brief red line in Galaga when an entire enemy formation is on
+screen and the player fires and/or is destroyed. Requires a workload normal
+play rarely reaches — most players shoot the formation down as it assembles,
+which is why this went unseen through all previous Galaga testing.
+
+**Status: OPEN.** Documented here so the next attempt starts from evidence.
+
+**What has been ruled out, by measurement:**
+
+- **Not the frame budget.** Peak per-frame `work` (frame time minus blocked
+  time, see problem #25) reached 14946us of 16660 -- 90%, never over --
+  while red lines still appeared.
+- **Not sprite count alone.** `sprites_max` reached 64, the hardware
+  maximum, in windows with no red line.
+- **Not the audio buffer size.** Reproduced with `BUFFER_SAMPLES` at 256,
+  128 and 64. (That constant was churned through all three chasing this and
+  is back at 256 -- see the note in `hal_audio_fruitjam.cpp`, and #34 for
+  why the interim mitigation should have been removed sooner.)
+- **Not `-O2`.** This sketch already pins `Optimize3`.
+- **Partly, but not wholly, debug output.** Two `printf` calls were found
+  left in `galaga_54xx.cpp` -- one in `galaga_54xx_write()` (every command
+  byte) and one in `galaga_54xx_take_trigger()`, which runs **inside the
+  audio ISR**. Both fire exactly when a sound is triggered. On the host they
+  cost nothing; on device they block on USB CDC, worst when a serial monitor
+  is actually draining the port. Genuinely a bug, now removed, same class
+  problem #16 already removed once from Lunar Rescue -- but removing them
+  did not eliminate the red line.
+
+**Two instruments that gave misleading answers.** Both are worth knowing
+about before trusting them again:
+
+1. **Per-frame `work` cannot see a within-frame deficit.** Galaga's
+   per-scanline render cost is very uneven -- a row crossing a full
+   formation costs several times an empty one -- while Core 1 consumes one
+   buffer every 69.4us regardless. Core 0 loses ground over a band of
+   expensive rows and repays it over cheap ones; the frame total comes out
+   at 90% and looks healthy while the queue drained in the middle.
+2. **Counting non-blocking scanline acquires needs to exclude frame start.**
+   The idea is sound -- when Core 0 is ahead, `hal_video_acquire_scanline()`
+   blocks; when it falls behind, free buffers are plentiful and it stops
+   blocking, so a run of non-blocking acquires means losing ground. But
+   Core 1 releases all 8 buffers when it finishes a frame, so the opening
+   acquires of every frame legitimately do not block. The first version read
+   a constant `noblock_run = 12` on every frame at every load level, which
+   looked like permanent starvation and was just the pipeline refilling. It
+   now skips the first 16 scanlines.
+
+**Best remaining hypothesis, and the next thing to measure.** Peak
+single-scanline render time is 100-104us against a 69.4us DVI period -- and
+it stays at ~102us even in windows with only 3 sprites, so it is *not*
+sprite-driven. That points at an audio ISR landing inside a render. **Galaga's
+audio ISR is the one in this project that has never been instrumented**, and
+it does more per sample than any other: three WSG voices plus the 54XX's two
+layered noise voices, each with three filter bands and a sample-and-hold.
+Instrument it the way `lrescue_audio_debug_isr_stats()` does, then check
+whether several hits inside one frame can drain the 8-buffer queue (555us).
+
+If it is the ISR, the levers are its per-sample cost (the 54XX synthesis is
+the expensive part and is entirely this project's own code, so it can be
+made cheaper) rather than anything structural. If it is not, the next
+candidate is peak per-row sprite cost: `render_native_row()` walks all
+`g_sprite_count` sprites for each of 224 rows, and per-row candidate lists
+built once in `galaga_video_begin_frame()` would cut that.
+
+**Instruments left in place for that work:** `work`/`blocked` and
+`work_MAX`/`sprites_max` in `galaga_fruitjam.ino`, and
+`galaga_debug_take_starvation()` (peak per-scanline render time, longest
+mid-frame run of non-blocking acquires) in `galaga_machine.cpp`.
 
 ### The host harness — the highest-leverage thing built during this port
 
@@ -1481,12 +1556,11 @@ sessions) and `lrescue_speaker_isolation_test` (a standalone diagnostic
 sketch exercising the real production speaker-synthesis mixer against a
 synthetic event pattern, no CPU emulator or SD card involved), with the
 real Lunar Rescue ROM/sample set — audio confirmed clean end-to-end;
-red lines reduced but **not eliminated** under peak simultaneous-sound load.
-Problem #16 records the long investigation that accepted this as
-unexplained; **problem #34 identifies the actual cause** (an un-interleaved
-CPU burst, the same bug problem #20 fixed for Pac-Man) and states the fix
-intended next. As of this commit that fix is NOT applied -- only the interim
-audio-buffer mitigation is.
+red lines **fixed** -- problem #16 records the long investigation that
+accepted them as unexplained, and problem #34 identifies the actual cause
+(an un-interleaved CPU burst, the same bug problem #20 fixed for Pac-Man)
+and the interleave that resolved it. Confirmed on hardware: no red lines,
+audio clean.
 
 `pacman_fruitjam` (the full Pac-Man game) in **portrait (rotation 3, see
 problem #33)** — video

@@ -396,6 +396,12 @@ typedef struct {
 static galaga_sprite_ent g_sprites[64];
 static int               g_sprite_count = 0;
 
+// Number of sprites the last galaga_video_begin_frame() decoded as
+// on-screen. Exposed for the sketch's frame-budget heartbeat: sprite count
+// is the main content-driven driver of render cost, so a `work` spike is
+// only interpretable next to it.
+uint32_t galaga_video_debug_sprite_count(void) { return (uint32_t)g_sprite_count; }
+
 GALAGA_VID_RAMFUNC void galaga_video_begin_frame(const galaga_system *sys) {
     star_begin_frame(sys);
 

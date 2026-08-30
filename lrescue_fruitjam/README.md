@@ -104,7 +104,29 @@ full game and triggering bonus1 in play. If you touch the ring buffer,
 the decimation logic, or anything around `lrescue_audio_now_cycles()`,
 flash this first.
 
-## Known limitation — diagnosed, fix not yet applied
+## Red lines — fixed
+
+Red lines during peak simultaneous sound (most reliably the bonus arpeggio
+when an astronaut is returned) are **fixed**, confirmed on hardware.
+
+The cause was that `lrescue_run_frame()` ran the whole frame's i8080
+emulation (~1.8 ms) in one uninterrupted loop before submitting a single
+scanline — the same bug `../DEVNOTES.md` problem #20 fixed for Pac-Man,
+never back-applied to the i8080 games. Core 1 could only coast on the
+8-buffer scanline queue plus the vertical blanking interval, about 2 ms,
+leaving roughly 200 µs of margin, which a 232 µs audio interrupt exceeded.
+CPU execution is now interleaved with the scanline pump, which takes that
+margin to milliseconds.
+
+Problem #16's long investigation couldn't pin this down because Core 0's
+real per-frame work is only ~3.3 ms of the 16.7 ms budget — nothing ever
+looked overloaded. It was never a shortage of CPU time; it was one long
+uninterruptible block at the wrong instant. See `../DEVNOTES.md` problem
+#34, which also records an episode of crunchy audio after the fix whose
+cause was **not** established, and the three instruments now in place if it
+ever returns.
+
+## Historical note
 
 Red horizontal lines still occur during peak simultaneous sound activity —
 most reliably on the bonus arpeggio when an astronaut is returned to the

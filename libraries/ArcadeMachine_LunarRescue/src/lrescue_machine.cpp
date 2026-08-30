@@ -6,6 +6,7 @@
 // mid-screen / RST2 vblank interrupt pair are hardware facts of that shared
 // board, not something Space Invaders' ROM does specially).
 #include <string.h>
+#include <stdint.h>
 #include "lrescue_machine.h"
 #include "lrescue_ports.h"
 #include "lrescue_video.h"
@@ -101,6 +102,36 @@ bool lrescue_load_assets(arcade_system *system, uint16_t *out_error_color) {
     return true;
 }
 
+// One emulated instruction plus the two per-frame interrupt checks --
+// lifted VERBATIM out of lrescue_run_frame()'s old single loop when that
+// loop was split to interleave scanline output (see the comment there).
+// Factored into one place precisely so the two call sites cannot drift
+// apart from each other, or from the original semantics: `cyc` is an
+// absolute running cycle count and both thresholds are absolute, so the
+// mid-frame and vblank interrupts fire at exactly the same emulated
+// instants as before the split.
+// Worst (smallest) producer lead seen since the last report -- see the
+// sampling site in lrescue_run_frame().
+static int64_t g_min_lead = INT64_MAX;
+
+static inline void step_cpu(arcade_system *system, int *cyc, int *int_state) {
+    int delta = exec_opcode(&system->state);
+    *cyc += delta;
+    system->total_cycles += (uint64_t)delta; // see lrescue_machine.h's doc comment on this field
+    if (*cyc >= (int)(CYCLES_PER_FRAME / 2) && *int_state == 0) {
+        *int_state = 1;
+        int idelta = interrupt(&system->state, 1);
+        *cyc += idelta;
+        system->total_cycles += (uint64_t)idelta;
+    }
+    if (*cyc >= (int)CYCLES_PER_FRAME && *int_state == 1) {
+        *int_state = 2;
+        int idelta = interrupt(&system->state, 2);
+        *cyc += idelta;
+        system->total_cycles += (uint64_t)idelta;
+    }
+}
+
 void lrescue_run_frame(arcade_system *system) {
     // DEBUG (kept minimal -- see below): earlier versions of this function
     // printed a new Serial.printf() line every time either half of a frame
@@ -122,29 +153,94 @@ void lrescue_run_frame(arcade_system *system) {
     // `cyc` persists across frames -- any cycles run past this frame's
     // budget are carried forward and subtracted from the next frame's
     // budget, matching ArcadeMachine_Invaders' timing exactly (same shared
-    // board clock).
+    // board clock). Its arithmetic, and both interrupts' absolute cycle
+    // thresholds, are UNCHANGED by the interleaving below: `cyc` is still
+    // an absolute running count, so `CYCLES_PER_FRAME / 2` and
+    // `CYCLES_PER_FRAME` still fire at exactly the same emulated instants
+    // they always did. That matters -- this counter is what keeps the
+    // emulated clock aligned with real time for the audio path, and
+    // DEVNOTES.md problem #15 is a full account of how easy that clock
+    // domain is to get wrong here.
     static int cyc = 0;
     int int_state = 0;
-    while (int_state != 2) {
-        int delta = exec_opcode(&system->state);
-        cyc += delta;
-        system->total_cycles += (uint64_t)delta; // see lrescue_machine.h's doc comment on this field
-        if (cyc >= (int)(CYCLES_PER_FRAME / 2) && int_state == 0) {
-            int_state = 1;
-            int idelta = interrupt(&system->state, 1);
-            cyc += idelta;
-            system->total_cycles += (uint64_t)idelta;
-        }
-        if (cyc >= (int)CYCLES_PER_FRAME && int_state == 1) {
-            int_state = 2;
-            int idelta = interrupt(&system->state, 2);
-            cyc += idelta;
-            system->total_cycles += (uint64_t)idelta;
-        }
-    }
-    cyc = (int)CYCLES_PER_FRAME - cyc;
 
-    lrescue_draw_frame(system);
+    // INTERLEAVED CPU + scanline output. This function used to run the
+    // whole frame's emulation (~1.8ms) in one uninterrupted loop and only
+    // then call lrescue_draw_frame(), i.e. with ZERO
+    // hal_video_acquire_scanline()/hal_video_submit_scanline() calls until
+    // every cycle was done -- the same bug DEVNOTES.md problem #20 fixed
+    // for Pac-Man, never back-applied to the two i8080 games. During that
+    // burst Core 1 could only coast on the 8-buffer scanline queue (~555us,
+    // a hard ceiling in the vendored libdvi) plus the vertical blanking
+    // interval (~1.4ms), i.e. ~2ms of cover for a 1.8ms burst -- about
+    // 200us of margin, which a single 232us audio ISR exceeds outright.
+    // That is the whole explanation for this game's long-standing red
+    // lines under heavy audio (DEVNOTES.md problem #34, which closes out
+    // the investigation in problem #16).
+    //
+    // Unlike Pac-Man, no second sequential path is needed for any rotation:
+    // this renderer reads live VRAM on demand for every rotation and keeps
+    // no frame cache, so every rotation can interleave.
+    //
+    // Consequence, and it is the intended one: a scanline now renders from
+    // whatever VRAM state exists at that point in the frame's execution
+    // rather than the frame's final state. That is MORE faithful, not less
+    // -- real scanline-order CRT hardware behaves exactly this way -- and
+    // the same change on Pac-Man produced no visible tearing.
+    const int cyc_start = cyc;
+    const int cyc_total = (int)CYCLES_PER_FRAME - cyc_start;
+    const uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
+    uint32_t render_sum = 0, block_sum = 0;
+
+    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+        // Exact proportional target (not repeated addition) so the final
+        // slice lands precisely on CYCLES_PER_FRAME however that divides by
+        // the scanline count -- same shape as pacman_machine.cpp's
+        // run_frame_interleaved().
+        // Deliberately 32-bit: cyc_total is ~33000 and the scanline count
+        // 240, so the product peaks around 8e6 and cannot overflow int32.
+        // An int64 divide here would be a flash-resident library call run
+        // 240 times per frame -- precisely the cost DEVNOTES.md problem #17
+        // warns about.
+        int target = cyc_start +
+            (cyc_total * (int)(i + 1)) / (int)HAL_VIDEO_SCANLINES_PER_FRAME;
+        while (int_state != 2 && cyc < target) {
+            step_cpu(system, &cyc, &int_state);
+        }
+
+        // Minimum producer lead, sampled every scanline rather than once
+        // per second at frame end. The once-per-second sample cannot see
+        // the worst instant, and the worst instant is what matters: the
+        // audio ISR fills a whole buffer at once, advancing target_cycle
+        // by BUFFER_SAMPLES * cycles-per-sample (~11600 cycles at 128
+        // samples) in one go. If the lead ever drops below that span, the
+        // tail of that buffer resolves speaker levels against emulated
+        // time the CPU has not reached yet -- the level sticks and then
+        // catches up abruptly, which is what the crunchy arpeggio is.
+        {
+            int64_t lead = (int64_t)system->total_cycles -
+                           (int64_t)lrescue_audio_debug_target_cycle();
+            if (lead < g_min_lead) g_min_lead = lead;
+        }
+
+        uint32_t a = micros();
+        uint16_t *buf = hal_video_acquire_scanline();
+        uint32_t b = micros();
+        lrescue_video_render_scanline(i * step, buf, system);
+        uint32_t c = micros();
+        hal_video_submit_scanline(buf);
+        uint32_t d = micros();
+        block_sum  += (b - a) + (d - c);
+        render_sum += (c - b);
+    }
+
+    // Integer rounding above can leave the last few cycles (and therefore
+    // the vblank interrupt) unrun. Finish them.
+    while (int_state != 2) {
+        step_cpu(system, &cyc, &int_state);
+    }
+
+    cyc = (int)CYCLES_PER_FRAME - cyc;
 
     // DEBUG: once-per-second frame-budget + producer/consumer clock-
     // agreement report. worst_frame_us (this function's total time,
@@ -171,8 +267,9 @@ void lrescue_run_frame(arcade_system *system) {
     static uint32_t worst_frame_us = 0, worst_render_us = 0, worst_block_us = 0, report_frame_count = 0;
     uint32_t frame_us = micros() - t0;
     if (frame_us > worst_frame_us) worst_frame_us = frame_us;
-    uint32_t render_us = 0, block_us = 0;
-    lrescue_video_debug_last_frame_us(&render_us, &block_us);
+    // Accumulated by the interleaved loop above, rather than read back from
+    // lrescue_draw_frame() (which this function no longer calls).
+    uint32_t render_us = render_sum, block_us = block_sum;
     if (render_us > worst_render_us) worst_render_us = render_us;
     if (block_us  > worst_block_us)  worst_block_us  = block_us;
     if (++report_frame_count >= 60) {
@@ -199,15 +296,34 @@ void lrescue_run_frame(arcade_system *system) {
         uint32_t isr_us = 0, max_isr_call_us = 0, max_channels = 0, isr_calls = 0;
         lrescue_audio_debug_isr_stats(&isr_us, &max_isr_call_us, &max_channels, &isr_calls);
 
+        // Speaker-event producer/consumer health. Added when interleaving
+        // the CPU with the scanline pump (problem #34) fixed the red lines
+        // but made the bonus arpeggio sound crunchy: the interleave changed
+        // WHEN within a frame speaker events are produced relative to when
+        // the audio ISR consumes them, and this queue's behaviour is
+        // sensitive to exactly that. `dropped` non-zero means the queue
+        // overflowed; `drain_hits` non-zero means the consumer could not
+        // keep up within one call's DRAIN_LIMIT; `peak` is how deep the
+        // queue ever got. All three were invisible before this line.
+        uint32_t sp_pushed = 0, sp_dropped = 0, sp_peak = 0, sp_drain_hits = 0;
+        lrescue_audio_speaker_debug_stats(&sp_pushed, &sp_dropped, &sp_peak, &sp_drain_hits);
+
         Serial.printf("lrescue_run_frame: worst frame %lu us (render %lu / block %lu, budget ~16660us) | "
                       "isr: %lu us total / %lu calls (avg %lu / worst-single %lu us) / max %lu active channels | "
-                      "total_cycles=%llu target_cycle=%llu gap=%+lld cyc (%+.1fms)\n",
+                      "total_cycles=%llu target_cycle=%llu gap=%+lld cyc (%+.1fms) | "
+                      "spk: pushed=%lu dropped=%lu peak=%lu drain_hits=%lu min_lead=%s%lld cyc (%.1fms)\n",
                       (unsigned long)worst_frame_us, (unsigned long)worst_render_us, (unsigned long)worst_block_us,
                       (unsigned long)isr_us, (unsigned long)isr_calls,
                       (unsigned long)(isr_calls ? isr_us / isr_calls : 0), (unsigned long)max_isr_call_us,
                       (unsigned long)max_channels,
                       (unsigned long long)system->total_cycles, (unsigned long long)target,
-                      (long long)gap, (double)gap / 1996.8);
+                      (long long)gap, (double)gap / 1996.8,
+                      (unsigned long)sp_pushed, (unsigned long)sp_dropped,
+                      (unsigned long)sp_peak, (unsigned long)sp_drain_hits,
+                      g_min_lead == INT64_MAX ? "UNSAMPLED:" : "",
+                      (long long)(g_min_lead == INT64_MAX ? 0 : g_min_lead),
+                      (double)(g_min_lead == INT64_MAX ? 0 : g_min_lead) / 1996.8);
+        g_min_lead = INT64_MAX;
         worst_frame_us = 0;
         worst_render_us = 0;
         worst_block_us = 0;

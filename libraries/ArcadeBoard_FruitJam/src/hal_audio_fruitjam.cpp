@@ -22,30 +22,29 @@
 // pio1, SM 0: DVI uses pio0 (see hal_video_fruitjam.cpp), so no conflict.
 #define AUDIO_PIO      pio1
 #define AUDIO_SM       0
-// Sized for INTERRUPT LATENCY, not for throughput. This ISR runs on Core 0
-// and preempts the scanline render/submit pump, and PicoDVI's valid-scanline
-// queue is hard-capped at 8 buffers (see hal_video_fruitjam.cpp -- the
-// vendored libdvi hardcodes it). With dvi_vertical_repeat 2 that is only
-// ~555us of slack in the whole pipeline, so one long ISR at a bad moment
-// drains it and Core 1 emits its red "no valid scanline" fallback line.
+// 256 samples, double-buffered. This was briefly lowered to 128 and then 64
+// while chasing Lunar Rescue's red lines (DEVNOTES.md problem #34), on the
+// reasoning that this ISR runs on Core 0, preempts the scanline render/submit
+// pump, and PicoDVI's valid-scanline queue is a hard-capped 8 buffers -- only
+// ~555us of slack -- so a long ISR can starve it. That reasoning was sound
+// and the measurements were real: worst-single ISR cost fell 232us -> 81us ->
+// 40-52us.
 //
-// Measured on Lunar Rescue, the most audio-heavy game here: the mixer's
-// worst-single call ran 166us at 0 active sample channels and 232us at 4 --
-// i.e. up to 42% of the queue's entire depth held off in a single
-// invocation, while Core 0's actual per-frame work was only ~3.3ms of the
-// 16.7ms budget. The problem was never a shortage of CPU time; it was one
-// long uninterruptible block at the wrong instant. Halving this halves the
-// blocking window at essentially no cost in total CPU (the same samples get
-// mixed either way, just in twice as many, half-length calls), and the
-// double-buffer refill deadline stays enormous by comparison: 128 samples
-// at ~22kHz is ~5.8ms to do ~90us of work.
+// It has been PUT BACK, and the reason is worth keeping. Shortening this was
+// only ever an interim mitigation for Lunar Rescue, whose real fault was a
+// ~1.8ms un-interleaved CPU burst leaving ~200us of margin. Interleaving that
+// (problem #34) took the margin to milliseconds, at which point a 232us ISR
+// is irrelevant -- but the mitigation's COST did not go away with its
+// purpose. More, shorter calls pay the same fixed per-invocation overhead
+// more often: measured on Galaga, the game with the least headroom, 64
+// samples cost +400us mean / +660us peak per frame versus 256, and a red line
+// appeared on hardware during heavy sprite activity with the player firing.
 //
-// DEVNOTES.md problem #16 chased this residual red line at length and
-// dead-ended, having tested capping channel CONCURRENCY -- which only
-// shortens the ISR when many channels happen to be active. Buffer size
-// shortens every call, and was not tried. If red lines persist, try 64
-// before looking elsewhere; if they vanish, this was it.
-#define BUFFER_SAMPLES 128
+// **General lesson: when a real fix lands, remove the interim mitigation and
+// re-measure. A workaround's cost outlives its purpose silently.** If a long
+// ISR ever looks implicated again, measure `work` in that sketch's heartbeat
+// first -- the frame budget is where this actually shows up.
+#define BUFFER_SAMPLES 256
 
 // ---------------------------------------------------------------------------
 // Codec I2C helpers

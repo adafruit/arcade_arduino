@@ -294,6 +294,11 @@ bool galaga_load_assets(galaga_system *system, uint16_t *out_error_color);
 // after galaga_input_update() has updated `system` for the frame.
 void galaga_run_frame(galaga_system *system);
 
+// Frame-budget diagnostics: peak single-scanline render time, and the
+// longest run of consecutive non-blocking scanline acquires (>= the DVI
+// queue depth of 8 means Core 1 starved -- a red line). Reading clears both.
+void galaga_debug_take_starvation(uint32_t *render_max_us, uint32_t *noblock_run_max);
+
 #ifdef __cplusplus
 }
 #endif

@@ -174,6 +174,10 @@ void lrescue_video_debug_last_frame_us(uint32_t *render_us, uint32_t *block_us) 
     if (block_us)  *block_us  = g_last_block_us;
 }
 
+void lrescue_video_render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *system) {
+    render_scanline(dvi_y, buf, system);
+}
+
 void lrescue_draw_frame(arcade_system *system) {
     // hal_video_acquire_scanline()/hal_video_submit_scanline() deliberately
     // BLOCK to pace Core 0 against Core 1's real DVI rate -- that's this

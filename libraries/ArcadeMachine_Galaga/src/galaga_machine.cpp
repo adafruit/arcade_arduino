@@ -194,6 +194,11 @@ static void fire_interrupts(galaga_system *sys) {
 // the whole frame's final VRAM state before galaga_draw_frame()'s
 // frame_cache can render even one scanline, so there's no benefit to
 // interleaving CPU execution with scanline submission here.
+// Peak per-scanline render cost and the longest run of non-blocking scanline
+// acquires -- the starvation detector described at the loop that feeds it.
+#include <Arduino.h> // micros() for that detector
+static uint32_t g_render_max_us = 0, g_noblock_run = 0, g_noblock_run_max = 0;
+
 static void run_frame_sequential(galaga_system *system) {
     uint32_t start_main = system->cpu_main.cyc;
     uint32_t start_sub  = system->cpu_sub.cyc;
@@ -231,12 +236,52 @@ GALAGA_M_RAMFUNC static void run_frame_interleaved(galaga_system *system) {
         interleave_to_target(system, start_main, start_sub, start_sub2, target_delta,
                               nmi2_mark_a, nmi2_mark_b);
 
+        // Starvation detector. A red line means Core 1's VALID scanline
+        // queue emptied. That cannot be seen directly from here, but its
+        // mirror image can: when Core 0 is keeping up it runs AHEAD and
+        // hal_video_acquire_scanline() blocks waiting for Core 1 to free a
+        // buffer. When Core 0 falls behind, free buffers are plentiful and
+        // acquire stops blocking. So a RUN of consecutive non-blocking
+        // acquires is Core 0 losing ground, and a run approaching the
+        // queue depth (8, a hard libdvi ceiling) means the valid queue has
+        // drained and a red line is imminent.
+        //
+        // This exists because per-frame `work` was misleading here: it
+        // peaked at 14946us of 16660 -- 90%, never over -- while red lines
+        // still appeared. Frame totals cannot see a deficit that builds
+        // over a band of expensive scanlines (a full enemy formation) and
+        // is repaid over cheap ones.
+        uint32_t acq0 = micros();
         uint16_t *buf = hal_video_acquire_scanline();
+        uint32_t acq_us = micros() - acq0;
+        // Skip the first 16 scanlines. Core 1 releases all 8 buffers when it
+        // finishes a frame, so Core 0's opening acquires legitimately do not
+        // block -- that is the pipeline refilling, not starving. The first
+        // version of this counter did not exclude them and therefore read a
+        // constant 12 on every frame regardless of load, which looked like a
+        // permanent starvation and was nothing of the kind.
+        if (i < 16u) {
+            g_noblock_run = 0;
+        } else if (acq_us < 2u) {
+            if (++g_noblock_run > g_noblock_run_max) g_noblock_run_max = g_noblock_run;
+        } else {
+            g_noblock_run = 0;
+        }
+        uint32_t r0 = micros();
         galaga_video_render_scanline(system, i * step, buf);
+        uint32_t r_us = micros() - r0;
+        if (r_us > g_render_max_us) g_render_max_us = r_us;
         hal_video_submit_scanline(buf);
     }
 
     fire_interrupts(system);
+}
+
+void galaga_debug_take_starvation(uint32_t *render_max_us, uint32_t *noblock_run_max) {
+    if (render_max_us)   *render_max_us   = g_render_max_us;
+    if (noblock_run_max) *noblock_run_max = g_noblock_run_max;
+    g_render_max_us = 0;
+    g_noblock_run_max = 0;
 }
 
 void galaga_init(galaga_system *system) {

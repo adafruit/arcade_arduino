@@ -10,12 +10,14 @@ host_common/     shared stub ArcadeHAL + <Arduino.h>/<pico.h>/<pico/stdlib.h> sh
 galaga_host/     ArcadeMachine_Galaga   (3x Z80)
 pacman_host/     ArcadeMachine_Pacman   (1x Z80)
 invaders_host/   ArcadeMachine_Invaders (1x i8080)
+mspacman_host/   ArcadeMachine_MsPacman (1x Z80, banked/encrypted ROM)
 ```
 
 ```sh
 ./galaga_host/build.sh   && ./galaga_host/galaga_host     --frames 5000
 ./pacman_host/build.sh   && ./pacman_host/pacman_host     --frames 5000
 ./invaders_host/build.sh && ./invaders_host/invaders_host --frames 5000
+./mspacman_host/build.sh && ./mspacman_host/mspacman_host --frames 5000
 ```
 
 Each harness searches upward for its own `*_assets/` directory, or takes an
@@ -146,6 +148,43 @@ diverges the digest at that frame and stays diverged; moving a `shoot` press
 by one frame during attract mode changes nothing at all, because there is no
 game running to shoot in. If your control does not diverge, fix the control
 before trusting the result.
+
+### `--banks`: measuring hardware you cannot see
+
+Ms. Pac-Man's aux daughterboard — the encrypted second ROM bank and the
+eight address ranges that switch to it — is the entire difference between
+that machine and Pac-Man, and it is nearly invisible from outside. If the
+decode is wrong or the bank switching never fires, the likely outcome is not
+a crash: it is **plain Pac-Man**, or Pac-Man with forty 8-byte holes punched
+through it. Both look like a working port to anyone glancing at an attract
+screen.
+
+`mspacman_host --banks` turns that into a number. It counts bank switches,
+attributes each to the trigger range that caused it, and reports how many
+frames ended in each bank:
+
+```sh
+./mspacman_host/mspacman_host --frames 1600 --banks \
+    --input 600:coin,800:start1 --press-frames 10
+```
+```
+  total switches: 4   current bank: 1 (decrypted/Ms.)
+  frames ending in: decrypted=1102  plain=498
+    0038 dis : 2
+    3ff8 ENA : 2
+```
+
+Zero switches means the aux board is inert and you are running Pac-Man. The
+harness keeps its **own** copy of the trigger-range list rather than sharing
+one with `mspacman_ports.cpp`, on purpose: if the two ever disagree,
+switches get attributed to `other` and say so loudly, which beats a harness
+that agrees with the bug it is supposed to find.
+
+It costs nothing in the library. ArcadeCPU_Z80 wires memory access through
+per-instance function pointers on the `z80` struct, so the harness captures
+those after init and substitutes counting wrappers that delegate to the
+originals — the same trick `galaga_host --watch` uses, and the reason
+neither needs a single `#ifdef` in machine code.
 
 ### PPM dumps and the half-width buffer
 

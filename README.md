@@ -39,6 +39,7 @@ just read `ArcadeHAL/src/*.h` for the contracts themselves.
 | Lunar Rescue | [`lrescue_fruitjam/`](lrescue_fruitjam/README.md) | Same "8080bw" board family, plus one genuinely *synthesized* (bit-banged) audio channel — see its README and `DEVNOTES.md` problems #12-17 for what that took. |
 | Pac-Man | [`pacman_fruitjam/`](pacman_fruitjam/README.md) | The project's first **Z80**-based port (`ArcadeCPU_Z80`) and first tile+sprite video hardware (`ArcadeMachine_Pacman`), with fully synthesized Namco WSG sound — built from scratch against the real ROM/PROM dump and verified against MAME's driver source; see its README for citations. |
 | Galaga | [`galaga_fruitjam/`](galaga_fruitjam/README.md) | The project's first **multi-CPU** machine — three Z80s sharing RAM — plus a Namco 06XX/51XX/54XX custom I/O chain and a fourth video layer (the 05XX starfield). Synthesized WSG *and* 54XX explosion audio. |
+| Ms. Pac-Man | [`mspacman_fruitjam/`](mspacman_fruitjam/README.md) | The project's first machine that is another machine **plus a daughterboard**: stock Pac-Man hardware with the aux board's three extra ROMs, an address/data-line **encrypted** program bank, and eight address ranges that flip banks on any access. First **banked** address space and first ROM decode in the project. |
 
 Each game's own README covers its specific ROM/sample layout, controls, and
 any known quirks. They all share the building steps below.
@@ -103,6 +104,7 @@ is just a fourth "board".
 ./tools/galaga_host/build.sh   && ./tools/galaga_host/galaga_host     --frames 5000
 ./tools/pacman_host/build.sh   && ./tools/pacman_host/pacman_host     --frames 5000
 ./tools/invaders_host/build.sh && ./tools/invaders_host/invaders_host --frames 5000
+./tools/mspacman_host/build.sh && ./tools/mspacman_host/mspacman_host --frames 5000
 ```
 
 A hardware iteration costs minutes; this costs about a second, with unlimited
@@ -130,6 +132,10 @@ are non-obvious and worth reading before touching `ArcadeBoard_FruitJam`,
   [MAME](https://github.com/mamedev/mame)'s `pacman` driver source, not
   ported from any existing emulator — see `ArcadeMachine_Pacman/src/`'s own
   file-header comments for exact citations.
+- Ms. Pac-Man's aux-board ROM decode (the address/data-line bitswaps and the
+  40 eight-byte patches) and its banked address map were transcribed from
+  the same driver's `init_mspacman()`, `mspacman_install_patches()` and
+  `mspacman_map()` — see `ArcadeMachine_MsPacman/src/`'s file headers.
 - Galaga's memory map, 3-CPU interrupt/NMI scheme, tile/sprite/palette
   decode and discrete audio component values were verified against
   [MAME](https://github.com/mamedev/mame)'s `galaga` driver, its

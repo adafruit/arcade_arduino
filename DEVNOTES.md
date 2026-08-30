@@ -709,6 +709,12 @@ project's supported orientation for this game and landscape/180 remain a
 known, deprioritized limitation (a real Pac-Man cabinet is always
 portrait).
 
+Independently confirmed on a second machine much later: Ms. Pac-Man, which
+shares this renderer, shows red lines in exactly and only its two
+sequential-path rotations (landscape and 180) while tate and CW stay clean.
+The split falling precisely along the interleaved/sequential line is good
+evidence this diagnosis is the right one.
+
 One consequence worth knowing about, called out in
 `run_frame_interleaved()`'s own comment: since each scanline now renders
 from whatever VRAM/sprite state exists at that exact point in the frame's
@@ -1638,6 +1644,101 @@ behaviour to the extent its *types* match the device's. See #27.
   entirely an `ffmpeg transpose=2` where tate output needs `transpose=1`.
   A 180° error looks exactly like a flip bug.
 
+## Ms. Pac-Man port (`ArcadeMachine_MsPacman`, `mspacman_fruitjam/`)
+
+The project's first machine that is another machine **plus a
+daughterboard**, and therefore its first banked address space and its first
+encrypted ROM. Ms. Pac-Man is a stock Pac-Man PCB with the "Ms. Pac-Man
+auxiliary board" piggybacked onto the Z80 socket: three extra ROMs
+(u5/u6/u7) and an address decoder. Video, audio, input, PROMs, tile/sprite
+decode and frame timing are bit-identical to Pac-Man's.
+
+Structured as a **sibling library** of `ArcadeMachine_Pacman` rather than a
+variant flag inside it, matching how `ArcadeMachine_Invaders` and
+`ArcadeMachine_LunarRescue` are separate despite sharing the 8080bw board.
+Every file except `mspacman_assets.cpp` and `mspacman_ports.cpp` is a copy
+of its Pac-Man counterpart, and each says so in its header. The trade-off is
+stated plainly so nobody has to rediscover it: a future fix to the shared
+renderer has to land twice.
+
+### 37. Everything Ms. Pac-Man-specific, and where it hides
+
+All of it verified against MAME's `pacman` driver (src/mame/pacman/pacman.cpp),
+fetched and read rather than recalled:
+
+- **The decode** (`init_mspacman()`, `mspacman_install_patches()`). u5/u6/u7
+  are scrambled on both address and data lines. A second, decrypted 48K bank
+  is built from them at load time, then **forty 8-byte patches** are copied
+  from the decrypted u5 image over the Pac-Man code beneath it. That is what
+  turns Pac-Man's program into Ms. Pac-Man's.
+- **The banked bus** (`mspacman_map()`). Two banks; eight address ranges
+  flip the selection **on any access, read or write**, with a read still
+  returning a byte — from the bank being switched *to*, not the one that was
+  live on entry. Seven ranges select plain Pac-Man and exactly one
+  (0x3FF8-0x3FFF) selects the decrypted bank. That asymmetry is real.
+- **RAM/IO mirroring with a 0xA000 mask**, which plain Pac-Man's port
+  deliberately skips. Not optional here: ROM occupies 0x8000-0xBFFF, so the
+  high quarter of the address space is where this game's RAM lives from the
+  CPU's point of view.
+- **Mainlatch bit 6 is wired** on this board (`coin_lockout_global_w`) and
+  is not on Pac-Man's. Latched for fidelity, not acted on — there are no
+  physical coin mechs.
+- **Different DIP defaults**, from `INPUT_PORTS_START( mspacman )`, which is
+  its own port definition and not a `PORT_INCLUDE` of pacman's.
+- **The graphics ROMs are named `5e`/`5f`**, not `pacman.5e`/`pacman.5f`,
+  and are genuinely different dumps with different CRCs.
+
+**Two ordering constraints that are silent when broken.** Both are called
+out at their call sites because neither produces a compiler error or a boot
+failure:
+
+1. The decode reads the RAW u5/u6/u7 images out of the plain bank at
+   0x8000/0x9000/0xB000, and the LAST step of `init_mspacman()` overwrites
+   that same region with mirrors of the Pac-Man ROMs. Doing those two steps
+   in the other order decodes bytes that are already gone.
+2. `install_patches()` reads and writes the SAME (decrypted) bank. That is
+   the natural thing to get wrong when splitting MAME's single 0x20000
+   region into two banks.
+
+### 38. The failure mode here is a working-looking game, so the instrument had to be a counter
+
+Ms. Pac-Man's aux board is nearly invisible from outside. If the decode is
+wrong or the banking never fires, the machine does not crash — it runs
+**plain Pac-Man**, or Pac-Man with forty 8-byte holes in it. On a
+screenshot of an attract screen that reads as a successful port.
+
+This is DEVNOTES #32's lesson in a new costume: a symptom that could
+plausibly be authentic still deserves a measurement. So
+`tools/mspacman_host/` was built with `--banks`, which counts bank switches
+and attributes each to its trigger range. A healthy run shows switches
+through both `3ff8 ENA` and at least one `dis` range; zero means the aux
+board is inert. The harness keeps its own copy of the trigger list, so a
+disagreement with `mspacman_ports.cpp` reports switches at unattributed
+addresses and says so, rather than quietly agreeing with a bug.
+
+It needs no `#ifdef` in the library: ArcadeCPU_Z80 wires memory access
+through per-instance function pointers, so the harness swaps in counting
+wrappers after init — the same approach `galaga_host --watch` uses.
+
+### 39. A control that looked like a bug, and cost about twenty minutes
+
+The first PPM dumped from the new harness was a garbled grid of glyphs, and
+the obvious reading was "the decode is wrong". It was not: dumping the SAME
+frame from `pacman_host`, whose game is confirmed working on hardware,
+produced *equally* garbled output. Both were simply attract/self-test
+screens rendered faithfully. Coining up and starting a game
+(`--input 600:coin,800:start1`) produced a correct Pac-Man maze from one
+harness and a correct **Ms. Pac-Man** maze from the other.
+
+Two things worth keeping from that:
+
+- **Run the control before believing the symptom.** The cost of dumping the
+  same frame from the known-good sibling harness was one command.
+- **Verify the ROM set against MAME's published CRC32s** rather than
+  assuming a directory of plausibly-named files is the right dump. All 13
+  files in both sets matched, which eliminated a whole branch of the search
+  in one step. Worth doing first for any new port, not last.
+
 ## Confirmed working on real hardware (as of this writing)
 
 `input_test_fruitjam`, `dvi_test_fruitjam`, `audio_test_fruitjam`,
@@ -1650,6 +1751,44 @@ clean (assets load, no error screen), runs a flat 60fps with `work` at ~32%
 of budget (see #36 for the numbers), and **confirmed playing correctly on
 the physical display** — no tearing, consistent with Pac-Man and Lunar
 Rescue after the same change.
+
+`mspacman_fruitjam` (the full Ms. Pac-Man game) in **portrait (rotation 3)**,
+with the real `mspacman_assets/rom/` set -- the aux board's encrypted bank,
+its 40 patches and its address-triggered bank switching all working on real
+hardware, at 63% RAM.
+
+**This port reached working hardware with zero hardware debug cycles** --
+the first one in the project to do so. Everything was found and fixed in
+`tools/mspacman_host/` first: it booted, played, scored, took joystick
+input, survived the 32-bit cycle-counter wraparound and rendered the correct
+Ms. Pac-Man maze before the sketch was flashed even once. Two things made
+that possible and are worth repeating on the next port: verifying the ROM
+set against MAME's published CRC32s **first** rather than last (see #39),
+and instrumenting the one piece of hardware whose failure mode looks like
+success (`--banks`, see #38). The host harness has now paid for itself on
+every game it has been built for.
+
+**Confirmed in play, each separately:** two-player mode, Namco WSG audio,
+the intermissions/cut scenes, the later mazes, and 180-degree rotation
+(which displays correctly).
+
+**Known issue, deliberately not addressed:** both yoko orientations
+(landscape, rotation 0, and 180, rotation 2) show red lines. This is not a
+new fault -- it is exactly what problems #18/#19/#20 predict, now confirmed
+on a second game. Those two rotations are the ones that still use
+`run_frame_sequential()`: their renderer structurally needs the frame's
+FINAL VRAM state before it can emit even one physical scanline (a column
+slice reads every native row at once), so the frame's whole Z80 budget runs
+in one uninterrupted burst before the first `hal_video_acquire_scanline()`
+call, and Core 1 starves. Tate and CW interleave and stay clean.
+
+That the split falls exactly along the interleaved/sequential line, on a
+machine ported months after the diagnosis, is decent independent evidence
+that #20's account is right. Fixing it needs the redesign #20 names --
+double-buffering, rendering frame N+1 while displaying frame N -- and
+portrait is the supported orientation for this cabinet, so it stays
+deprioritised.
+
 
 `lrescue_fruitjam` (the full Lunar Rescue game, two-player, extended
 sessions) and `lrescue_speaker_isolation_test` (a standalone diagnostic

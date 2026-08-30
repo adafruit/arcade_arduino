@@ -87,7 +87,9 @@ typedef struct {
     // pacman_ports.cpp returns a fixed 0xFF for it, no state needed here.
     uint8_t in0, in1, dsw1;
 
-    uint8_t rotation; // 0=landscape 1=90 CCW (tate, default) 2=180 3=90 CW
+    uint8_t rotation; // 0=landscape 1=90 CCW 2=180 3=90 CW (portrait, the
+                      // default -- see pacman_init() for why it is 3 and
+                      // not 1, which is what Invaders/LunarRescue use)
     bool    mirror_x; // horizontal mirror toggle (Pepper's Ghost cabinets)
 } pacman_system;
 

@@ -246,7 +246,46 @@ void loop() {
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
 
     lrescue_input_update(&g_system, coin, start1, start2, left, right, shot, rotate, mirror);
+
+    // Frame-budget instrument -- the same one galaga_fruitjam.ino carries,
+    // and the reason it is here: DEVNOTES.md problem #16 investigated this
+    // game's residual red lines without any way to measure real Core 0
+    // headroom, and explicitly dead-ended on that. `frame` alone cannot
+    // tell you anything, because hal_video_acquire_scanline() BLOCKS until
+    // Core 1's DVI pump frees a buffer -- the loop measures
+    // max(work, DVI frame period) and pins at ~16.7ms as soon as the work
+    // fits. `work` (frame minus the blocked time, via
+    // hal_video_take_blocked_us()) is the real cost.
+    //
+    // What to look for: red lines are PicoDVI's queue-starvation fallback
+    // (#16). If `work` spikes toward or past 16670us during the bonus
+    // arpeggio, Core 0 is genuinely overrunning and the cause is on this
+    // side. If `work` stays comfortably under budget while red lines still
+    // appear, that confirms #16's remaining hypothesis (DMA/bus contention
+    // or a Core-1-side hiccup) and no amount of Core 0 optimisation will
+    // help.
+    static uint32_t frame_count = 0;
+    static uint32_t work_max = 0;
+    uint32_t t0 = micros();
     lrescue_run_frame(&g_system);
+    uint32_t frame_us   = micros() - t0;
+    uint32_t blocked_us = hal_video_take_blocked_us();
+    uint32_t work_us    = (frame_us > blocked_us) ? (frame_us - blocked_us) : 0;
+    if (work_us > work_max) work_max = work_us;
+
+    if ((++frame_count % 60u) == 0) {
+        Serial.print("[lrescue] frame ");
+        Serial.print(frame_count);
+        Serial.print(", frame ");
+        Serial.print(frame_us);
+        Serial.print("us (work ");
+        Serial.print(work_us);
+        Serial.print("us, blocked ");
+        Serial.print(blocked_us);
+        Serial.print("us), work_max ");
+        Serial.print(work_max);
+        Serial.println("us");
+    }
 }
 
 void setup1() {

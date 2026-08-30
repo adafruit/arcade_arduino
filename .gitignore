@@ -1,7 +1,7 @@
 # Third-party Arduino libraries -- installed via arduino-cli, not our code.
 # Reinstall with:
 #   arduino-cli lib install "PicoDVI - Adafruit Fork" "Adafruit TLV320 I2S" \
-#     "SdFat - Adafruit Fork" "Bounce2"
+#     "SdFat - Adafruit Fork"
 # (their own dependencies -- Adafruit GFX Library, Adafruit BusIO, etc. --
 # are pulled in automatically)
 libraries/Adafruit_*/
@@ -20,3 +20,8 @@ build/
 
 # macOS
 .DS_Store
+
+# Host test harness build output (tools/*_host/) -- native binaries and
+# macOS debug bundles. `build/` above already covers their object dirs.
+tools/*_host/*_host
+tools/*_host/*.dSYM/

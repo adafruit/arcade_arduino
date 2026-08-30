@@ -33,7 +33,16 @@ struct z80 {
   void (*port_out)(z80*, uint8_t, uint8_t);
   void* userdata;
 
-  unsigned long cyc; // cycle count (t-states)
+  // Divergence from upstream superzazu/z80 (the third; see z80.c's
+  // Z80_RAMFUNC and this file's extern "C" guard): pinned to an explicit
+  // 32-bit type rather than `unsigned long`. `unsigned long` is 32-bit on
+  // the arm-none-eabi target but 64-bit on a typical host, which made the
+  // host test harness (arcade_arduino/tools/galaga_host) structurally
+  // unable to reproduce cycle-counter wraparound -- and a real freeze bug
+  // hid in exactly that gap for a while (see galaga_machine.cpp's
+  // interleave_to_target()). Machines deriving timing from this counter
+  // should use uint32_t to match.
+  uint32_t cyc; // cycle count (t-states)
 
   uint16_t pc, sp, ix, iy; // special purpose registers
   uint16_t mem_ptr; // "wz" register

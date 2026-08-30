@@ -62,8 +62,14 @@ The button-to-action wiring lives in `pacman_fruitjam.ino` itself, not in
 `ArcadeMachine_Pacman`, per the framework's usual rule.
 
 Pac-Man's native hardware framebuffer (288x224, before the cabinet's
-physical 90-degree mount) defaults to **tate** rotation, same as Invaders
-— the physical cabinet is a portrait monitor.
+physical 90-degree mount) is displayed **portrait**, defaulting to rotation
+**3** (90° CW). That is deliberately *not* the value Space Invaders and
+Lunar Rescue default to (1): the Namco and 8080bw cabinets mounted their
+monitors in opposite orientations, so the two families need opposite
+software rotations to come up upright on one physical screen. All four
+games in this project are therefore upright together on the same monitor
+without touching the ROTATE button — see `pacman_machine.cpp`'s comment at
+the default for the reasoning.
 
 ## Notes
 

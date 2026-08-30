@@ -27,10 +27,23 @@ void pacman_init(pacman_system *system) {
     z80_init(&system->cpu);
     pacman_ports_wire(system);
 
-    system->rotation = 1; // 90 deg CCW (tate) default -- Pac-Man's raw
-                           // 288x224 hardware framebuffer is mounted
-                           // portrait in the cabinet, same role tate plays
-                           // for Invaders' 256x224 (see pacman_video.cpp).
+    // Screen rotation 3 (90 deg CW), NOT 1. This is the value that puts the
+    // game upright on the same physically-rotated monitor that
+    // ArcadeMachine_Invaders and ArcadeMachine_LunarRescue are upright on
+    // at their own default of 1 -- confirmed on real hardware, where this
+    // machine at rotation 1 came up 180 degrees off and needed two presses
+    // of the ROTATE button to correct.
+    //
+    // The two families genuinely differ, so this is not a bug in either
+    // renderer: rotation 1 and rotation 3 are implemented identically in
+    // both (case 3 reverses both axes relative to case 1, i.e. an exact
+    // 180). What differs is which end of each game's NATIVE raster is the
+    // top of the player's screen, because the real cabinets mounted their
+    // monitors in opposite orientations -- the 8080bw games one way, the
+    // Namco games the other. An earlier version of this line copied
+    // Invaders' default with the comment "same convention as Invaders",
+    // which was precisely the wrong assumption.
+    system->rotation = 3;
     system->mirror_x = false;
 
     hal_video_init();
@@ -70,8 +83,13 @@ bool pacman_load_assets(pacman_system *system, uint16_t *out_error_color) {
 //
 // `system->cpu.cyc` (the z80 core's own field) is a running total of
 // every T-state executed since boot -- it is NEVER reset, by this file or
-// by the core itself, and it's an `unsigned long` (32 bits on this
-// platform). At Pac-Man's real 3.072MHz clock, real-time-paced play
+// by the core itself, and it's a `uint32_t` (pinned to that exact width
+// in z80.h -- it used to be `unsigned long`, which is 32-bit on this
+// target but 64-bit on a typical host, and that difference once hid a
+// wraparound bug from a host-side test harness; see z80.h's comment).
+// The locals below are uint32_t to MATCH it: mixing a 32-bit counter with
+// a 64-bit local silently defeats the wraparound-safe subtraction this
+// whole comment is about. At Pac-Man's real 3.072MHz clock, real-time-paced play
 // advances it by ~3,072,000 per second, so it wraps roughly every 23
 // minutes (2^32 / 3,072,000 ~= 1398s) -- see DEVNOTES.md problem #22 for
 // the real symptom this caused (a permanent hang after leaving the
@@ -84,8 +102,8 @@ bool pacman_load_assets(pacman_system *system, uint16_t *out_error_color) {
 // elapsed delta never approaches half of 2^32, which a single frame's
 // ~50,688-cycle budget never remotely does.
 static void run_frame_sequential(pacman_system *system) {
-    unsigned long start = system->cpu.cyc;
-    while ((unsigned long)(system->cpu.cyc - start) < PACMAN_CYCLES_PER_FRAME) {
+    uint32_t start = system->cpu.cyc;
+    while ((uint32_t)(system->cpu.cyc - start) < PACMAN_CYCLES_PER_FRAME) {
         z80_step(&system->cpu);
     }
     if (system->interrupt_enable) {
@@ -120,16 +138,16 @@ static void run_frame_sequential(pacman_system *system) {
 // run_frame_sequential() above -- see its comment for the full
 // explanation (arcade_arduino/DEVNOTES.md problem #22).
 static void run_frame_interleaved(pacman_system *system) {
-    unsigned long start = system->cpu.cyc;
+    uint32_t start = system->cpu.cyc;
     uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
 
     for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
         // Exact proportional target delta (not repeated addition) so the
         // final slice lands exactly on PACMAN_CYCLES_PER_FRAME elapsed
         // regardless of how that divides by the scanline count.
-        unsigned long target_delta =
-            (unsigned long)((uint64_t)PACMAN_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_SCANLINES_PER_FRAME);
-        while ((unsigned long)(system->cpu.cyc - start) < target_delta) {
+        uint32_t target_delta =
+            (uint32_t)((uint64_t)PACMAN_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_SCANLINES_PER_FRAME);
+        while ((uint32_t)(system->cpu.cyc - start) < target_delta) {
             z80_step(&system->cpu);
         }
 

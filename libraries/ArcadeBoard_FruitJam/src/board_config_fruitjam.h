@@ -4,6 +4,9 @@
 #ifndef BOARD_CONFIG_FRUITJAM_H
 #define BOARD_CONFIG_FRUITJAM_H
 
+#include <stdint.h>
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -23,6 +26,11 @@ enum {
     HAL_BTN_UP,         // GPIO 43 (header A3) -- added for Pac-Man's 4-way joystick
     HAL_BTN_DOWN,       // GPIO 44 (header A4) -- added for Pac-Man's 4-way joystick
 };
+
+// Undebounced button level, bypassing hal_input_read()'s filter (see
+// hal_input_fruitjam.cpp). Board-specific and diagnostic-only -- games use
+// the ArcadeHAL contract's hal_input_read() instead.
+bool hal_input_read_raw(uint8_t index);
 
 // I2C0 (GPIO 20/21) -- TLV320DAC3100 DAC control
 #define FRUITJAM_I2C_SDA_PIN     20

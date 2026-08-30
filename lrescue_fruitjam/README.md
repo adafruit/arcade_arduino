@@ -104,14 +104,32 @@ full game and triggering bonus1 in play. If you touch the ring buffer,
 the decimation logic, or anything around `lrescue_audio_now_cycles()`,
 flash this first.
 
-## Known limitation
+## Known limitation — diagnosed, fix not yet applied
 
-A rare, brief red horizontal line can still occur during peak simultaneous
-sound activity (e.g. two players shooting at once). The actual
-audio-quality bug this investigation started from (a "crumbly" bonus1
-jingle) is fully fixed. The residual red line was traced as far as
-software visibility allows — see `../DEVNOTES.md` problem #16 for the full
-account of what was ruled out and why the remaining cause most likely sits
-below what Core 0's software can see or influence (probably shared-bus DMA
-contention between audio and video, or a Core-1-side hiccup with no
-exposed counter).
+Red horizontal lines still occur during peak simultaneous sound activity —
+most reliably on the bonus arpeggio when an astronaut is returned to the
+ship. The audio-quality bug this originally started from (a "crumbly"
+bonus1 jingle) is fully fixed and unrelated.
+
+**The cause is now understood.** `lrescue_run_frame()` runs the whole
+frame's i8080 emulation (~1.8 ms) in one uninterrupted loop before it
+submits a single scanline — the same bug `../DEVNOTES.md` problem #20 fixed
+for Pac-Man, never back-applied to the i8080 games. Core 1 can only coast on
+the 8-buffer scanline queue plus the vertical blanking interval, about 2 ms,
+which leaves roughly **200 µs of margin**; a 232 µs audio interrupt landing
+inside the burst exceeds it and Core 1 emits its red "no valid scanline"
+fallback.
+
+That also explains why it tracks audio activity, and why problem #16's long
+investigation couldn't pin it down: Core 0's real per-frame work is only
+~3.3 ms of the 16.7 ms budget, so nothing looked overloaded. It was never a
+shortage of CPU time — it was one long uninterruptible block at the wrong
+instant.
+
+An interim mitigation is in place (the board's audio buffer halved, which
+halves the interrupt's blocking window — see `hal_audio_fruitjam.cpp`). It
+makes the lines markedly rarer but does not eliminate them, exactly as a
+200 µs margin predicts. **The real fix — interleaving CPU execution with the
+scanline pump, as `pacman_machine.cpp` already does — is not applied as of
+this commit.** See `../DEVNOTES.md` problem #34 for the plan and for what to
+watch for when it lands.

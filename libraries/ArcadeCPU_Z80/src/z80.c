@@ -1,4 +1,33 @@
 #include "z80.h"
+#include <inttypes.h> // PRIu32 for the cyc debug print (cyc is uint32_t, see z80.h)
+
+// Divergence from upstream superzazu/z80 (the second one, after z80.h's
+// extern "C" guard): place the interpreter's hot path in SRAM instead of
+// leaving it in flash.
+//
+// On RP2040/RP2350 code executes from external flash through a small XIP
+// cache. A switch-based interpreter is close to the worst case for that
+// cache -- exec_opcode() and its CB/ED/DD-FD siblings are tens of KB of
+// code jumped through essentially at random by opcode, so a large share of
+// dispatches miss and stall on flash. Measured on the Fruit Jam running
+// Galaga (3 Z80s, ~152k emulated cycles/frame), leaving these in flash was
+// the difference between fitting the 16.67ms frame budget and overrunning
+// it, which starves the DVI scanline queue and shows as a partly- or
+// fully-red screen (see hal_video_fruitjam.cpp).
+//
+// `.time_critical*` is collected into RAM by the arduino-pico linker
+// scripts (lib/rp2350/memmap_default.ld), the same mechanism pico-sdk's
+// __not_in_flash_func() uses; spelled out as a raw section attribute here
+// so this file stays a portable C file with no pico-sdk include (the host
+// test harness, arcade_arduino/tools/galaga_host, compiles it natively).
+// Costs SRAM -- check the "Global variables use ..." line after building,
+// and see the cyc_* tables below, which are deliberately left in flash
+// since sequential table lookups cache well.
+#if defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE)
+#define Z80_RAMFUNC __attribute__((section(".time_critical.z80")))
+#else
+#define Z80_RAMFUNC
+#endif
 
 // MARK: timings
 static const uint8_t cyc_00[256] = {4, 10, 7, 6, 4, 4, 7, 4, 4, 11, 7, 6, 4, 4,
@@ -156,12 +185,12 @@ static inline bool parity(uint8_t val) {
   return (nb_one_bits & 1) == 0;
 }
 
-static void exec_opcode(z80* const z, uint8_t opcode);
-static void exec_opcode_cb(z80* const z, uint8_t opcode);
+static void exec_opcode(z80* const z, uint8_t opcode) Z80_RAMFUNC;
+static void exec_opcode_cb(z80* const z, uint8_t opcode) Z80_RAMFUNC;
 static void exec_opcode_dcb(
     z80* const z, const uint8_t opcode, const uint16_t addr);
-static void exec_opcode_ed(z80* const z, uint8_t opcode);
-static void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz);
+static void exec_opcode_ed(z80* const z, uint8_t opcode) Z80_RAMFUNC;
+static void exec_opcode_ddfd(z80* const z, uint8_t opcode, uint16_t* const iz) Z80_RAMFUNC;
 
 // MARK: opcodes
 // jumps to an address
@@ -759,7 +788,7 @@ void z80_init(z80* const z) {
 }
 
 // executes the next instruction in memory + handles interrupts
-void z80_step(z80* const z) {
+Z80_RAMFUNC void z80_step(z80* const z) {
   if (z->halted) {
     exec_opcode(z, 0x00);
   } else {
@@ -777,7 +806,7 @@ void z80_debug_output(z80* const z) {
       z->pc, (z->a << 8) | get_f(z), get_bc(z), get_de(z), get_hl(z), z->sp,
       z->ix, z->iy, z->i, z->r);
 
-  printf("\t(%02X %02X %02X %02X), cyc: %lu\n", rb(z, z->pc), rb(z, z->pc + 1),
+  printf("\t(%02X %02X %02X %02X), cyc: %" PRIu32 "\n", rb(z, z->pc), rb(z, z->pc + 1),
       rb(z, z->pc + 2), rb(z, z->pc + 3), z->cyc);
 }
 

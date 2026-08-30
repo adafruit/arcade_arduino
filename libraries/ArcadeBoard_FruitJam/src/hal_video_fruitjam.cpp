@@ -18,6 +18,7 @@
 #include "pico/platform.h" // __not_in_flash()
 #include "hardware/dma.h"  // DMA_IRQ_0
 #include <PicoDVI.h>        // libdvi (dvi_init, dvi_inst, queue_*_blocking_u32) + adafruit_fruitjam_cfg
+#include "pico/time.h"    // time_us_32() -- profiling counter below
 #include "arcade_hal_video.h"
 
 #define DVI_WIDTH  640u
@@ -78,10 +79,29 @@ bool hal_video_init(void) {
     return true;
 }
 
+// Microseconds spent BLOCKED in hal_video_acquire_scanline() since the
+// last hal_video_take_blocked_us() call.
+//
+// Why this exists: acquire blocks until Core 1's DVI pump frees a buffer,
+// so a caller timing its own frame loop measures max(its own work, the DVI
+// frame period) -- once the work fits, the number pins at ~16.7ms and tells
+// you NOTHING about the remaining headroom. Subtracting this counter
+// recovers the real work time, which is what you need before adding
+// anything (audio, a new video layer) to a frame that already fits.
+static volatile uint32_t s_blocked_us = 0;
+
 uint16_t *hal_video_acquire_scanline(void) {
     uint16_t *buf;
+    uint32_t t0 = time_us_32();
     queue_remove_blocking_u32(&dvi.q_colour_free, &buf);
+    s_blocked_us += time_us_32() - t0;
     return buf;
+}
+
+uint32_t hal_video_take_blocked_us(void) {
+    uint32_t v = s_blocked_us;
+    s_blocked_us = 0;
+    return v;
 }
 
 void hal_video_submit_scanline(uint16_t *buf) {

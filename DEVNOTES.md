@@ -857,6 +857,618 @@ Left as a known limitation alongside problem #18's landscape/180 stall
 risk, since tate remains this project's supported orientation for this
 game.
 
+## Galaga port (`ArcadeMachine_Galaga`, `galaga_fruitjam/`)
+
+The project's first **multi-CPU** machine: three Z80s sharing RAM above
+0x4000, plus a Namco custom-chip I/O chain (06XX mux driving a 51XX
+I/O/coin-management chip and a 54XX noise generator) and a fourth video
+layer (the 05XX starfield). Built against MAME's `galaga` driver, device
+and video sources, and — for the custom chips — against
+[danjulio/gcore_galagino](https://github.com/danjulio/gcore_galagino) as
+the behavioural reference, because **modern MAME emulates the 51XX and
+54XX at low level**: it runs their real Fujitsu MB8843/MB8844 firmware, so
+there is no high-level protocol implementation in MAME to port. This
+project has no firmware dump, so those two chips are hand-written HLE and
+say so in their own headers.
+
+Two things about this port are worth reading even if you never touch
+Galaga. The first is the **host test harness** (`tools/galaga_host/`,
+`tools/pacman_host/`, shared code in `tools/host_common/`), which turned
+out to be the single highest-leverage thing built during the whole port —
+see the note at the end of this section. The second is that four of the
+bugs below (#24, #26, #27, #31) were cases where the *evidence* was
+misleading rather than the code being subtly wrong, and the fix depended
+on distrusting a measurement.
+
+### 24. A three-CPU boot deadlock that looked like a scheduler bug was two DIP-switch bits
+
+**Symptom:** All three CPUs wedged at boot. Main parked at `0x35F3`
+waiting on a counter that never reached 2, sub cycling through its boot
+sequence forever instead of settling into its idle loop at `0x05B1`, and
+the shared handshake byte `0x92A0` frozen. Every interleave and scheduling
+change tried over several sessions shifted the intermediate behaviour
+without ever fixing it — which, in hindsight, was itself the clue.
+
+**Cause:** `galaga_assets.cpp` set `dswa = 0xB3`, leaving DSWA bits 2
+(`0x04`) and 6 (`0x40`) clear, with an explicit and wrong comment saying
+"bits 2 and 6 are PORT_DIPUNUSED, left 0". MAME declares them
+`PORT_DIPUNUSED_DIPLOC(mask, IP_ACTIVE_LOW, ...)`, and **that macro's
+second argument is the switch's default value** — with `IP_ACTIVE_LOW` the
+default *is* the mask, so both bits read back as **1**. "Unused" describes
+what the switch does, not what the CPU reads.
+
+Bit 2 turned out to be load-bearing, and the chain is worth spelling out
+because it explains why the failure looked like a timing problem. Main
+writes task id 7 to `0x9020` immediately before releasing sub and sub2
+from reset. Sub's vblank ISR runs a task-dispatch loop over that byte,
+reaching handler `0x0ECA`: `LD A,(0x6802) / AND 2 / RET nz` — it returns
+normally **only when DSWA bit 2 is set**. With the bit clear it instead
+falls into a routine that reads *unmapped* address space (`0x10FF`/
+`0x10DF`, above sub's 4K ROM) twice, XORs the two reads expecting bit 4 to
+differ, and on finding no difference executes `RST 0` — a software reset
+of the sub CPU. On real hardware those reads return floating bus noise, so
+they differ and the check passes. **An emulated unmapped read returns a
+stable constant (0xFF), so the XOR was always zero and sub reset itself
+every single frame**, forever.
+
+**Fix:** `dswa = 0xF7` (Difficulty:Easy `0x03` | UNUSED `0x04` |
+Demo_Sounds:On `0x00` | Freeze:Off `0x10` | Rack_Test:Off `0x20` | UNUSED
+`0x40` | Cabinet:Upright `0x80`). `dswb = 0x97` was already right.
+
+**Two general lessons.** When an emulated machine hangs, check what the
+ROM reads from addresses the emulation does *not* implement faithfully —
+open bus, unused DIP bits, floating inputs — **before** suspecting the
+scheduler. Arcade ROMs contain protection and self-check routines that
+expect noise, and they reset themselves when those checks fail. And
+specifically: `PORT_DIPUNUSED` in MAME does not mean "reads 0".
+
+### 25. Red bars again — and why the obvious frame-time metric couldn't tell us anything
+
+**Symptom:** After #24 the game ran, but the display showed a red region
+that grew with sprite count — a slice of the screen during quiet moments,
+most of it once the attract mode got busy. Meanwhile the sketch's own
+frame-time print sat at a steady ~17ms no matter what was changed.
+
+**Cause, part one:** the same progressive scanline underrun as problems
+#16/#18/#20 — `galaga_run_frame()` simply exceeded 16.67ms, so Core 0
+couldn't keep Core 1's DVI queue fed.
+
+**Cause, part two, and the reason it took so long:**
+`hal_video_acquire_scanline()` **blocks**. A game that times its own frame
+loop therefore measures `max(work, DVI frame period)`. Once the work fits
+at all, the number pins at ~16.7ms and reveals *nothing* about how much
+headroom is left. "Still 17ms" was uninformative rather than bad news, and
+was read as bad news for a long time.
+
+**Fix:** `hal_video_take_blocked_us()` was added to the ArcadeHAL video
+contract (implemented in `ArcadeBoard_FruitJam`, returns 0 in the host
+stub) so the blocking time can be subtracted and the real work measured.
+Then five optimizations, each verified byte-identical in the host harness
+before flashing:
+
+1. `GALAGA_QUANTUM_CYCLES` 16 → 512. About 18% of frame time was pure
+   outer-loop overhead, and 512 is also MAME's own quantum for this
+   driver — so this is more *correct* as well as faster.
+2. Sprite decode moved from per-scanline to once per frame
+   (`galaga_video_begin_frame()`). It had been re-decoding all 64 sprite
+   entries for each of 224 rows — roughly 14,000 decodes per frame, nearly
+   all of them only to discover the sprite doesn't intersect that row.
+3. **Hot code moved from flash to SRAM — the single biggest win.** A
+   switch-based Z80 interpreter is close to worst case for the RP2350's
+   small XIP flash cache. `.time_critical*` sections (placed in RAM by
+   arduino-pico's `lib/rp2350/memmap_default.ld`) now hold `exec_opcode`
+   and its prefixed-opcode siblings, Galaga's memory-access path, the
+   render path and the CPU stepping loop. Flash 122KB → 84KB, RAM 249KB →
+   288KB. This alone took the frame rate from a decaying 54-57 to a flat
+   59.
+4. Render fast path: tate rotation renders straight into the caller's
+   scanline buffer and clears only the side borders, instead of memsetting
+   640 pixels, clearing a 288-pixel scratch row, drawing, then copying.
+5. Flattened pen LUTs (`char_pen_rgb`/`sprite_pen_rgb`, 64×4) so each
+   drawn pixel costs one indexed load rather than two dependent
+   PROM/palette lookups.
+
+**Measured result on hardware** (with input, WSG audio and the starfield
+all present): boot with main CPU only ~8.0ms; all three CPUs released
+~12.3ms — the jump at frame ~720 is sub/sub2 leaving reset, visibly a
+third of the frame cost, which is exactly why the red bars historically
+appeared at that precise moment; attract and gameplay 12.1-13.6ms. Against
+a 16.67ms budget that is roughly 3ms of headroom, at a flat 60fps.
+
+### 26. A freeze after ~12 minutes: a signed 32-bit difference that wrapped positive
+
+**Symptom:** After ~13 minutes of attract mode the game froze — but not
+like a crash. The frame counter kept advancing at 59fps, all three CPUs
+sat in valid idle loops, and the shared handshake bytes
+`ram2[0x100]`/`[0x101]` stayed pinned across a thousand frames.
+
+**Cause:** in `interleave_to_target()`:
+
+```c
+long elapsed_at_release = (long)(reset_release_main_cyc - start_main);
+if (elapsed_at_release < 0) elapsed_at_release = 0;
+```
+
+`long` is 32-bit on this target. `reset_release_main_cyc` is fixed at boot
+(~3.5e7) while `start_main` grows by ~50,688 every frame, so once the gap
+passes 2^31 the signed difference **wraps positive**. The `< 0` clamp
+therefore never fires, `sub_target` computes to 0, and sub and sub2 stop
+being stepped at all while main keeps running happily. Onset is ~43,000
+frames ≈ 12 minutes; observed at 46.5k and 51.6k.
+
+**Fix:** unsigned arithmetic that needs no clamp at all:
+
+```c
+uint32_t into_frame = reset_release_main_cyc - start_main;
+if (into_frame < target) sub_target = target - into_frame;
+```
+
+Once the release predates the frame, the subtraction underflows to a huge
+value which is necessarily `>= target`, so no reduction applies.
+
+### 27. The host harness was *structurally incapable* of reproducing #26 — and fixing that introduced the opposite bug
+
+This one is really two lessons about integer width, and it is the reason
+#26 took a hardware session to find rather than a harness run.
+
+**First:** `z80.cyc` was declared `unsigned long`, which is 32-bit on
+arm-none-eabi and **64-bit on macOS**. The host harness could therefore
+never reproduce *any* cycle-counter wraparound bug, no matter how long it
+ran — the counter it was testing simply had twice the width of the one on
+the device. `cyc` is now pinned to `uint32_t` in `z80.h` (a documented
+divergence from upstream superzazu/z80). With that change the harness
+reproduced the freeze immediately, then stopped once #26 was fixed, and
+now runs 130,000 frames (~36 minutes) clean — past the full 32-bit `cyc`
+wrap at ~84.7k frames, which no hardware test had ever reached.
+
+**Second, and it bit immediately:** this codebase's wraparound idiom
+`(long)(a - b) < 0` is only correct when `long` matches the counter's
+width. Pinning the counter to 32 bits while leaving the casts as `long`
+silently breaks it on a 64-bit host, because the unsigned difference now
+widens into an always-positive value. The symptom was the 06XX busy gate
+never asserting, leaving main spinning in its `0x3738` retry loop. All
+five such casts are now explicit `(int32_t)`.
+
+**When a counter has a fixed width, cast to that exact width, never to
+`long`** — and when building a host harness whose job is to reproduce
+device behaviour, the widths of the types under test are part of the
+contract being reproduced, not an implementation detail.
+
+### 28. Sizing a decay envelope from a sample's *length* instead of its *slope*
+
+**Symptom:** The synthesized player-explosion (Namco 54XX channel) was
+reported from real hardware as "too short, too high pitched, and a bit too
+quiet — like a very small balloon popping", against a recording of the
+real board.
+
+**Cause — two independent errors, one of them arithmetic:**
+
+The envelope's time constant had been derived from the *duration* of the
+reference recording (2.67s), when what governs a decay's perceived length
+is its **slope**. Measuring the recording properly gave −24dB over 2.2s,
+which implies a time constant of about 5.5s — roughly twice what had been
+used.
+
+Compounding it, the envelope was Q16 and updated as `env = (env * decay)
+>> 16`. That right-shift truncates, losing on average half an LSB *per
+sample*. At 22kHz that is not a rounding detail, it is an additive drain
+that dominates the intended exponential once the level gets low, and it
+killed the tail roughly four times early. **A geometric decay implemented
+with truncating fixed-point arithmetic is not a geometric decay** — the
+truncation term compounds. Moving to Q24 (`ENV_ONE = 1 << 24`) gives
+enough headroom below the audible floor that the truncation stops
+mattering.
+
+### 29. The 54XX needed a sample-and-hold, and needed both of its sounds at once
+
+**Symptom (a):** after fixing #28 the explosion had the right length but
+was far too bright — hissy rather than percussive.
+
+**Cause/fix (a):** the noise source was being updated every output sample.
+The real 54XX is an *MCU*: it can only write its DAC as fast as its
+instruction loop runs, which is far slower than the audio sample rate.
+Adding a sample-and-hold (`NOISE_HOLD 16` output samples per noise update)
+drops the effective noise bandwidth by that factor and is what produces
+the characteristic low, bassy rumble. Without it the spectrum sat about
+three times too high.
+
+**Symptom (b):** the explosion sounded thin compared to the recording.
+
+**Cause/fix (b):** tracing the actual command stream in the harness showed
+Galaga issues both `1x` and `2x` — sound types A *and* B — within a single
+frame (`10 10 20 20`). The pending-command field was a single slot, so the
+last write won and half the sound was simply discarded. It is now a
+**bitmask** (bit0 = type A, bit1 = type B) and the two voices layer, which
+is also closer to the hardware: the real chip has three independent output
+channels feeding three separate band-pass filters, so layering is what it
+actually does. The filter bands and mixer weights are computed from the
+literal resistor and capacitor values in MAME's `galaga_a.cpp` discrete
+netlist; the noise generator and envelope shape are not derived from
+anything and were tuned by ear against the recording, which
+`galaga_54xx.h` states plainly.
+
+### 30. A diagnostic path in the harness that didn't exercise the code under test
+
+**Symptom:** while debugging the 54XX, the harness reported the channel as
+completely silent — which nearly led to the conclusion that the trigger
+path was broken.
+
+**Cause:** `wav_pump_frame()` returned early unless `--wav` was passed. But
+the audio fill callback is where the 54XX trigger handover happens (the
+CPU sets a pending bitmask; the audio ISR consumes it under
+`hal_audio_enter_critical()`), so **every diagnostic run that wasn't
+capturing a WAV never ran that handover at all**. A stale binary left by a
+mistyped `cd` compounded it.
+
+**Fix:** the harness now always pumps audio, and only the *writing* of
+samples is gated on `--wav`. **A diagnostic mode that skips part of the
+system is worse than no diagnostic**, because its silence looks like
+evidence. If a harness has a code path that only runs under a flag, that
+flag must not gate anything the rest of the system depends on.
+
+### 31. The 05XX starfield: MAME's algorithm is correct but unaffordable, and a short A/B measurement lied about the cost
+
+**Context:** MAME's `starfield_05xx.cpp` is unusually good source material
+— a pin-level reverse-engineering of a real 1981 Namco 05XX taken off a
+Galaga board (R. Hildinger, 2019). It clocks a 16-bit Fibonacci LFSR
+**once per pixel** over a 256×256 field, testing each state for a "hit".
+
+**Problem:** that is ~65,536 LFSR steps per frame, against roughly 3ms of
+headroom (see #25). Not affordable.
+
+**Fix:** the sequence is fixed and never reseeded during play, so the ~256
+hit positions are computed **once** at init into a table; each frame then
+only offsets into that table and buckets the visible stars by row. The
+output is identical and the cost is a few hundred operations instead of
+tens of thousands. Scrolling falls out for free, because on real hardware
+it *is* an offset: a frame consumes 65,536 clocks against a 65,535-long
+sequence, and the speed setting adds or removes a few more.
+
+**Validating it without a reference screenshot.** There was no known-good
+image to compare against, so the decode was checked by exhaustive
+enumeration instead — four properties, each of which would have failed on
+a mis-transcribed constant:
+
+- The LFSR returns to its 0x7FFF seed at exactly step 65535 (maximal
+  period), and yields exactly **256 hits split 64/64/64/64** across the
+  four star sets — reproducing MAME's prose "256 stars in 4 sets of 64"
+  from the taps alone.
+- Over all four set-pairs at all 65,535 phases, never more than **5** stars
+  land on one row, and 103-120 stars are on screen (mean 112 =
+  128 × 224/256). The table dimensions in `galaga_video.cpp` are these
+  proven numbers rather than padded guesses; tightening them from 400/8 to
+  256/5 left rendered frames byte-identical, confirming the old bounds
+  never bound.
+- The scroll **sign** — the one thing a transcription silently gets
+  backwards — was confirmed by measuring consecutive frames: speed index 6
+  moves every star exactly 1px/frame, and index 7 is a dead stop. Galaga
+  writes only those two values. Since net drift is `1 + offset`, only this
+  sign convention gives the game any way to stop the stars at all; the
+  opposite convention turns index 7 into 2px/frame.
+- The set-pair cycling (`0,2 → 1,2 → 1,3 → 0,3` every ~200 frames) and the
+  enable bit (no stars during boot/self-test) were both observed live.
+
+**And the measurement trap.** An initial A/B on hardware — starfield build
+versus a build with `star_begin_frame()` stubbed — over 45-second captures
+showed the starfield costing ~590µs. It costs nothing measurable. Galaga's
+attract loop varies enormously in sprite count, so a short capture
+measures *which part of the attract loop it happened to catch*, not the
+change under test. Re-running at ~3.2 minutes per build (n≈192 each) put
+every percentile within ~70µs, with the starfield build nominally
+*faster*:
+
+| `work` µs | min | p25 | median | p75 | p95 | max | mean |
+|---|---|---|---|---|---|---|---|
+| stars on | 12140 | 12502 | 12849 | 13076 | 13354 | 13562 | 12819 |
+| stars off | 12195 | 12572 | 12890 | 13107 | 13369 | 13583 | 12850 |
+
+The tell in the bad measurement was that `min` matched to 1µs across the
+two builds while the means differed by 590µs — a genuine fixed per-frame
+cost has to move the floor too. **Any `work` comparison on this board
+needs captures spanning several attract cycles, and should compare
+percentiles rather than mean and max.**
+
+### 32. Reporting a button as a level when the hardware pulses it — and the flawed experiment that hid it for a whole session
+
+**Symptom:** In Galaga, every press of fire produced two shots almost
+instantly, instead of the player getting two independently-aimed shots when
+they wanted them. Holding the button did it; a normal tap did it. Galaga
+legitimately allows two player bullets on screen at once, so this reads at
+first like authentic behaviour and was dismissed as such once before it was
+investigated.
+
+**Cause:** `galaga_51xx.cpp` reported the fire button as a **level** — bit 4
+of player 1's control byte stayed asserted for as long as the button was
+down. Galaga's ROM does not edge-detect that bit: **it fires one bullet for
+every frame in which it reads the bit set.** The real 51XX evidently
+delivers a one-shot pulse instead. Worse, the HLE's `fire_hold` field
+deliberately extended every press by one extra frame (to make short taps
+sample reliably), which guaranteed a minimum of two asserted frames — so
+even a *single-frame* press fired exactly two bullets. The
+two-bullets-on-screen cap then hid the severity: holding the button for a
+full second still produced two, not sixty.
+
+**Fix:** fire is now a **read-confirmed one-shot pulse**. `fire_pulse` is
+set on the press edge and cleared inside `galaga_51xx_read()` at the moment
+the game consumes player 1's control byte, rather than after a fixed number
+of frames. That guarantees the game samples exactly one asserted frame per
+press however often it happens to poll — which is what the reference
+implementation's fixed hold was groping at with its comment "0 is too short
+for score enter, 5 is too long". Verified in the harness by counting
+bullets: a 6-frame tap gives 1, a 60-frame hold gives 1 with no auto-repeat,
+and two taps 20 frames apart give 2 independently-spaced bullets.
+
+**The flawed experiment, which is the more valuable half of this entry.**
+The emulation was "cleared" early on by feeding the host harness ideal
+presses of 1, 10, 30, 60, 90 and 110 frames and observing that all six
+produced **byte-identical** rendered frames, while all six differed from no
+press at all. That was read as "press length has no effect, therefore the
+ROM edge-detects, therefore the bug is below the emulation." Every one of
+those runs was firing **two** bullets. The comparison was between six wrong
+answers, and they agreed with each other perfectly.
+
+That single bad inference cost a session: it sent the investigation into the
+physical input path, produced a bounce profiler, then a "faulty switch"
+verdict from a swap test that changed two variables at once (a button and
+the way a person presses it move together), then a 150ms debounce workaround
+— none of which was the bug. The 150ms hold-off has since been removed from
+`hal_input_fruitjam.cpp`, because with the real fix in place it would
+actively hurt: Galaga is played by tapping fire quickly, and 150ms caps that
+around 5 shots/second.
+
+**Three lessons, in order of how much they cost:**
+
+1. **Measure the quantity you actually care about, not a proxy for it.**
+   "Do these runs differ?" is not "is this correct?". A comparison between
+   variants cannot detect a fault they all share. The fix was to add
+   `--census`/`--census-code` to the harness, which counts on-screen sprites
+   of a given code — the bullet count is the thing under test, so measure
+   the bullet count. It showed the bug in one run.
+2. **A swap test only proves something if the swapped item is the only
+   variable that moved.** Swapping two buttons a human operates does not
+   isolate the buttons.
+3. When a game-level symptom *could* be authentic behaviour, that is a
+   reason to measure it, not a reason to accept it.
+
+**Note on the "dropouts".** `input_bounce_test_fruitjam` did measure real
+68-142ms openings mid-press on the fire button, at 10kHz, and they are in
+the logs. With the 51XX bug fixed, the most likely reading is that they were
+genuine double-taps by a player who had adapted to the bug — the joystick
+directions, which are held rather than tapped, never showed them, and three
+different switch technologies behaved identically, which no single faulty
+part explains. Not proven either way. If double shots reappear *with* the
+51XX fix in place, that is the moment to suspect contacts again.
+
+**One genuine gap this did uncover, and it stays fixed:** the project had
+**no debouncing anywhere** — `hal_input_read()` was a raw `gpio_get()` on an
+internal pull-up, sampled once per frame, and `Bounce2` is listed as a
+required library in the top-level README but was used by none of this
+project's own code. `hal_input_fruitjam.cpp` now applies a 25ms asymmetric
+filter (press believed instantly, release must persist) for all four games,
+and gained `hal_input_read_raw()` so the profiler measures the contacts
+rather than the filter it exists to calibrate.
+
+### 33. Two game families need opposite default rotations, because their real cabinets mounted the monitor opposite ways
+
+**Symptom:** On one physically-rotated monitor, `invaders_fruitjam` and
+`lrescue_fruitjam` came up upright while `pacman_fruitjam` and
+`galaga_fruitjam` came up 180 degrees off, correctable with two presses of
+the ROTATE button. All four were defaulting to `rotation = 1`.
+
+**Cause — not a renderer bug, and worth being clear about that.** Rotation
+cases 1 and 3 are implemented identically across both renderer families
+(case 3 reverses both axes relative to case 1, i.e. an exact 180; verified
+by reading `invaders_video.cpp` and `galaga_video.cpp` side by side, and
+confirmed by rendering the same frame at both settings in the host
+harness). What differs is upstream: **which end of each game's native
+raster is the top of the player's screen.** The 8080bw cabinets and the
+Namco cabinets mounted their monitors in opposite orientations, so the two
+families genuinely need opposite software rotations to be upright on one
+physical screen.
+
+Both Namco machines had simply copied Invaders' default. `pacman_machine.cpp`
+said "same role tate plays for Invaders' 256x224" and `galaga_machine.cpp`
+said "same convention as Invaders/Pac-Man" — the assumption stated outright
+in a comment, and wrong.
+
+**Fix:** `pacman_init()` and `galaga_init()` now default to `rotation = 3`;
+Invaders and Lunar Rescue keep 1. All four are then upright together on the
+same monitor with no button presses. Note there is no absolute "correct"
+value here — it depends which way the monitor is physically turned — so
+what matters is that the four are *consistent with each other*, and the
+chosen pair matches the orientation the project has been developed against.
+
+Both host harnesses gained `--rotation N`, which overrides the machine's
+default after init, so an orientation can be checked by rendering a frame
+rather than by flashing and physically turning a monitor.
+
+**And the change immediately caused a regression, which is the part worth
+remembering.** Flashing Galaga with the new default put large red bars back
+on the screen. Rotation 1 had a *fast path* — optimisation #4 from problem
+#25 — that renders each row directly into the caller's DVI scanline buffer
+and clears only the side borders. Rotation 3 did not: it fell through to the
+general switch, costing a full 640-pixel clear plus a reversed scratch-row
+copy on every one of 240 scanlines. Against Galaga's ~3ms of headroom that
+was instantly enough to starve the DVI queue again.
+
+The fix was to extend the fast path to rotation 3 rather than to revert the
+default. `render_native_row()` gained a `reverse_x` parameter — a purely
+*geometric* transform, deliberately kept distinct from `flip_screen`, which
+is emulated game state and is **not** interchangeable with it: flip_screen
+additionally reverses the row index and selects the hardware's second,
+pre-x-flipped character set (`| 0x80` on the tile code). Only the output
+x-order composes, so the renderer uses `rev = flip ^ reverse_x` at its three
+write sites while `eff_y` and the tile code stay keyed on `flip` alone.
+
+Verified three ways before reflashing: rendered output byte-identical to the
+old slow path at both rotations; rotation 3 exactly a 180 of rotation 1 for
+all 129,024 game-area pixels, checked both on a normal frame and on one
+inside the window where the game actually asserts `flip_screen`; and the
+on-hardware frame cost back to where rotation 1 was (mean 12817us vs 12819,
+max 13509 vs 13562).
+
+**Rule this leaves behind: any rotation that is a game's default must have a
+fast path.** The general switch is for the two landscape modes, which are
+not defaults and already carry their own known stall risk (problem #18).
+Changing a default is not a cosmetic edit on this board — it can silently
+move the renderer onto a slower path. Note Pac-Man was unaffected: it has no
+rotation-1 fast path at all, so its cases 1 and 3 cost the same.
+
+**Lesson:** "same convention as <other game>" is a claim about hardware, not
+a style choice, and deserves the same checking as any other hardware fact in
+this project. A default copied between ports because the two looked similar
+is exactly the kind of thing that survives until someone puts both games on
+one screen.
+
+### 34. Lunar Rescue's residual red lines: problem #20's un-interleaved CPU burst, never back-applied to the i8080 games (DIAGNOSED, FIX NOT YET APPLIED)
+
+This closes out problem #16, which chased the same symptom at length and
+accepted it as an unexplained cosmetic artifact. It is explained now, and
+#16's conclusion — that the cause was below what Core 0 could see — was
+wrong in an interesting way: the cause *was* on Core 0, but invisible to the
+instrumentation available at the time.
+
+**Symptom:** red lines during Lunar Rescue's bonus arpeggio (an astronaut
+returned to the ship) and, less predictably, whenever several sounds overlap.
+
+**What made this measurable at last.** #16 explicitly dead-ended on being
+unable to see real Core 0 headroom, because `hal_video_acquire_scanline()`
+blocks and a whole-frame timing therefore reads `max(work, DVI period)` no
+matter what. `hal_video_take_blocked_us()` (added later, during the Galaga
+port — see problem #25) splits that apart. Adding the same heartbeat
+`galaga_fruitjam.ino` carries to `lrescue_fruitjam.ino` gave the number
+nobody had ever had for this game:
+
+```
+work 2660-3321us of a 16660us budget   (max 20%, even at 4 active channels)
+isr worst-single: 166us @ 0 channels -> 232us @ 4 channels
+```
+
+**So it was never a throughput problem** — Core 0 had 13ms spare. That also
+killed a plausible-sounding hypothesis on the spot: the i8080 core and all
+of `ArcadeMachine_LunarRescue` are still entirely flash-resident, never
+having received problem #25's `.time_critical` treatment, and XIP-cache
+thrashing under ISR preemption *looked* like a strong fit for a fault that
+scales with audio activity. It would have cost ~40KB of RAM and fixed
+nothing. Measuring first was worth it.
+
+**The actual cause.** `lrescue_run_frame()` runs the entire frame's i8080
+emulation — about 1.8ms — in one `while (int_state != 2)` loop with **zero**
+`hal_video_acquire_scanline()`/`hal_video_submit_scanline()` calls, and only
+then calls `lrescue_draw_frame()`. That is verbatim problem #20, the Pac-Man
+bug, which was fixed there with `run_frame_interleaved()` and never
+back-applied to the two i8080 games (both predate the finding).
+
+Why it is marginal rather than constantly broken, which is what makes it
+correlate with audio: during that burst Core 1 coasts on the 8-buffer
+scanline queue (~555us; the depth is a hard ceiling in the vendored libdvi)
+plus the vertical blanking interval (~1.4ms at 640x480). That is ~2ms of
+cover for a 1.8ms burst — roughly **200us of margin**. A 232us audio ISR
+landing inside the burst exceeds it outright.
+
+**Interim mitigation already applied:** `BUFFER_SAMPLES` in
+`hal_audio_fruitjam.cpp` halved, 256 -> 128. This is a pure
+interrupt-*latency* change: the same samples get mixed either way, just in
+twice as many half-length calls, so total ISR CPU is unchanged (measured:
+13196us/173 calls after vs 12968us/86 before). Worst-single dropped 166->81us
+at 0 channels and 202->91us at 2. On hardware that made the red lines
+markedly **better but not gone**, exactly as the ~200us margin predicts.
+Note this treats the trigger, not the cause.
+
+**The fix intended next, and its consequences.** Spread the frame's cycle
+budget across the 240 scanline submissions, as `pacman_machine.cpp`'s
+`run_frame_interleaved()` does. Lunar Rescue is actually *simpler* than
+Pac-Man here: its `render_scanline()` already reads live VRAM on demand for
+every rotation and it has no `frame_cache`, so it needs none of Pac-Man's
+two-path split. Expected to take the margin from ~200us to milliseconds.
+
+Consequences to watch for, since this changes a confirmed-working game:
+
+- **Scanlines will render from mid-frame CPU state rather than the frame's
+  final state.** This is more hardware-accurate, not less — a real
+  scanline-order CRT behaves exactly this way — and Pac-Man showed no
+  visible tearing after the same change. But it is a behavioural change,
+  and mid-screen artifacts are what to look for if something is wrong.
+- **The two interrupts must still fire at the same cycle counts**
+  (mid-frame at `CYCLES_PER_FRAME/2`, vblank at `CYCLES_PER_FRAME`). Getting
+  this wrong would show up as gameplay logic misbehaving, not as a visual
+  glitch.
+- **The `cyc` carry-across-frames must be preserved.** It is what keeps the
+  emulated clock aligned with real time, and problem #15 is a full account
+  of how easy it is to get that clock domain wrong here. Symptoms of
+  breaking it would be audio pitch or timing drift rather than anything
+  visual.
+- If the interleave works, `BUFFER_SAMPLES` can probably go back to 256,
+  since the ISR was only ever the trigger. Worth re-testing rather than
+  assuming.
+
+**`invaders_fruitjam` has the identical structure** and should get the same
+treatment. It has never shown the symptom, its audio being far lighter, but
+the same ~200us margin is there.
+
+### The host harness — the highest-leverage thing built during this port
+
+`tools/galaga_host/` (and `tools/pacman_host/`, sharing `tools/host_common/`)
+compiles the **real** `ArcadeMachine_Galaga` sources natively on macOS
+against a stub ArcadeHAL. This is possible only because SAMP's
+architecture rule actually holds: machine libraries talk exclusively
+through ArcadeHAL's 13 functions and never to a board library, so the
+entire machine — three Z80 cores, port decode, video, asset loading —
+runs unmodified on the host.
+
+It took iteration from roughly 5 minutes per hardware cycle down to
+**0.26 seconds for 3000 frames**, and it reproduced the #24 deadlock
+bit-for-bit on its first run (identical PCs, identical shared-RAM values
+to the SWD readings), which validated it immediately.
+
+Three design points worth copying for any future port:
+
+- **It changes no library source.** SAMP wires each CPU's memory access
+  through per-instance function pointers on the `z80` struct, so after
+  `galaga_init()` the harness captures those pointers and substitutes
+  logging wrappers that delegate to the originals. `--watch <hex addrs>`
+  then traces any set of addresses — RAM *or* I/O — with PC, CPU and cycle
+  counts in execution order, with run-length collapsing (essential, since
+  the poll loops emit millions of identical lines).
+- **It renders through the real renderer.** `--ppm-every N` calls
+  `galaga_video_render_scanline()` — the same function the device calls —
+  and writes PPMs, so the display can be inspected with no hardware, no
+  camera and no guessing at what a photographed screen is showing.
+  `--ppm-from`/`--ppm-to` bound the window so a few consecutive frames can
+  be captured deep into a run without dumping a megabyte per frame before
+  it.
+- **It plays the real audio.** `--wav` pumps the machine's own fill
+  callback (the same one the board's audio ISR drives) into a WAV file, so
+  synthesis can be *listened to* before flashing — which beats debugging
+  silence on a device whose only feedback is silence. (See #30 for how
+  this feature nearly caused a bug rather than finding one.)
+
+One caveat learned the hard way: a host harness only reproduces device
+behaviour to the extent its *types* match the device's. See #27.
+
+### Tooling notes specific to this board
+
+- **Flashing does not need OpenOCD.** `arduino-cli upload -p <port>` does a
+  1200-baud touch into BOOTSEL and copies the UF2 in seconds, versus the
+  75-200 second SWD loads earlier sessions fought. `ARDUINO_DIRECTORIES_USER`
+  must point at this repo or every sketch fails with
+  `fatal error: arcade_hal_video.h: No such file or directory`.
+- **The Arduino IDE's Serial Monitor blocks that upload.** If it holds the
+  port, the 1200-baud reset never lands and upload fails with `No drive to
+  deploy.`; scripted reads of the port fail with `Resource busy`. Check
+  with `lsof /dev/cu.usbmodem*`. `/dev/tty.*` is not a way around it — it
+  opens and delivers nothing.
+- **Do not issue `monitor reset init` over SWD against this board while
+  debugging with `USE_CORE 0`.** It wedged the board with Core 0
+  permanently blocked in `multicore_fifo_pop_blocking` — OpenOCD's rp2350
+  reset-init sequence appears to halt both cores regardless of `USE_CORE`,
+  and nothing ever resumes Core 1. It needs a physical power cycle, not
+  another SWD reset.
+- **Confirm the viewing orientation before diagnosing a rendering bug from
+  a screenshot.** A session was spent chasing a `flip_screen` bug that was
+  entirely an `ffmpeg transpose=2` where tate output needs `transpose=1`.
+  A 180° error looks exactly like a flip bug.
+
 ## Confirmed working on real hardware (as of this writing)
 
 `input_test_fruitjam`, `dvi_test_fruitjam`, `audio_test_fruitjam`,
@@ -869,11 +1481,15 @@ sessions) and `lrescue_speaker_isolation_test` (a standalone diagnostic
 sketch exercising the real production speaker-synthesis mixer against a
 synthetic event pattern, no CPU emulator or SD card involved), with the
 real Lunar Rescue ROM/sample set — audio confirmed clean end-to-end;
-red-line frequency reduced to a rare, brief, cosmetic occurrence under peak
-simultaneous-sound load (see problem #16 for why this wasn't fully
-eliminated, and what it would take to try further).
+red lines reduced but **not eliminated** under peak simultaneous-sound load.
+Problem #16 records the long investigation that accepted this as
+unexplained; **problem #34 identifies the actual cause** (an un-interleaved
+CPU burst, the same bug problem #20 fixed for Pac-Man) and states the fix
+intended next. As of this commit that fix is NOT applied -- only the interim
+audio-buffer mitigation is.
 
-`pacman_fruitjam` (the full Pac-Man game) in **tate rotation** — video
+`pacman_fruitjam` (the full Pac-Man game) in **portrait (rotation 3, see
+problem #33)** — video
 (tile+sprite decode, palette), audio (Namco WSG synthesis), and full
 4-way-joystick control all confirmed clean end-to-end with the real
 `pacman_assets/rom/` ROM/PROM set, after fixing problems #18-20 above; no
@@ -886,3 +1502,18 @@ switching comes up. **Not yet tested/fixed:** landscape/180-degree
 rotation (known stall risk from problem #18, plus the separate aspect-
 ratio/aliasing issues in problem #23), two-player mode, extended sessions
 across multiple levels.
+
+`galaga_fruitjam` (the full Galaga game) in **portrait (rotation 3)** — all three
+Z80 CPUs, all three video layers (05XX starfield, sprites, tilemap),
+2-way-joystick + fire + coin/start input through the 06XX/51XX chain
+(including the one-shot fire pulse of problem #32, confirmed in play), and
+audio on both the Namco WSG's three voices and the 54XX explosion channel,
+with the real `galaga_assets/rom/` ROM/PROM set (including `prom-1.1d`,
+the WSG waveform table — the game boots and plays silently without it).
+Confirmed at a flat 60fps with ~3ms of frame-budget headroom, past the
+32-bit cycle-counter wrap that used to freeze it (problem #26). **Not yet
+tested/fixed:** landscape/180-degree rotation (same known limitations as
+Pac-Man, problems #18/#23), two-player mode, and the later game stages —
+challenging stage, boss capture and dual fighter are unreached by scripted
+harness input, so it is not confirmed whether any of them drive the 54XX
+differently than the player-explosion path that was tuned.

@@ -63,6 +63,17 @@ void hal_video_submit_scanline(uint16_t *buf);
 // "Boot-time error screen" sections for why this ordering matters).
 void hal_video_run(void);
 
+// Microseconds spent BLOCKED inside hal_video_acquire_scanline() since the
+// previous call to this function, then resets the counter.
+//
+// hal_video_acquire_scanline() blocks until the display backend frees a
+// buffer, so a game timing its own frame loop measures max(work, display
+// frame period): once the work fits the budget the measured time pins at
+// the refresh period and hides how much headroom is actually left.
+// Subtract this to get the real work time. Board backends with no such
+// blocking may return 0.
+uint32_t hal_video_take_blocked_us(void);
+
 #ifdef __cplusplus
 }
 #endif

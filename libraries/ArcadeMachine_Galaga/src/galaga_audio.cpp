@@ -32,6 +32,7 @@
 // runs in the board's audio ISR and must never execute from flash, where
 // an XIP cache miss would stall it. (This machine leans on that mechanism
 // elsewhere too: see galaga_machine.cpp's GALAGA_M_RAMFUNC.)
+#include <Arduino.h> // micros() for the ISR instrument below
 #include "pico.h" // pulls in pico/platform.h (__not_in_flash_func) -- on
                    // RP2350, pico/platform.h refuses direct inclusion.
 
@@ -55,7 +56,28 @@ uint8_t galaga_wave_prom[GALAGA_WAVE_PROM_SIZE];
 
 static galaga_system *g_system;
 
+// ISR cost instrumentation. DEVNOTES.md problem #35 named this as the next
+// thing to measure and the reason: this is the only audio ISR in the project
+// never instrumented, and the heaviest per sample (three WSG voices plus the
+// 54XX's two layered noise voices, each with three filter bands and a
+// sample-and-hold). Everything else about #35 was ruled out by measurement;
+// this was ruled out by nothing.
+//
+// Modelled on lrescue_audio_debug_isr_stats(), which #35 points at. The
+// counters are plain uint32_t written only here and read with interrupts
+// masked by the accessor, so no critical section is needed on this side.
+static uint32_t g_isr_us, g_isr_calls, g_isr_max_us;
+
+void galaga_audio_debug_take_isr_stats(uint32_t *total_us, uint32_t *calls,
+                                       uint32_t *max_call_us) {
+    if (total_us)    *total_us    = g_isr_us;
+    if (calls)       *calls       = g_isr_calls;
+    if (max_call_us) *max_call_us = g_isr_max_us;
+    g_isr_us = g_isr_calls = g_isr_max_us = 0;
+}
+
 static void __not_in_flash_func(galaga_audio_fill)(int32_t *out, int count) {
+    uint32_t isr_t0 = micros();
     uint8_t regs[0x20];
 
     uint32_t saved = hal_audio_enter_critical();
@@ -112,6 +134,11 @@ static void __not_in_flash_func(galaga_audio_fill)(int32_t *out, int count) {
         int16_t s = (int16_t)total;
         out[i] = ((int32_t)s << 16) | (uint16_t)s;
     }
+
+    uint32_t isr_dt = micros() - isr_t0;
+    g_isr_us += isr_dt;
+    g_isr_calls++;
+    if (isr_dt > g_isr_max_us) g_isr_max_us = isr_dt;
 }
 
 void galaga_audio_init(galaga_system *system) {

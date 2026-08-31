@@ -19,6 +19,7 @@
 #include <galaga_machine.h>
 #include <galaga_video.h>
 #include <galaga_input.h>
+#include <galaga_audio.h>
 #include <board_config_fruitjam.h>
 
 static galaga_system    g_system;
@@ -179,6 +180,13 @@ void loop() {
         Serial.print("us_x");
         Serial.print("us), ");
         Serial.print(frame_count * 1000UL / (millis() - loop_start_ms + 1));
+        Serial.print(", isr ");
+        { uint32_t iu=0, ic=0, im=0;
+          galaga_audio_debug_take_isr_stats(&iu, &ic, &im);
+          Serial.print(iu); Serial.print("us/");
+          Serial.print(ic); Serial.print("calls avg ");
+          Serial.print(ic ? iu/ic : 0); Serial.print("us worst ");
+          Serial.print(im); Serial.print("us"); }
         Serial.print(" fps avg since first frame, checksum pass=");
         Serial.print(g_system.debug_checksum_pass);
         Serial.print(" fail=");

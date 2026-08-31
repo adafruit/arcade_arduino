@@ -1490,15 +1490,51 @@ about before trusting them again:
    looked like permanent starvation and was just the pipeline refilling. It
    now skips the first 16 scanlines.
 
-**Best remaining hypothesis, and the next thing to measure.** Peak
-single-scanline render time is 100-104us against a 69.4us DVI period -- and
-it stays at ~102us even in windows with only 3 sprites, so it is *not*
-sprite-driven. That points at an audio ISR landing inside a render. **Galaga's
-audio ISR is the one in this project that has never been instrumented**, and
-it does more per sample than any other: three WSG voices plus the 54XX's two
-layered noise voices, each with three filter bands and a sample-and-hold.
-Instrument it the way `lrescue_audio_debug_isr_stats()` does, then check
-whether several hits inside one frame can drain the 8-buffer queue (555us).
+**The audio ISR was the leading hypothesis. It has now been measured, and
+it is NOT the cause.** `galaga_audio_debug_take_isr_stats()` reports, during
+gameplay with the red flashes present:
+
+```
+isr 7503us / 86 calls, avg 87us, worst 92us   (per one-second window)
+```
+
+86 calls per second is exactly 22050Hz / 256 samples, so the ISR costs
+**125us per frame -- 0.75% of the 16660us budget**. Even its worst single
+invocation (92us) is only ~1.3 DVI scanline periods. It contributes, but it
+cannot account for a starved frame, and every other candidate #35 lists was
+already eliminated by measurement.
+
+**What the same run points at instead.** The numbers that matter are not the
+frame totals:
+
+```
+work 12484-12643us   blocked 4022-4181us   noblock_run 14-25 *** STARVED
+render_max 102-108us   sprites_max 6-9
+```
+
+`work` fits the budget with 4ms of slack, and it still starves. The cause is
+a WITHIN-FRAME deficit, which is exactly what #35's own instrument #1 warns
+frame totals cannot see:
+
+- one scanline's worst-case render is **102-108us against a 69.4us DVI
+  period** -- roughly 1.5x
+- `noblock_run` shows runs of **14-25 consecutive non-blocking acquires**,
+  i.e. that many scanlines in a row where Core 0 was already behind
+- a run of ~25 scanlines each ~33us over budget accumulates ~800us of
+  deficit, and the 8-buffer queue is a hard 555us ceiling
+
+So Core 0 loses ground faster than the queue can absorb over a band of
+expensive rows, drains it, and PicoDVI paints red -- then repays the deficit
+over cheaper rows, which is why the frame TOTAL still looks healthy and why
+the flashes are intermittent rather than constant.
+
+**The next thing to try, and it is now the only named candidate left:**
+`render_native_row()` walks all `g_sprite_count` sprites for every one of
+224 rows. Per-row candidate lists built once in `galaga_video_begin_frame()`
+would cut the per-row cost directly, which is the quantity that is over
+budget -- not the frame total, which already fits. #35's own closing
+paragraph named this as the fallback; the ISR measurement has now promoted
+it to the primary.
 
 If it is the ISR, the levers are its per-sample cost (the 54XX synthesis is
 the expensive part and is entirely this project's own code, so it can be

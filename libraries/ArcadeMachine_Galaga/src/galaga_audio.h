@@ -37,6 +37,15 @@
 
 #ifdef __cplusplus
 extern "C" {
+// DEBUG: total microseconds spent inside the audio ISR since the last call,
+// the number of invocations, and the single worst invocation -- then resets
+// all three. The average (total/calls) and the worst single call answer
+// different questions: a sustained per-channel cost increase moves the
+// average, while a rare outlier (a channel hitting a loop-restart edge
+// case) moves only the max. DEVNOTES.md problem #35.
+void galaga_audio_debug_take_isr_stats(uint32_t *total_us, uint32_t *calls,
+                                       uint32_t *max_call_us);
+
 #endif
 
 #define GALAGA_AUDIO_SAMPLE_RATE 22050  // Hz, output rate fed to hal_audio_init()

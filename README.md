@@ -123,6 +123,32 @@ tracing, real frame rendering to PPM, and audio captured to WAV. Most of the
 hard bugs in this project turned out to live in the emulated machine, where
 this is by far the fastest place to find them. See `tools/README.md`.
 
+## Debugging on hardware
+
+Every game here is flashed firmware with no OS, so the loop is: add an
+instrument, reflash, read the serial line. `arduino-cli upload` takes
+seconds (a 1200-baud touch into BOOTSEL, then a UF2 copy), so this is faster
+than attaching a debugger and it leaves the instrument behind for next time.
+
+**No SWD/OpenOCD/Debug Probe is needed or used** — earlier sessions fought
+75–200 second SWD loads before working this out. See `DEVNOTES.md`'s "How
+hardware debugging actually works on this project".
+
+Each sketch prints a once-per-second heartbeat:
+
+```
+[dkong] frame 1980, frame 16665us (work 11815us, blocked 4850us), work_max 15563us, audio 3045us
+```
+
+`frame` on its own tells you nothing — `hal_video_acquire_scanline()`
+blocks, so it pins at the DVI frame period as soon as the work fits.
+**`work` is the real cost** and `blocked` is the slack (`DEVNOTES.md` #25).
+Reading it while a serial monitor is open needs the port free — see
+`DEVNOTES.md` for the Arduino IDE Serial Monitor conflict.
+
+For anything about the emulated machine rather than the board, use the host
+harnesses above instead; they answer the same questions in about a second.
+
 ## More detail
 
 See `DEVNOTES.md` for the full account of every real bug found while

@@ -1985,7 +1985,13 @@ each candidate rotation in the game's host harness and compare where the
 score text lands against a known-good frame from a game already confirmed
 upright. That is what settled it here.
 
-### 42. Sound: what is missing, and why the main CPU does not notice
+### 42. Sound: what was missing, and why the main CPU did not notice
+
+**Superseded by #44-#48, which implemented all of this.** Kept because the
+second half -- why the main CPU runs correctly with no sound hardware at
+all -- is still the reason a silent build was a safe intermediate step, and
+because the same question will come up for the next machine whose sound is
+deferred.
 
 Donkey Kong has no sound chip. It has an MB8884 (8035-class MCS-48 MCU)
 running its own 2KB program, driving a DAC through port 1 and playing voice
@@ -2213,6 +2219,43 @@ missing file.** That single distinction is what took a reflash to establish.
 
 The remaining sketches still lack this. Worth adding the next time one of
 them is touched rather than the next time one of them fails.
+
+## How hardware debugging actually works on this project
+
+Recorded because it is not obvious, and because the earlier sessions in this
+file spent a lot of effort on an approach that turned out not to be needed.
+
+**No debugger, no Raspberry Pi Debug Probe, no SWD, no OpenOCD.** The
+Ms. Pac-Man, Donkey Kong and Donkey Kong sound work in this file was all
+done with three things and nothing else:
+
+1. **USB flashing, which takes seconds.** `arduino-cli upload -p <port>`
+   does a 1200-baud touch into BOOTSEL and copies the UF2. There is no
+   OpenOCD binary on the development machine at all. Earlier Galaga sessions
+   fought 75-200 second SWD loads at 100kHz; that was the hard way, and the
+   notes under "Tooling notes specific to this board" record the two SWD
+   traps worth knowing if anyone ever goes back to it (including a
+   `monitor reset init` that wedges the board and needs a power cycle).
+2. **A serial heartbeat printed once per second.** `work`/`blocked` is the
+   entire game -- see #25 for why a raw frame time tells you nothing. Every
+   hardware diagnosis in this file came from that line: the frame-budget
+   numbers, the DMA counters, the audio-ISR cost, the `-Os` finding.
+3. **The host harness**, for everything that is about the emulated machine
+   rather than the board. It runs the real machine natively in about a
+   second per thousand frames, with PPM dumps, WAV capture, scripted input
+   and instruction tracing.
+
+**The rule that made this work:** when something is wrong on hardware, add
+an instrument and reflash rather than attaching a debugger. A reflash is
+under a minute, and the instrument stays in the tree for next time -- which
+is why `--banks`, `--dma`, `--audio`, `--sndtrace`, `--channels` and the
+per-game heartbeats all exist. A debugger session leaves nothing behind.
+
+**The corollary, learned expensively in #43, #45, #47 and #49:** the
+instrument has to measure the thing you care about, and a failure mode that
+is silent by design needs a diagnostic designed alongside it. Four separate
+times in these notes the fastest path was blocked simply because nothing on
+the board could say what it was doing.
 
 ## Confirmed working on real hardware (as of this writing)
 

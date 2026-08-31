@@ -1920,6 +1920,156 @@ version of the silent fill wrote `count * 2 * sizeof(int32_t)` and would
 have overrun every audio buffer by 2x, on a path that produces silence
 either way.
 
+## Donkey Kong sound (`ArcadeCPU_MCS48`, `dkong_audio.cpp`)
+
+The project's **third CPU axis**. Donkey Kong has no sound chip: it has an
+MB8884 (8035-class MCS-48) running its own ROM into a DAC, plus a discrete
+analog network. The 8035 and its DAC are EMULATED; the three discrete
+channels are APPROXIMATED and tuned against recordings of a real machine,
+the way Galaga's 54XX explosion was.
+
+`ArcadeCPU_MCS48` is transcribed from MAME's `mcs48.cpp` -- opcode table,
+per-opcode machine cycles, timer/counter prescaler, interrupt model. Four
+architecture traps are documented in its header; the one that actually cost
+something is #44 below.
+
+### 44. `MOVX` is not `INS A,BUS`, and stubbing it out costs exactly the sampled sounds
+
+The first working build played music and effects but was missing whole
+categories of sound. The cause was a stub in the CPU core, written with a
+confident comment: MOVX "does not exist on an 8035 in this role."
+
+MAME reaches `dkong_tune_r` through **two different paths**:
+
+- `bus_in_cb` -> `INS A,BUS`, offset 0 -- fetches a **sound command**
+- the I/O map `map(0x00, 0xff)` -> **`MOVX A,@R0`**, offset `R0` -- reads a
+  **sample byte** from the banked voice ROM
+
+Only the first was wired. So the 8035 received commands and played its
+synthesised music perfectly, while every sampled sound read back 0xFF and
+produced nothing. **The music playing is what made it look like a working
+sound board.** Implementing MOVX and routing it to the tune ROM took the
+DAC from 66 distinct values to 121, and its idle-0x00 share from 60% to 25%.
+
+Generalisable: a partly-working subsystem is more dangerous than a dead one,
+because the working part is the evidence you accept.
+
+### 45. Debugging audio from the outside in, and a unipolar DAC
+
+Two bugs in the DAC path, and one process failure that cost more than both.
+
+**The DAC is UNIPOLAR.** MAME scales it `DS_DAC * (SUP_V/256)` -- a ramp
+from 0V at 0x00, not a signed value centred on 0x80. Treating it as centred
+made the idle state (which this program spends most of its time in, writing
+0x00) a full-scale negative DC offset. The symptom is worth memorising:
+**audio whose RMS exactly equals its peak** -- a constant, which is neither
+silence nor sound.
+
+**The decay circuit (Q7/R20/C32) is deliberately NOT modelled.**
+Implementing it literally gave 0.84s of audio then permanent silence,
+because this game's 8035 leaves port 2 at 0xFF and the gate would mute it in
+exactly the state the program lives in. Rather than model it backwards, it
+is omitted and said so. Cost: some residual noise between sounds.
+
+**The process failure:** three rounds of poking at the audio output before
+adding `--sndtrace`. "Is the CPU executing the code I think it is" is a
+question about the CPU, and no amount of staring at output samples answers
+it. The trace took two minutes and settled it immediately -- it showed the
+8035 booting at 0x000 through `STRT T` into a sensible init block, which
+ruled out the entire CPU core in one step.
+
+### 46. Deriving what you can, measuring what you cannot
+
+The three discrete channels needed both MAME's constants and the user's
+recordings, and neither alone was enough.
+
+**MAME's constants fixed the pitch.** The stomp sounded like a woodblock
+because its noise ran at the audio rate; MAME clocks the LFSR at
+`CLOCK_2VF`, and `dkong.h` defines that as `MASTER_CLOCK/5/4/16/12/2/2` =
+**4000 Hz**. Five and a half times too much noise bandwidth is the entire
+difference between a woodblock and a boom. Likewise both 555s are
+`DISCRETE_555_ASTABLE_CV(RES_K(47), RES_K(27), C)`, so
+`f = 1.44/((R1+2*R2)*C)` gives 303Hz (jump, 47nF) and 432Hz (walk, 33nF)
+where guesses had put 1400 and 900.
+
+**The recordings fixed the shape**, which no component value could supply:
+
+- The jump does not ramp, it **warbles** -- 233..467Hz at ~10Hz, for ~0.52s.
+  A monotonic sweep is what you get from reading the topology and guessing.
+- `thump.wav` showed the stomp's decay was 2x too fast (0.3s vs 0.6s); its
+  pitch was already right.
+- The jump's warble **narrows** as the note decays (early swings 233..467,
+  late ones 333..467) -- the CV sweep dying with the envelope.
+
+**Twice, a perfectly matching average hid a wrong sound.** The walk's raw
+contour had a mean pitch identical to the reference (477Hz both) and still
+sounded low, because the chirp's early, loudest portion sat at 300-370Hz
+where the real one opens at 430-530. The jump's mean matched too (369 vs
+372) while sounding mechanical, for the narrowing above. The mean was simply
+the wrong statistic -- a number that matches perfectly can still be the
+wrong number to look at. Compare the whole contour, not a summary of it.
+
+### 47. The walk is a GATE, not a trigger -- and a per-step chirp, not a warble
+
+Reported by ear as "too loud and too simple, something more complex is going
+on." Both halves were true and neither was a tuning problem.
+
+**Gate, not trigger.** MAME's walk 555 runs continuously -- its enable is
+hard-wired to 1 -- and `DS_SOUND0_INV` only modulates an RC network that
+opens onto it. Measured on hardware: the game **holds** signal bit 0 high
+for about 49ms per step (1.6% duty across 14 steps in a 43s run). The first
+implementation retriggered a 150ms decaying envelope on each rising edge:
+three times too long, and the wrong mechanism.
+
+**Deterministic chirp, not a free-running LFO.** `walk.wav` shows every step
+following the same contour -- ~500Hz, dipping, then climbing steeply to
+700Hz over ~0.15s. A free-running oscillator catches a different phase on
+every step, so no two steps sound alike; that mush is what "not charming"
+meant. Restarting the contour per step gives them all one recognisable
+shape.
+
+**An instrument for sounds that are correctly quiet.** Once the walk was
+mixed properly it vanished from the spectrum under the music, and its own
+verification became impossible. `--channels` solos any subset (bit0 DAC,
+bit1 stomp, bit2 jump, bit3 walk). "I cannot see it" is not "it is not
+there".
+
+**A misreading worth recording:** a ~7Hz recurrence in the first gameplay
+capture was read as the walk rhythm. It is the music's bassline; real steps
+are ~2Hz. The duty-cycle counter is what settled it. Gameplay captures are
+the right source for MECHANISM (gating, rhythm, relative level); the
+isolated `dk_sounds/*.wav` files are the right source for TIMBRE. Asking
+either question of the other recording wastes a cycle.
+
+### 48. Interleaving, for the fourth time -- now the audio
+
+Switching sound on broke frame pacing outright: `frame` went from a pinned
+16663us to swinging 14446..19074us, with `work` up from ~9.4ms to ~13.6ms.
+
+**The budget was never the problem.** 9.4ms video + 2.9ms audio = 12.3ms of
+a 16.66ms frame, which fits with room to spare. What broke was WHERE the
+2.9ms sat: all of it ran *after* the 240 scanline submissions, so Core 0
+stopped feeding the DVI queue for 2.9ms, and Core 1 can only coast on the
+8-buffer queue (~555us, a hard libdvi ceiling) plus vblank (~1.4ms) --
+about 2ms. The queue starved on every single frame.
+
+This is problems #18/#20/#34/#36 again. The CPU half of this very frame had
+been carefully interleaved from the start, and then an un-interleaved burst
+was bolted onto the end of it. **The rule is not "is there budget", it is
+"is there ever a gap longer than ~2ms between two scanline submissions".**
+Slicing the audio into the scanline loop fixed it outright.
+
+Two things that were NOT the fix, tried first and measured: moving the 8035
+core and the synthesis to SRAM via `.time_critical` (kept -- it is correct,
+just not decisive), and replacing per-sample `sinf`/`cosf` with a
+RAM-resident LUT (kept, same reason). The measurement is what stopped those
+from being mistaken for the answer.
+
+Also fixed here: after the restructure the audio-cost instrument wrapped a
+call the interleaved path no longer makes, and read a constant `0us`. **A
+lying instrument is worse than none** -- it now measures inside the slices,
+where the work actually happens.
+
 ## Confirmed working on real hardware (as of this writing)
 
 `input_test_fruitjam`, `dvi_test_fruitjam`, `audio_test_fruitjam`,
@@ -2016,8 +2166,10 @@ differently than the player-explosion path that was tuned.
 with the real `dkong_assets/rom/` set -- Z80, the i8257 sprite DMA, the
 tilemap+sprite renderer, the resistor-network palette, and 4-way joystick +
 jump (the existing SHOOT button; this game needed no new board wiring).
-**Sound is not implemented at all** for this game (see #42), so there is
-nothing to verify there yet.
+**Sound is implemented** (see #44-#48): the 8035 sound CPU running the real
+ROM into an emulated DAC, plus approximations of the three discrete channels
+tuned against recordings of a real machine. Confirmed on hardware: music,
+the sampled effects, jump, walk and Kong's climb stomps.
 
 Frame budget, measured on hardware over ~60,000 frames:
 
@@ -2027,7 +2179,9 @@ Frame budget, measured on hardware over ~60,000 frames:
 
 `work` sits at **9340-9747us of the 16660us budget (~56-58%)**, peaking at
 10289us, with `frame` pinned at 16663-16664us -- a flat 60fps with no
-dropped frames. That makes this the **second-heaviest game in the project**,
+dropped frames. WITH SOUND, `work` is 11.6-13.6ms peaking at ~15.8ms (95%),
+of which ~2.9ms is the sound half; `frame` stays pinned either way.
+That makes this the **second-heaviest game in the project**,
 behind only Galaga's 14946us peak and well above Ms. Pac-Man/Pac-Man. Two
 reasons, both structural rather than fixable by tuning: the renderer walks
 every sprite for every scanline (the hardware's own per-scanline selection,
@@ -2035,6 +2189,12 @@ faithfully emulated), and the 8257 moves ~384 bytes a frame through the
 CPU's own read/write path. Comfortable at 60%, but this is the game to
 measure first if anything is ever added to its frame.
 
-**Not yet separately verified:** two-player mode, landscape/180 rotation
-(same known sequential-path limitation as Pac-Man and Ms. Pac-Man --
-problems #18/#19/#20), and the later stages (rivets, elevators, conveyors).
+**Also confirmed in play:** two-player mode, all four screen rotations, and
+the second stage. Note that unlike Pac-Man and Ms. Pac-Man, this game's yoko
+orientations were reported working rather than showing the red lines
+problems #18/#19/#20 predict for the sequential path -- consistent with its
+lighter per-frame budget (57% here against Ms. Pac-Man's), but worth a
+closer look if that ever changes.
+
+**Still not verified:** the later stages beyond the second (elevators,
+rivets).

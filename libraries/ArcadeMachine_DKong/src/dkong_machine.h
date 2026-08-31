@@ -118,6 +118,10 @@ void dkong_run_frame(dkong_system *system);
 // running" with a number -- if it is not, the screen has a background and
 // no sprites, which is a subtler failure than a crash. Zero cost when
 // unused; see tools/dkong_host/main.cpp.
+// Mean microseconds per frame spent in dkong_audio_run_frame() over the
+// last 60 frames -- the sound half's real cost against the 16660us budget.
+uint32_t dkong_debug_audio_us(void);
+
 void dkong_debug_take_dma_stats(uint32_t *out_transfers, uint32_t *out_bytes);
 
 #ifdef __cplusplus

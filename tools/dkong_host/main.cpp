@@ -24,13 +24,33 @@
 #include "dkong_video.h"
 #include "dkong_assets.h"
 #include "dkong_input.h"
+#include "dkong_audio.h"
 #include "arcade_hal_video.h"
 #include "z80.h"
 
 extern "C" void host_storage_set_rom_dir(const char *dir);
+// Drives the machine's own registered audio fill callback -- the same one
+// the board's audio ISR calls on device. See tools/host_common/hal_host.cpp.
+extern "C" void host_audio_fill(int32_t *out, int count);
+
+// Overrides the weak no-op in dkong_audio.cpp, so --sndtrace prints the
+// sound CPU's instruction stream.
+static long g_frame;  // defined once, below -- forward-declared here so the
+                      // debug hooks can timestamp against it
+extern "C" void dkong_audio_debug_trigger_event(const char *name) {
+    // Frames are 60.606Hz on this board, so frame/60.606 is the offset
+    // into a --wav capture.
+    printf("  [%-5s triggered at frame %ld = t %.2fs]\n", name, g_frame, (double)g_frame / 60.60606);
+}
+
+extern "C" void dkong_audio_debug_trace_line(uint16_t pc, uint8_t op, uint8_t a,
+                                             uint8_t dac, uint8_t p2, uint8_t psw,
+                                             uint8_t timer) {
+    printf("  8035 pc=%03X op=%02X a=%02X dac=%02X p2=%02X psw=%02X t=%02X\n",
+           pc, op, a, dac, p2, psw, timer);
+}
 
 static dkong_system g_system;
-static long         g_frame = 0;
 
 // FNV-1a over the emulated machine, for A/B comparisons that must not
 // change emulation. Includes the DMA registers and the video latches, so a
@@ -88,6 +108,108 @@ static void print_state(const char *tag) {
            (unsigned)g_system.palette_bank, (unsigned)g_system.rotation,
            (int)g_system.mirror_x);
     printf("  digest=%016" PRIX64 "\n", digest_state());
+}
+
+// --- WAV capture ---------------------------------------------------------
+//
+// Writes a 16-bit mono WAV of exactly what the board would play, by pumping
+// the machine's own fill callback. This exists because Donkey Kong's sound
+// is half emulated (the 8035 and its DAC) and half approximated (the three
+// discrete channels), and the approximated half can only be judged by ear.
+// Galaga's 54XX explosion was tuned the same way.
+static FILE *g_wav;
+static uint32_t g_wav_samples;
+
+static void wav_open(const char *path) {
+    g_wav = fopen(path, "wb");
+    if (!g_wav) { fprintf(stderr, "cannot write %s\n", path); return; }
+    uint8_t hdr[44];
+    memset(hdr, 0, sizeof(hdr));
+    fwrite(hdr, 1, sizeof(hdr), g_wav); // patched in wav_close()
+    g_wav_samples = 0;
+}
+
+static void wav_pump(void) {
+    if (!g_wav) return;
+    static int32_t buf[1024];
+    // Drain exactly one frame's worth of REAL TIME, not a round number. At
+    // 22050Hz against this board's 60.606Hz frame rate that is 363.825
+    // samples, so the fraction has to be carried -- draining 512 per frame
+    // makes the producer run ~1.4x faster than real time and the captured
+    // WAV then plays back at the wrong speed, which is exactly the sort of
+    // thing that gets mistaken for the emulation being wrong.
+    static double accum = 0.0;
+    accum += (double)DKONG_AUDIO_SAMPLE_RATE * 384.0 * 264.0 / 6144000.0;
+    int n = (int)accum;
+    accum -= n;
+    if (n > (int)(sizeof(buf) / sizeof(buf[0]))) n = (int)(sizeof(buf) / sizeof(buf[0]));
+    host_audio_fill(buf, n);
+    for (int i = 0; i < n; i++) {
+        int16_t s = (int16_t)(buf[i] >> 16); // both channels carry the same mono mix
+        fputc(s & 0xff, g_wav);
+        fputc((s >> 8) & 0xff, g_wav);
+    }
+    g_wav_samples += (uint32_t)n;
+}
+
+static void put32(FILE *f, uint32_t v) { fputc(v & 0xff, f); fputc((v >> 8) & 0xff, f); fputc((v >> 16) & 0xff, f); fputc((v >> 24) & 0xff, f); }
+static void put16(FILE *f, uint16_t v) { fputc(v & 0xff, f); fputc((v >> 8) & 0xff, f); }
+
+static void wav_close(void) {
+    if (!g_wav) return;
+    uint32_t data_bytes = g_wav_samples * 2;
+    fseek(g_wav, 0, SEEK_SET);
+    fwrite("RIFF", 1, 4, g_wav); put32(g_wav, 36 + data_bytes);
+    fwrite("WAVEfmt ", 1, 8, g_wav); put32(g_wav, 16);
+    put16(g_wav, 1); put16(g_wav, 1);
+    put32(g_wav, DKONG_AUDIO_SAMPLE_RATE);
+    put32(g_wav, DKONG_AUDIO_SAMPLE_RATE * 2);
+    put16(g_wav, 2); put16(g_wav, 16);
+    fwrite("data", 1, 4, g_wav); put32(g_wav, data_bytes);
+    fclose(g_wav);
+    printf("[wrote %u audio samples (%.2fs)]\n", g_wav_samples,
+           (double)g_wav_samples / DKONG_AUDIO_SAMPLE_RATE);
+    g_wav = NULL;
+}
+
+static void report_audio(void) {
+    uint32_t under = 0, over = 0, peak = 0, cycles = 0;
+    dkong_audio_debug_take_stats(&under, &over, &peak, &cycles);
+    printf("--- sound (frame %ld) ---\n", g_frame);
+    printf("  8035 machine cycles run: %" PRIu32 "   FIFO peak depth: %" PRIu32 "\n", cycles, peak);
+    printf("  FIFO underruns: %" PRIu32 "   overruns: %" PRIu32 "\n", under, over);
+    uint32_t p1w = 0, p2w = 0; uint8_t dmin = 0, dmax = 0, p2v = 0;
+    dkong_audio_debug_take_dac(&p1w, &p2w, &dmin, &dmax, &p2v);
+    printf("  P1(DAC) writes: %" PRIu32 "   P2 writes: %" PRIu32 "   DAC range: %u..%u\n",
+           p1w, p2w, dmin, dmax);
+    printf("  P2 latch now: %02X (discharge_inv=%d, rom page=%u, cmd-select=%d)\n",
+           p2v, (p2v >> 7) & 1, p2v & 7, (p2v >> 6) & 1);
+    const uint32_t *hist = dkong_audio_debug_dac_hist();
+    int distinct = 0; uint32_t tot = 0;
+    for (int i = 0; i < 256; i++) { if (hist[i]) distinct++; tot += hist[i]; }
+    uint32_t tw = 0, tj = 0, ts = 0;
+    dkong_audio_debug_take_triggers(&tw, &tj, &ts);
+    printf("  discrete triggers -- walk: %" PRIu32 "  jump: %" PRIu32 "  stomp: %" PRIu32 "\n", tw, tj, ts);
+    uint32_t cw = 0, ia = 0, sb[8] = {0}; uint8_t cs[16] = {0};
+    dkong_audio_debug_take_requests(&cw, &ia, sb, cs);
+    printf("  main CPU asked for -- cmd writes: %" PRIu32 "  sound IRQs: %" PRIu32 "\n", cw, ia);
+    printf("  signal-latch writes per bit:");
+    for (int i = 0; i < 8; i++) printf(" b%d=%" PRIu32, i, sb[i]);
+    uint32_t bh[8] = {0}, bs = 0;
+    dkong_audio_debug_take_duty(bh, &bs);
+    printf("\n  signal-bit duty (%% of samples high):");
+    for (int i = 0; i < 8; i++) printf(" b%d=%.1f%%", i, bs ? 100.0*bh[i]/bs : 0.0);
+    printf("\n  command nibbles seen:");
+    for (int i = 0; i < 16; i++) if (cs[i]) printf(" %X", i);
+    printf("\n");
+    printf("  DAC values written: %d distinct of 256", distinct);
+    if (tot) {
+        int top = 0; for (int i = 1; i < 256; i++) if (hist[i] > hist[top]) top = i;
+        printf("   most common %02X (%.1f%% of writes)", top, 100.0 * hist[top] / tot);
+    }
+    printf("\n");
+    if (cycles == 0)
+        printf("    *** the sound CPU is not running at all ***\n");
 }
 
 static void report_dma(long frames_since) {
@@ -168,6 +290,13 @@ static void usage(const char *argv0) {
            "  --ppm-prefix P  filename prefix for PPM dumps (default \"frame\")\n"
            "  --stall N       exit 3 if the rendered frame is byte-identical for N\n"
            "                  consecutive checks (default 0 = off; needs --ppm-every)\n"
+           "  --wav FILE      capture the machine's own audio output to a 16-bit\n"
+           "                  mono WAV -- the only way to judge the approximated\n"
+           "                  discrete channels, which cannot be checked by eye\n"
+           "  --audio         report sound-CPU activity and audio FIFO health\n"
+           "  --sndtrace N    dump the first N sound-CPU instructions\n"
+           "  --channels M    enable only these channels: bit0=DAC/music,\n"
+           "                  bit1=stomp, bit2=jump, bit3=walk (default 0xF)\n"
            "  --input SPEC    scripted presses, e.g. 600:coin,800:start1,900:jump\n"
            "                  (buttons: coin start1 start2 up down left right jump)\n"
            "  --press-frames N  how long each scripted press is held (default 6)\n",
@@ -179,7 +308,8 @@ int main(int argc, char **argv) {
     long frames = 3000, every = 0, digest_every = 0, ppm_every = 0, stall_lim = 0;
     long rotation = -1;
     unsigned long long seed_cyc = 0;
-    bool do_seed = false, want_dma = false;
+    bool do_seed = false, want_dma = false, want_audio = false;
+    const char *wav_path = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc)               rom_arg = argv[++i];
@@ -188,6 +318,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--every") && i + 1 < argc)        every = atol(argv[++i]);
         else if (!strcmp(argv[i], "--digest-every") && i + 1 < argc) digest_every = atol(argv[++i]);
         else if (!strcmp(argv[i], "--dma"))                          want_dma = true;
+        else if (!strcmp(argv[i], "--audio"))                        want_audio = true;
+        else if (!strcmp(argv[i], "--channels") && i + 1 < argc)     dkong_audio_debug_set_channels((uint8_t)strtoul(argv[++i], NULL, 0));
+        else if (!strcmp(argv[i], "--sndtrace") && i + 1 < argc)     dkong_audio_debug_trace(atol(argv[++i]));
+        else if (!strcmp(argv[i], "--wav") && i + 1 < argc)           wav_path = argv[++i];
         else if (!strcmp(argv[i], "--ppm-every") && i + 1 < argc)    ppm_every = atol(argv[++i]);
         else if (!strcmp(argv[i], "--ppm-prefix") && i + 1 < argc)   ppm_prefix = argv[++i];
         else if (!strcmp(argv[i], "--stall") && i + 1 < argc)        stall_lim = atol(argv[++i]);
@@ -223,6 +357,8 @@ int main(int argc, char **argv) {
                (double)(4294967296.0 - (double)g_system.cpu.cyc) / 50688.0);
     }
 
+    if (wav_path) wav_open(wav_path);
+
     printf("running %ld frames...\n\n", frames);
 
     static uint16_t prev_row[4096], cur_row[4096];
@@ -241,10 +377,12 @@ int main(int argc, char **argv) {
                            btn_active(7, g_frame),  // jump
                            false, false);           // rotate/mirror meta
         dkong_run_frame(&g_system);
+        if (g_wav) wav_pump();
 
         if (every > 0 && (g_frame % every) == 0) {
             print_state("state");
             if (want_dma) { report_dma(g_frame - last_report); last_report = g_frame; }
+            if (want_audio) report_audio();
         }
         if (digest_every > 0 && (g_frame % digest_every) == 0)
             printf("frame %6ld digest=%016" PRIX64 "\n", g_frame, digest_state());
@@ -273,5 +411,7 @@ int main(int argc, char **argv) {
 
     print_state("final");
     if (want_dma) report_dma(g_frame - last_report);
+    if (want_audio) report_audio();
+    wav_close();
     return 0;
 }

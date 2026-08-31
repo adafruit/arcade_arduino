@@ -11,6 +11,7 @@
 #include "arcade_hal_audio.h"
 #include "arcade_hal_storage.h"
 #include "arcade_hal_input.h"
+#include <Arduino.h> // micros() for the audio-cost measurement below
 
 // Z80 clock CLOCK_1H = MASTER_CLOCK/5/4 = 61.44MHz/20 = 3.072MHz, and the
 // frame rate is PIXEL_CLOCK/(HTOTAL*VTOTAL) = 6.144MHz/(384*264) =
@@ -26,6 +27,7 @@
 // clocks (18.432MHz there, 61.44MHz here), so this is derived here rather
 // than borrowed from that file.
 #define DKONG_CYCLES_PER_FRAME 50688UL
+
 
 void dkong_init(dkong_system *system) {
     memset(system, 0, sizeof(*system));
@@ -125,6 +127,11 @@ static void run_frame_interleaved(dkong_system *system) {
         uint16_t *buf = hal_video_acquire_scanline();
         dkong_video_render_scanline(system, i * step, buf);
         hal_video_submit_scanline(buf);
+
+        // A slice of this frame's sound, here rather than after the loop:
+        // see dkong_audio_run_slice()'s comment for what running it all at
+        // the end does to the DVI queue.
+        dkong_audio_run_slice(i, HAL_VIDEO_SCANLINES_PER_FRAME);
     }
 }
 
@@ -153,4 +160,24 @@ void dkong_run_frame(dkong_system *system) {
     if (system->nmi_mask) {
         z80_gen_nmi(&system->cpu);
     }
+
+    // Sound runs once per frame, after the main CPU has had its turn --
+    // the two communicate only through latches, so they do not need to be
+    // interleaved. Deliberately AFTER the frame's emulation rather than
+    // before: this way a command the main CPU wrote during this frame is
+    // already in the latch when the 8035 next looks. See dkong_audio.cpp
+    // for why it paces itself off the audio FIFO rather than the frame.
+    // How long the sound half actually costs, measured rather than
+    // inferred. Switching sound on took `work` from ~9.4ms to ~13.6ms of a
+    // 16.66ms budget and broke frame pacing; attributing that to the 8035
+    // without measuring it would be exactly the mistake this project keeps
+    // paying for.
+    // The interleaved path has already produced this frame's audio inside
+    // the scanline loop; only the sequential (landscape/180) path needs a
+    // whole-frame call here.
+    if (system->rotation != 1 && system->rotation != 3) {
+        dkong_audio_run_frame(system);
+    }
 }
+
+uint32_t dkong_debug_audio_us(void) { return dkong_audio_debug_cost_us(); }

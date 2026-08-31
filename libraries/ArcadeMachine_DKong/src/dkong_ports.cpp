@@ -10,10 +10,10 @@
 //   0x7000-0x73FF  sprite RAM ("sprite_ram") -- written by DMA, not by the CPU
 //   0x7400-0x77FF  video RAM (tile numbers)
 //   0x7800-0x780F  i8257 DMA controller registers
-//   0x7C00         r: IN0   w: sound command latch (ls175.3d) -- not emulated
+//   0x7C00         r: IN0   w: sound command latch (ls175.3d)
 //   0x7C80         r: IN1   w: radarscp grid colour -- not this machine
-//   0x7D00         r: IN2   w(0x7D00-0x7D07): sound signal latch (6H) -- not emulated
-//   0x7D80         r: DSW0  w: sound CPU IRQ -- not emulated
+//   0x7D00         r: IN2   w(0x7D00-0x7D07): sound signal latch (6H)
+//   0x7D80         r: DSW0  w: sound CPU external interrupt
 //   0x7D81         w: radarscp grid enable -- not this machine
 //   0x7D82         w: flip screen
 //   0x7D83         w: sprite bank
@@ -26,14 +26,14 @@
 // to hand the Z80 its IM0 vector -- because this machine interrupts by NMI
 // instead. port_in/port_out are stubs.
 //
-// SOUND IS NOT EMULATED YET. Every write this map routes to the sound
-// hardware (0x7C00, 0x7D00-0x7D07, 0x7D80) is accepted and discarded. That
-// is deliberate and safe for the main CPU: those are all write-only paths.
-// The one place silence is VISIBLE to the game is IN2 bit 6, which is the
-// sound CPU's status line -- see dkong_input.cpp, which explains what it
-// reads and why.
+// The sound writes (0x7C00, 0x7D00-0x7D07, 0x7D80) all route into
+// dkong_audio.cpp, which owns the 8035 sound CPU and the discrete-channel
+// approximations. IN2 bit 6 reads back from that side too -- it is the
+// sound CPU's status line, and is the only place the sound hardware is
+// visible to the main CPU at all.
 #include <string.h>
 #include "dkong_ports.h"
+#include "dkong_audio.h"
 
 // --- i8257 DMA -----------------------------------------------------------
 //
@@ -179,7 +179,10 @@ static uint8_t dkong_read_byte(void *userdata, uint16_t addr) {
     // ArcadeCPU_i8080's mirror_2000_at_4000 comment).
     if (addr == 0x7C00) return sys->in0;
     if (addr == 0x7C80) return sys->in1;
-    if (addr == 0x7D00) return sys->in2; // also kicks the watchdog on real hw
+    // IN2 bit 6 is the sound CPU's status line, live from the 8035's P2
+    // latch -- dkong_input.cpp fills in every other bit but cannot know
+    // this one. Before sound existed it was hard-coded to the idle value.
+    if (addr == 0x7D00) return (uint8_t)((sys->in2 & ~0x40) | dkong_audio_status_r());
     if (addr == 0x7D80) return sys->dsw0;
 
     return 0xFF; // nothing else is mapped
@@ -194,13 +197,19 @@ static void dkong_write_byte(void *userdata, uint16_t addr, uint8_t data) {
     if (addr >= 0x7400 && addr <= 0x77FF) { sys->video_ram[addr - 0x7400] = data; return; }
     if (addr >= 0x7800 && addr <= 0x780F) { dma_write_reg(sys, addr - 0x7800, data); return; }
 
-    if (addr == 0x7C00) return; // sound command latch -- not emulated
+    if (addr == 0x7C00) { dkong_audio_command_w(data); return; } // sound command latch (ls175.3d)
     if (addr == 0x7C80) return; // radarscp grid colour -- not this machine
 
-    if (addr >= 0x7D00 && addr <= 0x7D07) return; // sound signal latch (6H) -- not emulated
+    // Signal latch (6H): one bit per address, from bit 0 of the data. Bits
+    // 0/1/2 and 6/7 drive the discrete channels, bit 3 is readable by the
+    // 8035 on P2, and bits 4/5 are its T1/T0 test inputs.
+    if (addr >= 0x7D00 && addr <= 0x7D07) {
+        dkong_audio_signal_w((uint8_t)(addr - 0x7D00), data);
+        return;
+    }
 
     switch (addr) {
-    case 0x7D80: return;                                  // sound CPU IRQ -- not emulated
+    case 0x7D80: dkong_audio_irq_w(data); return;         // sound CPU external interrupt
     case 0x7D81: return;                                  // radarscp grid enable -- not this machine
     case 0x7D82: sys->flip_screen = (data & 0x01) != 0; return;
     case 0x7D83: sys->sprite_bank = (uint8_t)(data & 0x01); return;

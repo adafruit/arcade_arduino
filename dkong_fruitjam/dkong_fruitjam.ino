@@ -149,6 +149,8 @@ void loop() {
         Serial.print(blocked_us);
         Serial.print("us), work_max ");
         Serial.print(work_max);
+        Serial.print("us, audio ");
+        Serial.print(dkong_debug_audio_us());
         Serial.println("us");
     }
 }

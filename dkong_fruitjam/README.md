@@ -4,19 +4,32 @@ Donkey Kong on the Adafruit Fruit Jam — see the [top-level README](../README.m
 for the overall SAMP framework and general build steps. This page covers
 what's specific to this game.
 
-## Status: video and input only — no sound yet
+## Sound
 
-Donkey Kong has **no sound chip**. It has an MB8884 (an 8035-class MCS-48
-microcontroller) running its own program, driving a DAC directly and playing
-"voice" samples from a second ROM in banked 256-byte pages, **plus** a
-discrete analog network (LFSR noise, RC filters, a custom mixer) for jump,
-boom and spring. Emulating it means adding a third CPU axis to this project
-(`ArcadeCPU_MCS48`) and an approximation of the discrete network — a port of
-its own.
+Donkey Kong has **no sound chip**. It has an MB8884 (8035-class MCS-48
+microcontroller) running its own ROM, driving a DAC directly and playing
+sample bytes from a second ROM in banked 256-byte pages, **plus** a discrete
+analog network (LFSR noise, 555 astables swept by CD4049 inverter
+oscillators, RC networks) for stomp, jump and walk.
 
-Everything else is done. The audio hardware is still initialised and fed
-silence, so the DAC/I2S path is exercised on every boot; adding the 8035
-later means filling a buffer, not bringing up a pipeline.
+**The 8035 and its DAC are emulated.** `ArcadeCPU_MCS48` — this project's
+third CPU axis — runs the real sound ROM, and its port-1 writes become audio
+samples. That is where the music and the sampled effects come from.
+
+**The three discrete channels are approximated**, not simulated, and tuned
+against recordings of a real machine (`dk_sounds/`) the way Galaga's 54XX
+explosion was. Their pitches are derived from MAME's own component values;
+their shapes and envelopes are measured off the recordings. See
+`../DEVNOTES.md` #46 and #47 for which came from where, and why both were
+needed.
+
+The Sallen-Key low-pass on the DAC output is implemented as a biquad —
+MAME's own comment gives it directly (f = 1916 Hz, Q = 0.74). The DAC's
+decay circuit (Q7/R20/C32) is deliberately **not** modelled; see #45.
+
+Sound costs about **2.9ms of the 16.66ms frame**, and is generated
+interleaved with the scanline pump rather than in a burst — running it all
+at the end of a frame starves the DVI queue outright (#48).
 
 ## What's new about this machine
 
@@ -52,12 +65,13 @@ legally-obtained Donkey Kong ROM/PROM set:
     v_5h_b.bin   v_3pt.bin                               <- tile ROMs
     l_4m_b.bin   l_4n_b.bin   l_4r_b.bin   l_4s_b.bin    <- sprite ROMs
     c-2k.bpr     c-2j.bpr     v-5e.bpr                   <- palette + colour-code PROMs
-    s_3i_b.bin   s_3j_b.bin                              <- sound ROMs (not read yet)
+    s_3i_b.bin   s_3j_b.bin                              <- 8035 program + sample ROM
 ```
 
-The two sound ROMs are **not loaded** by this port — there is no sound
-hardware to run them. They are listed here anyway so that a card prepared
-today still works unchanged when the 8035 lands.
+`s_3i_b.bin` is the 8035's program (loaded twice, mirrored, exactly as
+`ROM_START( dkong )`'s `ROM_RELOAD` does) and `s_3j_b.bin` is its sample
+ROM. Both are needed for sound; a set without them boots and plays silently
+rather than refusing to run.
 
 The four program ROMs are required; a missing one gives a boot-error screen.
 Missing graphics ROMs are deliberately *not* fatal (you get blank tiles or
@@ -101,6 +115,12 @@ core, real ROMs/PROMs, the real i8257 DMA — into a native executable. See
     --input 600:coin,800:start1,1500:right,1700:jump --press-frames 30 \
     --ppm-every 2500 --ppm-prefix dk
 ```
+
+Sound-side flags: `--wav FILE` captures the machine's own audio output,
+`--audio` reports sound-CPU activity and FIFO health, `--sndtrace N` dumps
+the 8035's instruction stream, and `--channels M` solos individual channels
+(bit0 DAC/music, bit1 stomp, bit2 jump, bit3 walk) — which matters because a
+channel mixed at the right level is hard to measure in the mix.
 
 `--dma` reports 8257 transfers, bytes moved, and the peak number of sprites
 selected on any one scanline (the hardware limit is 16, and this port

@@ -11,7 +11,7 @@ galaga_host/     ArcadeMachine_Galaga   (3x Z80)
 pacman_host/     ArcadeMachine_Pacman   (1x Z80)
 invaders_host/   ArcadeMachine_Invaders (1x i8080)
 mspacman_host/   ArcadeMachine_MsPacman (1x Z80, banked/encrypted ROM)
-dkong_host/      ArcadeMachine_DKong    (1x Z80 + i8257 DMA)
+dkong_host/      ArcadeMachine_DKong    (1x Z80 + i8257 DMA + 8035 sound CPU)
 ```
 
 ```sh
@@ -213,6 +213,26 @@ scanline into a 64x9 line RAM, which limits it to **16 sprites per
 scanline**, and the game relies on that. The port emulates the limit rather
 than ignoring it, so `16-limit hit` going up is correct behaviour under
 load, not a warning.
+
+### Judging sound you cannot simulate
+
+`dkong_host` carries four sound flags, and each exists because a different
+question could not be answered any other way:
+
+- `--wav FILE` captures the machine's own fill callback to a 16-bit WAV.
+  Donkey Kong's discrete channels are approximations tuned by ear against
+  recordings, exactly as Galaga's 54XX explosion was, and an approximation
+  can only be judged by listening.
+- `--audio` reports sound-CPU activity and audio-FIFO health. Zero cycles,
+  or a FIFO that under-runs, are conditions worth naming rather than
+  inferring from a WAV that sounds wrong.
+- `--sndtrace N` dumps the sound CPU's instruction stream. "Is the CPU
+  executing the code I think it is" is a question about the CPU; three
+  rounds of poking at audio output failed to answer it and one trace did.
+- `--channels M` solos individual channels (bit0 DAC/music, bit1 stomp,
+  bit2 jump, bit3 walk). Once a channel is mixed at the RIGHT level it
+  disappears under the music in a spectrum, and its own verification becomes
+  impossible. "I cannot see it" is not "it is not there".
 
 ### PPM dumps and the half-width buffer
 

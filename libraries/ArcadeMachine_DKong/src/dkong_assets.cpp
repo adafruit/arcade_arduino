@@ -4,6 +4,7 @@
 #include <string.h>
 #include "dkong_assets.h"
 #include "dkong_video.h"
+#include "dkong_audio.h"
 #include "arcade_hal_storage.h"
 
 // Reset per load so a retry does not accumulate stale names.
@@ -114,8 +115,23 @@ dkong_rom_load_status_t dkong_load_rom(dkong_system *system) {
     };
     load_manifest(proms, 3);
 
-    // s_3i_b.bin / s_3j_b.bin (the 8035's program and its voice-sample ROM)
-    // are deliberately not loaded -- see dkong_assets.h.
+    // Sound ROMs. ROM_START( dkong ) loads s_3i_b.bin at 0x0000 and then
+    // ROM_RELOADs the same 2K at 0x0800, so the 8035's 4K program space is
+    // the one chip mirrored twice -- reproduced here rather than relying on
+    // address masking, because the mirror is a fact about the board and the
+    // masking would be an assumption about the code. s_3j_b.bin is the
+    // sample ROM the 8035 reads in banked 256-byte pages.
+    memset(dkong_sound_rom, 0, DKONG_SOUND_ROM_SIZE);
+    memset(dkong_tune_rom, 0, DKONG_TUNE_ROM_SIZE);
+    const rom_file_t sound_rom[] = {
+        { "s_3i_b.bin", dkong_sound_rom + 0x0000, 0x0800 },
+        { "s_3i_b.bin", dkong_sound_rom + 0x0800, 0x0800 }, // ROM_RELOAD
+        { "s_3j_b.bin", dkong_tune_rom,           0x0800 },
+    };
+    // Not fatal: a set without these boots and plays silently, which is a
+    // better outcome than refusing to run, and matches how the graphics
+    // ROMs are treated above.
+    load_manifest(sound_rom, 3);
 
     // Leave storage mounted -- dkong_load_assets() unmounts once
     // dkong_video_build_caches() has consumed the staging buffers above.

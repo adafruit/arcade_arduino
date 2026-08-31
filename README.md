@@ -10,7 +10,9 @@ one-board arcade firmware, organized so the pieces that *aren't* specific
 to one game or one board are reusable for the next port:
 
 - **`ArcadeCPU_i8080`** — the Intel 8080 CPU interpreter. No hardware or
-  game knowledge at all.
+  game knowledge at all. `ArcadeCPU_Z80` and `ArcadeCPU_MCS48` are its
+  siblings, added for the Namco/Nintendo games and for Donkey Kong's
+  sound board.
 - **`ArcadeHAL`** — plain C function contracts (video/audio/input/storage).
   No implementation lives here.
 - **`ArcadeMachine_*`** — one library per game (`ArcadeMachine_Invaders`,
@@ -40,7 +42,7 @@ just read `ArcadeHAL/src/*.h` for the contracts themselves.
 | Pac-Man | [`pacman_fruitjam/`](pacman_fruitjam/README.md) | The project's first **Z80**-based port (`ArcadeCPU_Z80`) and first tile+sprite video hardware (`ArcadeMachine_Pacman`), with fully synthesized Namco WSG sound — built from scratch against the real ROM/PROM dump and verified against MAME's driver source; see its README for citations. |
 | Galaga | [`galaga_fruitjam/`](galaga_fruitjam/README.md) | The project's first **multi-CPU** machine — three Z80s sharing RAM — plus a Namco 06XX/51XX/54XX custom I/O chain and a fourth video layer (the 05XX starfield). Synthesized WSG *and* 54XX explosion audio. |
 | Ms. Pac-Man | [`mspacman_fruitjam/`](mspacman_fruitjam/README.md) | The project's first machine that is another machine **plus a daughterboard**: stock Pac-Man hardware with the aux board's three extra ROMs, an address/data-line **encrypted** program bank, and eight address ranges that flip banks on any access. First **banked** address space and first ROM decode in the project. |
-| Donkey Kong | [`dkong_fruitjam/`](dkong_fruitjam/README.md) | The project's first **Nintendo** board and first **DMA-driven** sprites — the Z80 never writes sprite RAM, an i8257 controller does. Also its first **active-high** inputs, first **NMI** interrupt, and first **resistor-network** palette. **Video and input only: no sound yet** (an 8035 MCU plus a discrete analog network — see its README). |
+| Donkey Kong | [`dkong_fruitjam/`](dkong_fruitjam/README.md) | The project's first **Nintendo** board and first **DMA-driven** sprites — the Z80 never writes sprite RAM, an i8257 controller does. Also its first **active-high** inputs, first **NMI** interrupt, and first **resistor-network** palette. Sound is an emulated **8035 sound CPU** (`ArcadeCPU_MCS48`, the project's third CPU axis) driving a DAC, plus approximations of its discrete analog channels tuned against recordings of a real machine. |
 
 Each game's own README covers its specific ROM/sample layout, controls, and
 any known quirks. They all share the building steps below.

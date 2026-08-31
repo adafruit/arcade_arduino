@@ -41,6 +41,11 @@ typedef enum {
 // MSPACMAN_COLOR_ERROR_* constants).
 mspacman_rom_load_status_t mspacman_load_rom(mspacman_system *system);
 
+// Comma-separated list of manifest files that could not be loaded during the
+// last mspacman_load_rom() call ("" if none), each tagged "(short)" if it
+// opened but read fewer bytes than expected.
+const char *mspacman_debug_missing_files(void);
+
 #ifdef __cplusplus
 }
 #endif

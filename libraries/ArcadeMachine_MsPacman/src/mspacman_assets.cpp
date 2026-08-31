@@ -28,6 +28,33 @@ typedef struct {
     uint32_t    size;
 } rom_file_t;
 
+// Records every file the manifest could not load, so a boot failure can name
+// the file rather than just a category. Added after a red screen on this
+// game could not be told apart from a DVI starvation red without one --
+// see DEVNOTES.md #43 and #49.
+static char g_missing[128];
+static unsigned g_missing_len;
+
+const char *mspacman_debug_missing_files(void) {
+    return g_missing_len ? g_missing : "";
+}
+
+static void note_missing(const char *name, bool short_read) {
+    if (g_missing_len + 24 >= sizeof(g_missing)) return;
+    if (g_missing_len) {
+        g_missing[g_missing_len++] = ',';
+        g_missing[g_missing_len++] = ' ';
+    }
+    for (const char *c = name; *c && g_missing_len < sizeof(g_missing) - 8; c++)
+        g_missing[g_missing_len++] = *c;
+    if (short_read) {
+        const char *tag = "(short)";
+        for (const char *c = tag; *c && g_missing_len < sizeof(g_missing) - 1; c++)
+            g_missing[g_missing_len++] = *c;
+    }
+    g_missing[g_missing_len] = '\0';
+}
+
 static bool load_manifest(const rom_file_t *files, unsigned count) {
     int loaded = 0;
     for (unsigned i = 0; i < count; i++) {
@@ -35,11 +62,12 @@ static bool load_manifest(const rom_file_t *files, unsigned count) {
         snprintf(path, sizeof(path), "/rom/%s", files[i].filename);
 
         hal_file_t *f = hal_storage_open(path);
-        if (!f) continue;
+        if (!f) { note_missing(files[i].filename, false); continue; }
 
         uint32_t br = hal_storage_read(f, files[i].dest, files[i].size);
         hal_storage_close(f);
         if (br == files[i].size) loaded++;
+        else note_missing(files[i].filename, true);
     }
     return loaded == (int)count;
 }
@@ -178,6 +206,9 @@ static void build_decrypted_bank(mspacman_system *system) {
 }
 
 mspacman_rom_load_status_t mspacman_load_rom(mspacman_system *system) {
+    g_missing[0] = '\0';
+    g_missing_len = 0;
+
     if (!hal_storage_mount()) {
         return MSPACMAN_ROM_LOAD_NO_STORAGE;
     }

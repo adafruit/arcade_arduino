@@ -2070,6 +2070,47 @@ call the interleaved path no longer makes, and read a constant `0us`. **A
 lying instrument is worse than none** -- it now measures inside the slices,
 where the work actually happens.
 
+### 49. A red screen with no way to ask why, and what -Os actually costs
+
+**Symptom:** Ms. Pac-Man, previously confirmed working, came up as a solid
+red screen after a reflash.
+
+**Red is ambiguous on this hardware, and that is the first problem.** It is
+both this project's `*_COLOR_ERROR_NO_CARD` boot-error colour AND PicoDVI's
+own queue-starvation fallback (problem #18). Those two causes live in
+completely different files. `mspacman_fruitjam.ino` had **no Serial output
+at all**, so there was no way to ask the board which one it was -- exactly
+the gap problem #43 recorded for Donkey Kong and explicitly noted that
+"every other sketch here still has". It cost a reflash here to find out.
+
+**Cause: the sketch was built without its pinned optimisation level.** Each
+sketch's `sketch.yaml` pins `opt=Optimize3` as its default FQBN, and the
+top-level README already warns that the Arduino IDE does not always pick
+that up and that the default `-Os` "is not fast enough for any of them".
+Measured, same code and same SD card, only the flag differing:
+
+```
+opt=Optimize3   work 10.0-11.5ms   blocked 5.2-6.6ms   frame pinned 16665us   plays
+default -Os     work 19.5ms        blocked 58us        frame 19534us          RED
+```
+
+19.5ms against a 16.66ms budget is **117% over**, and the giveaway is
+`blocked` collapsing to 58us: Core 0 never waits on the scanline queue
+because it is never ahead of it, so the queue is starved continuously. That
+is a number worth remembering -- **-Os costs this game roughly 8ms per
+frame, nearly doubling its work.**
+
+**Fixes applied:** `mspacman_fruitjam.ino` now has the same diagnostics
+Donkey Kong got in #43 -- a boot/asset-failure report printed once per
+second (not once at boot, which USB CDC discards with no host attached), the
+failing FILENAMES named by `mspacman_debug_missing_files()`, and a
+frame-budget heartbeat. The heartbeat is the important half here: **if it
+prints at all, the assets loaded and any red on screen is starvation, not a
+missing file.** That single distinction is what took a reflash to establish.
+
+The remaining sketches still lack this. Worth adding the next time one of
+them is touched rather than the next time one of them fails.
+
 ## Confirmed working on real hardware (as of this writing)
 
 `input_test_fruitjam`, `dvi_test_fruitjam`, `audio_test_fruitjam`,

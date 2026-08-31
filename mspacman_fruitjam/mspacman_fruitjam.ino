@@ -16,6 +16,7 @@
 #include <mspacman_machine.h>
 #include <mspacman_video.h>
 #include <mspacman_input.h>
+#include <mspacman_assets.h>
 #include <board_config_fruitjam.h>
 
 static mspacman_system g_system;
@@ -24,6 +25,13 @@ static bool            g_assets_ok   = false;
 static uint16_t        g_error_color = 0;
 
 void setup() {
+    // Serial diagnostics. This sketch had NONE, which is why a red screen on
+    // it could not be told apart from PicoDVI's own starvation-red without
+    // reflashing -- see DEVNOTES.md #43/#49. Before Core 1 starts the DVI
+    // pump is the one safe place to block briefly.
+    Serial.begin(115200);
+    delay(1500);
+
     // PicoDVI's 640x480 mode requires the system clock to equal the TMDS
     // bit clock (252 MHz) -- must happen before any other peripheral init.
     set_sys_clock_khz(252000, true);
@@ -49,6 +57,19 @@ void setup() {
 
 void loop() {
     if (!g_assets_ok) {
+        // Reported ONCE PER SECOND rather than once at boot: USB CDC
+        // discards writes while no host is attached, so a boot-time print is
+        // lost to any workflow that flashes and then opens the port.
+        static uint32_t err_count = 0;
+        if ((err_count++ % 60u) == 0) {
+            Serial.print("[mspacman] ASSET LOAD FAILED, error color 0x");
+            Serial.print(g_error_color, HEX);
+            Serial.println(g_error_color == MSPACMAN_COLOR_ERROR_NO_CARD
+                           ? " (red: no SD card / would not mount)"
+                           : " (yellow: card mounted, required ROM files missing)");
+            Serial.print("[mspacman]   could not load: ");
+            Serial.println(mspacman_debug_missing_files());
+        }
         mspacman_draw_error_frame(g_error_color);
         return; // Arduino calls loop() again immediately; queue stays fed.
     }
@@ -71,7 +92,31 @@ void loop() {
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
 
     mspacman_input_update(&g_system, coin, start1, start2, up, down, left, right, rotate, mirror);
+
+    // Frame-budget heartbeat, and proof of life: if this prints, the game is
+    // running and any red on screen is DVI starvation, not an asset failure.
+    static uint32_t frame_count = 0;
+    static uint32_t work_max = 0;
+    uint32_t t0 = micros();
     mspacman_run_frame(&g_system);
+    uint32_t frame_us   = micros() - t0;
+    uint32_t blocked_us = hal_video_take_blocked_us();
+    uint32_t work_us    = (frame_us > blocked_us) ? (frame_us - blocked_us) : 0;
+    if (work_us > work_max) work_max = work_us;
+
+    if ((++frame_count % 60u) == 0) {
+        Serial.print("[mspacman] frame ");
+        Serial.print(frame_count);
+        Serial.print(", frame ");
+        Serial.print(frame_us);
+        Serial.print("us (work ");
+        Serial.print(work_us);
+        Serial.print("us, blocked ");
+        Serial.print(blocked_us);
+        Serial.print("us), work_max ");
+        Serial.print(work_max);
+        Serial.println("us");
+    }
 }
 
 void setup1() {

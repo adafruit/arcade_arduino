@@ -1528,13 +1528,46 @@ expensive rows, drains it, and PicoDVI paints red -- then repays the deficit
 over cheaper rows, which is why the frame TOTAL still looks healthy and why
 the flashes are intermittent rather than constant.
 
-**The next thing to try, and it is now the only named candidate left:**
-`render_native_row()` walks all `g_sprite_count` sprites for every one of
-224 rows. Per-row candidate lists built once in `galaga_video_begin_frame()`
-would cut the per-row cost directly, which is the quantity that is over
-budget -- not the frame total, which already fits. #35's own closing
-paragraph named this as the fallback; the ISR measurement has now promoted
-it to the primary.
+**Three more candidates have since been tried and eliminated, each by
+measurement on hardware.** All three were byte-identical in the host
+harness first (8 frames across a 4000-frame run), so none changed
+behaviour; none changed the numbers either:
+
+1. **Per-row sprite candidate lists** -- #35's own named fallback. NOT
+   IMPLEMENTED, because the arithmetic rules it out before the code is
+   written: candidate lists remove only the per-row REJECTION SCAN, and
+   `g_sprite_count` is 6-9 in the starving frames, so that scan is 6-9
+   cheap tests per row. It cannot account for a ~33us/row overage.
+2. **Transposing the decoded pixel caches** from `[n][x][y]` to `[n][y][x]`,
+   so a tile row is 8 contiguous bytes instead of 8 reads strided by 8.
+   Plausible, and wrong: these caches are `static` arrays in SRAM, and SRAM
+   has no cache-line penalty for strided access on this part. The stride
+   only costs across flash/XIP. Measured: `work` 12531-12787 against
+   12484-12643 before -- noise.
+3. **Hoisting the x bounds check out of the sprite inner loop** by clamping
+   the column range. Measured: `work` 12552-12723, `render_max` 101-107,
+   `noblock_run` 14-27 -- all within noise of the unmodified build. At 6-9
+   sprites the sprite path simply is not where the time goes.
+
+Both code changes were reverted rather than kept: an optimisation that
+cannot be shown to do anything is churn, and a comment claiming a benefit it
+does not have is worse than no comment.
+
+**What is actually known now.** `work` averages 12.6ms over 240 scanlines =
+**52us per row against a 69.4us DVI period**, so on average Core 0 is
+comfortably ahead -- and `blocked` confirms it with ~4ms of slack per frame.
+But `render_max` is **101-108us**, roughly double the average. The 8-buffer
+queue is a hard 555us ceiling, so a run of rows at ~105us (35us over) drains
+it in about 16 rows; `noblock_run` reporting 14-28 is exactly that
+happening. **The problem is peak per-row cost, not average, and not any of
+the three things above.**
+
+**The next step is no longer a guess to try but a measurement to take:**
+profile WHERE the time goes WITHIN an expensive row -- background clear,
+starfield, sprites, tilemap -- rather than optimising a component chosen by
+plausibility. Three plausible components have now been eliminated at a cost
+of one flash cycle each. `star_row_n[]` varies per row and the tilemap pass
+is unconditional; neither has been timed separately.
 
 If it is the ISR, the levers are its per-sample cost (the 54XX synthesis is
 the expensive part and is entirely this project's own code, so it can be

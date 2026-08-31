@@ -64,11 +64,13 @@ any known quirks. They all share the building steps below.
    `-Os` is not fast enough for any of them), so you generally don't need
    to set this by hand, but double-check it matches that sketch's
    `sketch.yaml` if the IDE doesn't pick it up automatically.
-   **This failure looks like a hardware fault, not a build setting:** at
-   `-Os` Ms. Pac-Man needs 19.5ms of a 16.66ms frame and the screen goes
-   solid red (`DEVNOTES.md` #49). Red means *either* a missing SD card *or*
-   a starved DVI queue, so check the serial heartbeat before suspecting the
-   card.
+   **This failure looks like a hardware fault, not a build setting.** At
+   `-Os` Ms. Pac-Man needs 19.5ms of a 16.66ms frame and goes solid red
+   (`DEVNOTES.md` #49); Galaga needs 17.8ms and flashes red throughout play
+   (#35). Red means *either* a missing SD card *or* a starved DVI queue, so
+   check the serial heartbeat before suspecting the card — and check the
+   optimisation level before suspecting the emulation. `arduino-cli` reads
+   `sketch.yaml` automatically; the IDE does not always.
 5. Prepare an SD card (FAT32, **MBR** partition scheme — not GPT/exFAT,
    which macOS Disk Utility defaults to on "Erase") with that game's own
    ROM/sample layout — see its README.

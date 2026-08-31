@@ -1562,12 +1562,46 @@ it in about 16 rows; `noblock_run` reporting 14-28 is exactly that
 happening. **The problem is peak per-row cost, not average, and not any of
 the three things above.**
 
-**The next step is no longer a guess to try but a measurement to take:**
-profile WHERE the time goes WITHIN an expensive row -- background clear,
-starfield, sprites, tilemap -- rather than optimising a component chosen by
-plausibility. Three plausible components have now been eliminated at a cost
-of one flash cycle each. `star_row_n[]` varies per row and the tilemap pass
-is unconditional; neither has been timed separately.
+### The actual cause of the reported red flashes: -Os again
+
+**The red flashes being investigated above were an `-Os` build.** The user
+noticed the pattern first -- red flashes after flashing from the Arduino
+IDE, none after a flash by `arduino-cli` -- which is problem #49 on
+Ms. Pac-Man happening again, this time on the heaviest game in the project.
+Measured, same code and same sprite counts (6-9):
+
+```
+                 opt=Optimize3        default -Os
+work             12.5-12.7ms          17.4-17.8ms
+work_MAX         ~13.2ms              18577us      (budget 16660us)
+blocked          ~4000us              42-55us
+render_max       101-107us            152-157us
+noblock_run      14-28                224           (the entire frame)
+fps              59                   57
+audio ISR        86us/call            122us/call
+```
+
+At `-Os` this game is over budget on EVERY frame, `blocked` collapses to
+~50us because Core 0 is never ahead of the queue, and `noblock_run` pins at
+224. That is continuous starvation -- red throughout play, not the rare
+event #35 was written about.
+
+**So #35 as originally reported may have been this all along**, and the
+three component optimisations eliminated above were chasing a symptom that
+may not exist in the shipped build.
+
+**What remains genuinely open is narrower and much less severe:** at
+`Optimize3` the `noblock_run` detector still reports 14-37, yet the user
+reports **no visible red flashes at all** in that build. Either those runs
+are too brief to see, or the detector is over-sensitive -- it already needed
+one calibration (skipping the first 16 scanlines, instrument #2 above).
+
+**Establish that correspondence before optimising anything further.** The
+measurement that would settle it: correlate `noblock_run` runs against
+photographed frames, or lower the STARVED threshold until it stops firing on
+a build known to look clean. `star_row_n[]` varies per row and the tilemap
+pass is unconditional; neither has been timed separately, but neither is
+worth timing until the signal is known to mean something.
 
 If it is the ISR, the levers are its per-sample cost (the 54XX synthesis is
 the expensive part and is entirely this project's own code, so it can be

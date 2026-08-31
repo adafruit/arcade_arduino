@@ -530,6 +530,31 @@ reading source and assuming.**
 
 ## Reference: HAL contract quirks specific to this board
 
+**Button table (`board_config_fruitjam.h` + `hal_input_fruitjam.cpp`).** The
+HAL_BTN_* enum and the `pins[]` table are designated-initialiser paired on
+purpose, so they cannot silently drift apart. It has grown once per game
+that needed something new, and each addition is a board fact, not a game
+one -- the board layer says which buttons EXIST, the sketch says what they
+mean:
+
+| Button | GPIO | Added for |
+|---|---|---|
+| ROTATE / MIRROR | 4 / 5 | original port (display meta-controls) |
+| COIN | 45 (A5) | original port |
+| START1 / START2 | 6 / 7 (D6/D7) | original port |
+| LEFT / RIGHT | 8 / 9 (D8/D9) | original port |
+| SHOOT | 10 (D10) | original port |
+| UP / DOWN | 43 / 44 (A3/A4) | Pac-Man's 4-way joystick |
+
+Donkey Kong is worth noting as the game that did NOT extend this table. Its
+cabinet has a jump button, which sounds like new hardware and briefly was
+planned as one (header A2 / GPIO 42), but a 4-way stick plus one action
+button is a shape the board already had: jump is `HAL_BTN_SHOOT`, mapped in
+`dkong_fruitjam.ino`. The machine library still calls the action `jump`,
+because the Machine axis knows game semantics and the sketch owns the
+physical mapping. Extending the board is for buttons that genuinely do not
+exist yet, as UP/DOWN did not before Pac-Man.
+
 - **`N_SCANBUF` is hard-capped at 8** by the vendored PicoDVI fork's
   `dvi_init()` — see problem #9. Do not raise it without first patching
   `ArcadeBoard_FruitJam`'s vendored copy of `libdvi`.
@@ -1465,15 +1490,118 @@ about before trusting them again:
    looked like permanent starvation and was just the pipeline refilling. It
    now skips the first 16 scanlines.
 
-**Best remaining hypothesis, and the next thing to measure.** Peak
-single-scanline render time is 100-104us against a 69.4us DVI period -- and
-it stays at ~102us even in windows with only 3 sprites, so it is *not*
-sprite-driven. That points at an audio ISR landing inside a render. **Galaga's
-audio ISR is the one in this project that has never been instrumented**, and
-it does more per sample than any other: three WSG voices plus the 54XX's two
-layered noise voices, each with three filter bands and a sample-and-hold.
-Instrument it the way `lrescue_audio_debug_isr_stats()` does, then check
-whether several hits inside one frame can drain the 8-buffer queue (555us).
+**The audio ISR was the leading hypothesis. It has now been measured, and
+it is NOT the cause.** `galaga_audio_debug_take_isr_stats()` reports, during
+gameplay with the red flashes present:
+
+```
+isr 7503us / 86 calls, avg 87us, worst 92us   (per one-second window)
+```
+
+86 calls per second is exactly 22050Hz / 256 samples, so the ISR costs
+**125us per frame -- 0.75% of the 16660us budget**. Even its worst single
+invocation (92us) is only ~1.3 DVI scanline periods. It contributes, but it
+cannot account for a starved frame, and every other candidate #35 lists was
+already eliminated by measurement.
+
+**What the same run points at instead.** The numbers that matter are not the
+frame totals:
+
+```
+work 12484-12643us   blocked 4022-4181us   noblock_run 14-25 *** STARVED
+render_max 102-108us   sprites_max 6-9
+```
+
+`work` fits the budget with 4ms of slack, and it still starves. The cause is
+a WITHIN-FRAME deficit, which is exactly what #35's own instrument #1 warns
+frame totals cannot see:
+
+- one scanline's worst-case render is **102-108us against a 69.4us DVI
+  period** -- roughly 1.5x
+- `noblock_run` shows runs of **14-25 consecutive non-blocking acquires**,
+  i.e. that many scanlines in a row where Core 0 was already behind
+- a run of ~25 scanlines each ~33us over budget accumulates ~800us of
+  deficit, and the 8-buffer queue is a hard 555us ceiling
+
+So Core 0 loses ground faster than the queue can absorb over a band of
+expensive rows, drains it, and PicoDVI paints red -- then repays the deficit
+over cheaper rows, which is why the frame TOTAL still looks healthy and why
+the flashes are intermittent rather than constant.
+
+**Three more candidates have since been tried and eliminated, each by
+measurement on hardware.** All three were byte-identical in the host
+harness first (8 frames across a 4000-frame run), so none changed
+behaviour; none changed the numbers either:
+
+1. **Per-row sprite candidate lists** -- #35's own named fallback. NOT
+   IMPLEMENTED, because the arithmetic rules it out before the code is
+   written: candidate lists remove only the per-row REJECTION SCAN, and
+   `g_sprite_count` is 6-9 in the starving frames, so that scan is 6-9
+   cheap tests per row. It cannot account for a ~33us/row overage.
+2. **Transposing the decoded pixel caches** from `[n][x][y]` to `[n][y][x]`,
+   so a tile row is 8 contiguous bytes instead of 8 reads strided by 8.
+   Plausible, and wrong: these caches are `static` arrays in SRAM, and SRAM
+   has no cache-line penalty for strided access on this part. The stride
+   only costs across flash/XIP. Measured: `work` 12531-12787 against
+   12484-12643 before -- noise.
+3. **Hoisting the x bounds check out of the sprite inner loop** by clamping
+   the column range. Measured: `work` 12552-12723, `render_max` 101-107,
+   `noblock_run` 14-27 -- all within noise of the unmodified build. At 6-9
+   sprites the sprite path simply is not where the time goes.
+
+Both code changes were reverted rather than kept: an optimisation that
+cannot be shown to do anything is churn, and a comment claiming a benefit it
+does not have is worse than no comment.
+
+**What is actually known now.** `work` averages 12.6ms over 240 scanlines =
+**52us per row against a 69.4us DVI period**, so on average Core 0 is
+comfortably ahead -- and `blocked` confirms it with ~4ms of slack per frame.
+But `render_max` is **101-108us**, roughly double the average. The 8-buffer
+queue is a hard 555us ceiling, so a run of rows at ~105us (35us over) drains
+it in about 16 rows; `noblock_run` reporting 14-28 is exactly that
+happening. **The problem is peak per-row cost, not average, and not any of
+the three things above.**
+
+### The actual cause of the reported red flashes: -Os again
+
+**The red flashes being investigated above were an `-Os` build.** The user
+noticed the pattern first -- red flashes after flashing from the Arduino
+IDE, none after a flash by `arduino-cli` -- which is problem #49 on
+Ms. Pac-Man happening again, this time on the heaviest game in the project.
+Measured, same code and same sprite counts (6-9):
+
+```
+                 opt=Optimize3        default -Os
+work             12.5-12.7ms          17.4-17.8ms
+work_MAX         ~13.2ms              18577us      (budget 16660us)
+blocked          ~4000us              42-55us
+render_max       101-107us            152-157us
+noblock_run      14-28                224           (the entire frame)
+fps              59                   57
+audio ISR        86us/call            122us/call
+```
+
+At `-Os` this game is over budget on EVERY frame, `blocked` collapses to
+~50us because Core 0 is never ahead of the queue, and `noblock_run` pins at
+224. That is continuous starvation -- red throughout play, not the rare
+event #35 was written about.
+
+**So #35 as originally reported may have been this all along**, and the
+three component optimisations eliminated above were chasing a symptom that
+may not exist in the shipped build.
+
+**What remains genuinely open is narrower and much less severe:** at
+`Optimize3` the `noblock_run` detector still reports 14-37, yet the user
+reports **no visible red flashes at all** in that build. Either those runs
+are too brief to see, or the detector is over-sensitive -- it already needed
+one calibration (skipping the first 16 scanlines, instrument #2 above).
+
+**Establish that correspondence before optimising anything further.** The
+measurement that would settle it: correlate `noblock_run` runs against
+photographed frames, or lower the STARVED threshold until it stops firing on
+a build known to look clean. `star_row_n[]` varies per row and the tilemap
+pass is unconditional; neither has been timed separately, but neither is
+worth timing until the signal is known to mean something.
 
 If it is the ISR, the levers are its per-sample cost (the 54XX synthesis is
 the expensive part and is entirely this project's own code, so it can be
@@ -1739,6 +1867,396 @@ Two things worth keeping from that:
   files in both sets matched, which eliminated a whole branch of the search
   in one step. Worth doing first for any new port, not last.
 
+## Donkey Kong port (`ArcadeMachine_DKong`, `dkong_fruitjam/`)
+
+The project's fifth machine and its first **Nintendo** board. Video and
+input are complete; **sound is not implemented** (see #42). Every hardware
+fact was verified against MAME's `dkong` driver
+(src/mame/nintendo/dkong.cpp, dkong_v.cpp) plus src/devices/machine/i8257.cpp
+and src/emu/video/resnet.cpp, fetched and read.
+
+Frame timing lands on the same 50,688 Z80 cycles per frame Pac-Man has --
+3.072MHz CPU, 6.144MHz pixel clock over 384x264 -- but from a different
+master clock (61.44MHz here, 18.432MHz there), so it is derived in
+`dkong_machine.cpp` rather than borrowed.
+
+### 40. Four firsts in one machine, and each is a different failure mode
+
+- **Sprites arrive by DMA.** The Z80 never writes sprite RAM. It programs an
+  i8257 at 0x7800-0x780F and pulses 0x7D85; the controller then copies the
+  sprite list a byte at a time through a latch (channel 0 reads memory into
+  it, channel 1 writes it back out -- the classic 8257 memory-to-memory
+  pairing). MAME's `p8257_drq_w()` comments "transfer occurs immediately",
+  so this port runs the whole transfer synchronously at the instant of that
+  write. **Failure mode: a perfectly good background tilemap with no Mario,
+  no barrels and no Kong** -- which reads as a renderer bug and is not one.
+- **Inputs are ACTIVE HIGH**, unlike every other game here. A zeroed shadow
+  byte is therefore the correct idle state, the exact inverse of the
+  all-zero-means-everything-pressed trap recorded in `hal_host.cpp` for
+  Galaga. Failure mode: every control jammed on.
+- **The interrupt is an NMI**, not an IM0/IM1 IRQ, gated by a software mask
+  at 0x7D84. Failure mode: fire it unconditionally and the game works until
+  it deliberately masks the NMI off; never fire it and nothing happens after
+  the title screen.
+- **The palette is a resistor network, not a lookup.** Two PROMs feed
+  weighted resistors through darlington and emitter-follower stages into a
+  Sanyo monitor model. `dkong_video.cpp` transcribes `compute_res_net()`
+  specialised to this board's exact configuration rather than porting
+  MAME's general solver, because the general one carries a dozen branches
+  this board never takes and every one would be dead code that still has to
+  be trusted. Two constants in there are worth not fumbling: the
+  **per-channel** darlington uses minout 0.7 where the **global** one uses
+  0.9, and `normalize_range()` at the end is load-bearing -- without it the
+  whole picture is dim in a way that looks like a monitor problem.
+
+Also emulated because the game depends on it: the hardware buffers one
+scanline into a 64x9 line RAM and so draws at most **16 sprites per
+scanline**. `draw_sprites()` is called per scanline via `update_partial()`,
+which suits this project's per-scanline renderer exactly.
+
+`--dma` in `tools/dkong_host/` reports transfers, bytes moved and peak
+sprites per scanline, for the same reason Ms. Pac-Man's `--banks` exists
+(#38): the piece of hardware whose failure looks like success needs a
+counter, not an impression. A healthy run is ~1 transfer/frame of ~384
+bytes.
+
+### 43. A boot failure that could not be seen: two instrumentation gaps, one wasted cycle
+
+Donkey Kong's first flash produced **zero serial output**, which was
+indistinguishable from a hang. Three reflashes went into finding out why,
+and neither cause was in the emulation:
+
+1. **The boot-time diagnostic was lost to an attach race.** USB CDC
+   discards writes while no host is attached, and a host attaching after
+   `arduino-cli upload` returns is already several seconds too late. A print
+   in `setup()` is therefore invisible to any workflow that flashes and
+   *then* opens the port -- which is every scripted workflow here.
+2. **The error path printed nothing at all.** `loop()`'s asset-failure
+   branch draws a solid colour and returns. That is correct behaviour for
+   the screen, but over the wire a failed asset load looked exactly like a
+   crash in `setup()`.
+
+**Fixes, both of which every other sketch in this project could still use:**
+report the failure from inside `loop()` **once per second** rather than once
+at boot, so it is observable whenever someone looks; and have the loader
+name the FILES it could not open, not just report a category.
+
+The second one mattered more than expected. "Required ROM files missing" is
+a category; `could not load: c_5et_g.bin, c_5ct_g.bin, c_5bt_g.bin,
+c_5at_g.bin` is an answer -- all four program ROMs absent means the SD card
+does not have this game's set at all, which is a one-line fix rather than an
+investigation. `dkong_debug_missing_files()` in `dkong_assets.cpp` records
+them, tagging `(short)` for a file that opened but read fewer bytes than the
+manifest expected (a truncated copy, which otherwise presents identically to
+a missing one).
+
+The general lesson is the same one #38 and #40 keep paying for in different
+costumes: **when a failure mode is silent by design, the diagnostic has to
+be designed too.** A boot-error colour is for the person looking at the
+cabinet; it is not instrumentation.
+
+### 41. The rotation default was 180 degrees off, and "it is a portrait cabinet like Pac-Man" is why
+
+`dkong_init()` first set `rotation = 3`, reasoning that Donkey Kong is a
+portrait cabinet like Pac-Man and Ms. Pac-Man, which both default to 3. The
+first rendered frame came out 180 degrees off.
+
+This is DEVNOTES #33 recurring, in the opposite direction: there the
+mistake was copying Space Invaders' default into Pac-Man, here it was
+copying Pac-Man's into Donkey Kong. The lesson #33 records -- that a
+rotation default is a hardware claim about how a real cabinet mounted its
+monitor, not a house style -- was written down and still did not prevent
+the same class of error, because "same manufacturer era, same portrait
+cabinet" felt like evidence. It is not evidence.
+
+**The invariant that does hold** is about the framebuffer rather than the
+game, and is now stated in `dkong_init()` so the next port can check it in
+one step:
+
+> the TOP of the game's picture must land on the RIGHT-hand side of the DVI
+> framebuffer.
+
+Space Invaders reaches that at rotation 1, Pac-Man and Ms. Pac-Man at
+rotation 3, Donkey Kong at rotation 1. Three machines, two values, one
+physical result -- because their native raster orientations differ.
+
+**How to check it in a minute, without hardware:** render the same frame at
+each candidate rotation in the game's host harness and compare where the
+score text lands against a known-good frame from a game already confirmed
+upright. That is what settled it here.
+
+### 42. Sound: what was missing, and why the main CPU did not notice
+
+**Superseded by #44-#48, which implemented all of this.** Kept because the
+second half -- why the main CPU runs correctly with no sound hardware at
+all -- is still the reason a silent build was a safe intermediate step, and
+because the same question will come up for the next machine whose sound is
+deferred.
+
+Donkey Kong has no sound chip. It has an MB8884 (8035-class MCS-48 MCU)
+running its own 2KB program, driving a DAC through port 1 and playing voice
+samples from a second ROM in banked 256-byte pages -- that is the music and
+the walking sound -- **plus** a discrete analog network (LFSR noise, RC
+filters, a custom mixer) for jump, boom and spring. See MAME's
+`dkong2b_audio()` and `DISCRETE_SOUND_START(dkong2b_discrete)`.
+
+Emulating it needs a third CPU axis (`ArcadeCPU_MCS48`) plus an
+approximation of the discrete network, tuned by ear the way Galaga's 54XX
+explosion channel was. That is a port of its own and was deliberately
+deferred.
+
+The main CPU runs fine without it, and the reason is worth recording so
+nobody re-derives it: **every sound path in `dkong_map()` is write-only.**
+The one readable line is IN2 bit 6, the sound CPU's status, which MAME
+wires to the *inverted* bit 4 of the 8035's port-2 latch. With no sound CPU
+that latch is always zero, so the inverted line reads **1** -- the
+idle/ready state -- and that is what `dkong_input.cpp` reports. If this
+game ever hangs waiting on something, that bit is the first suspect.
+
+The two sound ROMs are deliberately not loaded (they would occupy 4KB of
+SRAM holding bytes nothing reads) but ARE listed as required in the sketch
+README, so a card prepared today still works unchanged when the 8035 lands.
+`dkong_audio.cpp` registers a fill callback that writes silence rather than
+skipping `hal_audio_init()`, so the DAC/I2S path is exercised on every boot
+and whoever adds the MCU finds a working pipeline instead of an untested
+one.
+
+One real bug caught while writing that stub, worth repeating because it
+would have been invisible: `hal_audio_fill_cb`'s `count` is the number of
+`int32_t` ENTRIES to write, each packing both channels as
+`(sample << 16) | (uint16_t)sample`. It is **not** a frame count. The first
+version of the silent fill wrote `count * 2 * sizeof(int32_t)` and would
+have overrun every audio buffer by 2x, on a path that produces silence
+either way.
+
+## Donkey Kong sound (`ArcadeCPU_MCS48`, `dkong_audio.cpp`)
+
+The project's **third CPU axis**. Donkey Kong has no sound chip: it has an
+MB8884 (8035-class MCS-48) running its own ROM into a DAC, plus a discrete
+analog network. The 8035 and its DAC are EMULATED; the three discrete
+channels are APPROXIMATED and tuned against recordings of a real machine,
+the way Galaga's 54XX explosion was.
+
+`ArcadeCPU_MCS48` is transcribed from MAME's `mcs48.cpp` -- opcode table,
+per-opcode machine cycles, timer/counter prescaler, interrupt model. Four
+architecture traps are documented in its header; the one that actually cost
+something is #44 below.
+
+### 44. `MOVX` is not `INS A,BUS`, and stubbing it out costs exactly the sampled sounds
+
+The first working build played music and effects but was missing whole
+categories of sound. The cause was a stub in the CPU core, written with a
+confident comment: MOVX "does not exist on an 8035 in this role."
+
+MAME reaches `dkong_tune_r` through **two different paths**:
+
+- `bus_in_cb` -> `INS A,BUS`, offset 0 -- fetches a **sound command**
+- the I/O map `map(0x00, 0xff)` -> **`MOVX A,@R0`**, offset `R0` -- reads a
+  **sample byte** from the banked voice ROM
+
+Only the first was wired. So the 8035 received commands and played its
+synthesised music perfectly, while every sampled sound read back 0xFF and
+produced nothing. **The music playing is what made it look like a working
+sound board.** Implementing MOVX and routing it to the tune ROM took the
+DAC from 66 distinct values to 121, and its idle-0x00 share from 60% to 25%.
+
+Generalisable: a partly-working subsystem is more dangerous than a dead one,
+because the working part is the evidence you accept.
+
+### 45. Debugging audio from the outside in, and a unipolar DAC
+
+Two bugs in the DAC path, and one process failure that cost more than both.
+
+**The DAC is UNIPOLAR.** MAME scales it `DS_DAC * (SUP_V/256)` -- a ramp
+from 0V at 0x00, not a signed value centred on 0x80. Treating it as centred
+made the idle state (which this program spends most of its time in, writing
+0x00) a full-scale negative DC offset. The symptom is worth memorising:
+**audio whose RMS exactly equals its peak** -- a constant, which is neither
+silence nor sound.
+
+**The decay circuit (Q7/R20/C32) is deliberately NOT modelled.**
+Implementing it literally gave 0.84s of audio then permanent silence,
+because this game's 8035 leaves port 2 at 0xFF and the gate would mute it in
+exactly the state the program lives in. Rather than model it backwards, it
+is omitted and said so. Cost: some residual noise between sounds.
+
+**The process failure:** three rounds of poking at the audio output before
+adding `--sndtrace`. "Is the CPU executing the code I think it is" is a
+question about the CPU, and no amount of staring at output samples answers
+it. The trace took two minutes and settled it immediately -- it showed the
+8035 booting at 0x000 through `STRT T` into a sensible init block, which
+ruled out the entire CPU core in one step.
+
+### 46. Deriving what you can, measuring what you cannot
+
+The three discrete channels needed both MAME's constants and the user's
+recordings, and neither alone was enough.
+
+**MAME's constants fixed the pitch.** The stomp sounded like a woodblock
+because its noise ran at the audio rate; MAME clocks the LFSR at
+`CLOCK_2VF`, and `dkong.h` defines that as `MASTER_CLOCK/5/4/16/12/2/2` =
+**4000 Hz**. Five and a half times too much noise bandwidth is the entire
+difference between a woodblock and a boom. Likewise both 555s are
+`DISCRETE_555_ASTABLE_CV(RES_K(47), RES_K(27), C)`, so
+`f = 1.44/((R1+2*R2)*C)` gives 303Hz (jump, 47nF) and 432Hz (walk, 33nF)
+where guesses had put 1400 and 900.
+
+**The recordings fixed the shape**, which no component value could supply:
+
+- The jump does not ramp, it **warbles** -- 233..467Hz at ~10Hz, for ~0.52s.
+  A monotonic sweep is what you get from reading the topology and guessing.
+- `thump.wav` showed the stomp's decay was 2x too fast (0.3s vs 0.6s); its
+  pitch was already right.
+- The jump's warble **narrows** as the note decays (early swings 233..467,
+  late ones 333..467) -- the CV sweep dying with the envelope.
+
+**Twice, a perfectly matching average hid a wrong sound.** The walk's raw
+contour had a mean pitch identical to the reference (477Hz both) and still
+sounded low, because the chirp's early, loudest portion sat at 300-370Hz
+where the real one opens at 430-530. The jump's mean matched too (369 vs
+372) while sounding mechanical, for the narrowing above. The mean was simply
+the wrong statistic -- a number that matches perfectly can still be the
+wrong number to look at. Compare the whole contour, not a summary of it.
+
+### 47. The walk is a GATE, not a trigger -- and a per-step chirp, not a warble
+
+Reported by ear as "too loud and too simple, something more complex is going
+on." Both halves were true and neither was a tuning problem.
+
+**Gate, not trigger.** MAME's walk 555 runs continuously -- its enable is
+hard-wired to 1 -- and `DS_SOUND0_INV` only modulates an RC network that
+opens onto it. Measured on hardware: the game **holds** signal bit 0 high
+for about 49ms per step (1.6% duty across 14 steps in a 43s run). The first
+implementation retriggered a 150ms decaying envelope on each rising edge:
+three times too long, and the wrong mechanism.
+
+**Deterministic chirp, not a free-running LFO.** `walk.wav` shows every step
+following the same contour -- ~500Hz, dipping, then climbing steeply to
+700Hz over ~0.15s. A free-running oscillator catches a different phase on
+every step, so no two steps sound alike; that mush is what "not charming"
+meant. Restarting the contour per step gives them all one recognisable
+shape.
+
+**An instrument for sounds that are correctly quiet.** Once the walk was
+mixed properly it vanished from the spectrum under the music, and its own
+verification became impossible. `--channels` solos any subset (bit0 DAC,
+bit1 stomp, bit2 jump, bit3 walk). "I cannot see it" is not "it is not
+there".
+
+**A misreading worth recording:** a ~7Hz recurrence in the first gameplay
+capture was read as the walk rhythm. It is the music's bassline; real steps
+are ~2Hz. The duty-cycle counter is what settled it. Gameplay captures are
+the right source for MECHANISM (gating, rhythm, relative level); the
+isolated `dk_sounds/*.wav` files are the right source for TIMBRE. Asking
+either question of the other recording wastes a cycle.
+
+### 48. Interleaving, for the fourth time -- now the audio
+
+Switching sound on broke frame pacing outright: `frame` went from a pinned
+16663us to swinging 14446..19074us, with `work` up from ~9.4ms to ~13.6ms.
+
+**The budget was never the problem.** 9.4ms video + 2.9ms audio = 12.3ms of
+a 16.66ms frame, which fits with room to spare. What broke was WHERE the
+2.9ms sat: all of it ran *after* the 240 scanline submissions, so Core 0
+stopped feeding the DVI queue for 2.9ms, and Core 1 can only coast on the
+8-buffer queue (~555us, a hard libdvi ceiling) plus vblank (~1.4ms) --
+about 2ms. The queue starved on every single frame.
+
+This is problems #18/#20/#34/#36 again. The CPU half of this very frame had
+been carefully interleaved from the start, and then an un-interleaved burst
+was bolted onto the end of it. **The rule is not "is there budget", it is
+"is there ever a gap longer than ~2ms between two scanline submissions".**
+Slicing the audio into the scanline loop fixed it outright.
+
+Two things that were NOT the fix, tried first and measured: moving the 8035
+core and the synthesis to SRAM via `.time_critical` (kept -- it is correct,
+just not decisive), and replacing per-sample `sinf`/`cosf` with a
+RAM-resident LUT (kept, same reason). The measurement is what stopped those
+from being mistaken for the answer.
+
+Also fixed here: after the restructure the audio-cost instrument wrapped a
+call the interleaved path no longer makes, and read a constant `0us`. **A
+lying instrument is worse than none** -- it now measures inside the slices,
+where the work actually happens.
+
+### 49. A red screen with no way to ask why, and what -Os actually costs
+
+**Symptom:** Ms. Pac-Man, previously confirmed working, came up as a solid
+red screen after a reflash.
+
+**Red is ambiguous on this hardware, and that is the first problem.** It is
+both this project's `*_COLOR_ERROR_NO_CARD` boot-error colour AND PicoDVI's
+own queue-starvation fallback (problem #18). Those two causes live in
+completely different files. `mspacman_fruitjam.ino` had **no Serial output
+at all**, so there was no way to ask the board which one it was -- exactly
+the gap problem #43 recorded for Donkey Kong and explicitly noted that
+"every other sketch here still has". It cost a reflash here to find out.
+
+**Cause: the sketch was built without its pinned optimisation level.** Each
+sketch's `sketch.yaml` pins `opt=Optimize3` as its default FQBN, and the
+top-level README already warns that the Arduino IDE does not always pick
+that up and that the default `-Os` "is not fast enough for any of them".
+Measured, same code and same SD card, only the flag differing:
+
+```
+opt=Optimize3   work 10.0-11.5ms   blocked 5.2-6.6ms   frame pinned 16665us   plays
+default -Os     work 19.5ms        blocked 58us        frame 19534us          RED
+```
+
+19.5ms against a 16.66ms budget is **117% over**, and the giveaway is
+`blocked` collapsing to 58us: Core 0 never waits on the scanline queue
+because it is never ahead of it, so the queue is starved continuously. That
+is a number worth remembering -- **-Os costs this game roughly 8ms per
+frame, nearly doubling its work.**
+
+**Fixes applied:** `mspacman_fruitjam.ino` now has the same diagnostics
+Donkey Kong got in #43 -- a boot/asset-failure report printed once per
+second (not once at boot, which USB CDC discards with no host attached), the
+failing FILENAMES named by `mspacman_debug_missing_files()`, and a
+frame-budget heartbeat. The heartbeat is the important half here: **if it
+prints at all, the assets loaded and any red on screen is starvation, not a
+missing file.** That single distinction is what took a reflash to establish.
+
+The remaining sketches still lack this. Worth adding the next time one of
+them is touched rather than the next time one of them fails.
+
+## How hardware debugging actually works on this project
+
+Recorded because it is not obvious, and because the earlier sessions in this
+file spent a lot of effort on an approach that turned out not to be needed.
+
+**No debugger, no Raspberry Pi Debug Probe, no SWD, no OpenOCD.** The
+Ms. Pac-Man, Donkey Kong and Donkey Kong sound work in this file was all
+done with three things and nothing else:
+
+1. **USB flashing, which takes seconds.** `arduino-cli upload -p <port>`
+   does a 1200-baud touch into BOOTSEL and copies the UF2. There is no
+   OpenOCD binary on the development machine at all. Earlier Galaga sessions
+   fought 75-200 second SWD loads at 100kHz; that was the hard way, and the
+   notes under "Tooling notes specific to this board" record the two SWD
+   traps worth knowing if anyone ever goes back to it (including a
+   `monitor reset init` that wedges the board and needs a power cycle).
+2. **A serial heartbeat printed once per second.** `work`/`blocked` is the
+   entire game -- see #25 for why a raw frame time tells you nothing. Every
+   hardware diagnosis in this file came from that line: the frame-budget
+   numbers, the DMA counters, the audio-ISR cost, the `-Os` finding.
+3. **The host harness**, for everything that is about the emulated machine
+   rather than the board. It runs the real machine natively in about a
+   second per thousand frames, with PPM dumps, WAV capture, scripted input
+   and instruction tracing.
+
+**The rule that made this work:** when something is wrong on hardware, add
+an instrument and reflash rather than attaching a debugger. A reflash is
+under a minute, and the instrument stays in the tree for next time -- which
+is why `--banks`, `--dma`, `--audio`, `--sndtrace`, `--channels` and the
+per-game heartbeats all exist. A debugger session leaves nothing behind.
+
+**The corollary, learned expensively in #43, #45, #47 and #49:** the
+instrument has to measure the thing you care about, and a failure mode that
+is silent by design needs a diagnostic designed alongside it. Four separate
+times in these notes the fastest path was blocked simply because nothing on
+the board could say what it was doing.
+
 ## Confirmed working on real hardware (as of this writing)
 
 `input_test_fruitjam`, `dvi_test_fruitjam`, `audio_test_fruitjam`,
@@ -1830,3 +2348,40 @@ Pac-Man, problems #18/#23), two-player mode, and the later game stages —
 challenging stage, boss capture and dual fighter are unreached by scripted
 harness input, so it is not confirmed whether any of them drive the 54XX
 differently than the player-explosion path that was tuned.
+
+`dkong_fruitjam` (the full Donkey Kong game) in **portrait (rotation 1)**,
+with the real `dkong_assets/rom/` set -- Z80, the i8257 sprite DMA, the
+tilemap+sprite renderer, the resistor-network palette, and 4-way joystick +
+jump (the existing SHOOT button; this game needed no new board wiring).
+**Sound is implemented** (see #44-#48): the 8035 sound CPU running the real
+ROM into an emulated DAC, plus approximations of the three discrete channels
+tuned against recordings of a real machine. Confirmed on hardware: music,
+the sampled effects, jump, walk and Kong's climb stomps.
+
+Frame budget, measured on hardware over ~60,000 frames:
+
+```
+[dkong] frame 60060, frame 16664us (work 9340us, blocked 7324us), work_max 10289us
+```
+
+`work` sits at **9340-9747us of the 16660us budget (~56-58%)**, peaking at
+10289us, with `frame` pinned at 16663-16664us -- a flat 60fps with no
+dropped frames. WITH SOUND, `work` is 11.6-13.6ms peaking at ~15.8ms (95%),
+of which ~2.9ms is the sound half; `frame` stays pinned either way.
+That makes this the **second-heaviest game in the project**,
+behind only Galaga's 14946us peak and well above Ms. Pac-Man/Pac-Man. Two
+reasons, both structural rather than fixable by tuning: the renderer walks
+every sprite for every scanline (the hardware's own per-scanline selection,
+faithfully emulated), and the 8257 moves ~384 bytes a frame through the
+CPU's own read/write path. Comfortable at 60%, but this is the game to
+measure first if anything is ever added to its frame.
+
+**Also confirmed in play:** two-player mode, all four screen rotations, and
+the second stage. Note that unlike Pac-Man and Ms. Pac-Man, this game's yoko
+orientations were reported working rather than showing the red lines
+problems #18/#19/#20 predict for the sequential path -- consistent with its
+lighter per-frame budget (57% here against Ms. Pac-Man's), but worth a
+closer look if that ever changes.
+
+**Still not verified:** the later stages beyond the second (elevators,
+rivets).

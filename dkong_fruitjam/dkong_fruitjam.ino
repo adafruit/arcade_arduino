@@ -1,0 +1,167 @@
+// dkong_fruitjam -- Donkey Kong (ArcadeMachine_DKong) on the Adafruit Fruit
+// Jam (ArcadeBoard_FruitJam). This sketch is the SAMP composition root: it
+// is the ONLY place that knows both "this game" and "this board" at once.
+// invaders_fruitjam.ino and lrescue_fruitjam.ino document the full
+// rationale behind this pattern and the Core 0/Core 1 boot-order constraint
+// (g_video_ready gating hal_video_run() until Core 0 is continuously
+// feeding scanlines); both apply here unchanged.
+//
+// SOUND IS NOT IMPLEMENTED for this game yet -- see dkong_audio.h. The
+// audio hardware is still brought up and fed silence, so the DAC/I2S path
+// is exercised on every boot and whoever adds the 8035 finds a working
+// pipeline rather than an untested one.
+//
+// Core 0: game emulation, input polling, board-to-game input mapping.
+// Core 1: hal_video_run() -- drives the DVI signal; never returns.
+#include <arcade_hal_video.h>
+#include <arcade_hal_input.h>
+#include <dkong_machine.h>
+#include <dkong_video.h>
+#include <dkong_input.h>
+#include <dkong_assets.h>
+#include <board_config_fruitjam.h>
+
+static dkong_system    g_system;
+static volatile bool   g_video_ready = false;
+static bool            g_assets_ok   = false;
+static uint16_t        g_error_color = 0;
+
+void setup() {
+    // Serial for the frame-budget heartbeat in loop(). Before Core 1 starts
+    // the DVI pump is the one safe place to block briefly, giving a
+    // connecting serial monitor time to attach.
+    Serial.begin(115200);
+    delay(1500);
+    Serial.println("[dkong] boot: serial up");
+
+    // PicoDVI's 640x480 mode requires the system clock to equal the TMDS
+    // bit clock (252 MHz) -- must happen before any other peripheral init.
+    set_sys_clock_khz(252000, true);
+    Serial.println("[dkong] boot: sysclk set");
+
+    // Sets game-state defaults and calls hal_video_init() (struct/queue
+    // setup only -- does not start the physical DVI signal, does not touch
+    // storage).
+    dkong_init(&g_system);
+    Serial.println("[dkong] boot: dkong_init done");
+
+    // Storage/ROM/PROM loading -- blocking, can be slow (SD card retries).
+    // Deliberately finishes before Core 1 is allowed to start the DVI pump.
+    Serial.println("[dkong] boot: loading assets...");
+    g_assets_ok = dkong_load_assets(&g_system, &g_error_color);
+    Serial.println("[dkong] boot: load_assets returned");
+
+    // Boot result on serial. This exists because its absence cost a real
+    // debugging cycle: the error path below draws a solid colour and
+    // returns, printing NOTHING, so on the first flash of this game a
+    // failed asset load was indistinguishable over the wire from a hang in
+    // setup(). Every sketch in this project has that same gap; this one no
+    // longer does. A boot-time print is free -- it happens once, before
+    // Core 1 starts the DVI pump.
+    if (g_assets_ok) {
+        Serial.println("[dkong] assets loaded OK");
+    } else {
+        Serial.print("[dkong] ASSET LOAD FAILED, error color 0x");
+        Serial.print(g_error_color, HEX);
+        Serial.println(g_error_color == DKONG_COLOR_ERROR_NO_CARD
+                       ? " (red: no SD card / would not mount)"
+                       : " (yellow: card mounted, required ROM files missing)");
+    }
+
+    g_video_ready = true;
+}
+
+void loop() {
+    if (!g_assets_ok) {
+        // Report the failure ONCE PER SECOND, not once at boot. A boot-time
+        // print is lost to a race that cost real time here: USB CDC
+        // discards writes while no host is attached, and a host attaching
+        // after `arduino-cli upload` returns is already seconds too late.
+        // A periodic print is observable whenever someone looks, which is
+        // the property that actually matters for a diagnostic.
+        static uint32_t err_count = 0;
+        if ((err_count++ % 60u) == 0) {
+            Serial.print("[dkong] ASSET LOAD FAILED, error color 0x");
+            Serial.print(g_error_color, HEX);
+            Serial.println(g_error_color == DKONG_COLOR_ERROR_NO_CARD
+                           ? " (red: no SD card / would not mount)"
+                           : " (yellow: card mounted, required ROM files missing)");
+            Serial.print("[dkong]   could not load: ");
+            Serial.println(dkong_debug_missing_files());
+        }
+        dkong_draw_error_frame(g_error_color);
+        return; // Arduino calls loop() again immediately; queue stays fed.
+    }
+
+    // Board-specific button wiring lives here, not in ArcadeMachine_DKong.
+    // A Donkey Kong cabinet is a 4-way joystick plus ONE action button, and
+    // that button is JUMP -- mapped to the board's existing HAL_BTN_SHOOT
+    // (GPIO 10, header D10), the same physical button Space Invaders fires
+    // with and Galaga shoots with. No new board wiring is needed for this
+    // game.
+    //
+    // Note the machine library still calls its parameter `jump`, not
+    // `shoot`: ArcadeMachine_DKong only knows game-semantic actions, and
+    // which physical button produces one is exactly the decision this
+    // sketch exists to make. That split is why adding this game touched no
+    // board file at all.
+    bool coin   = hal_input_read(HAL_BTN_COIN);
+    bool start1 = hal_input_read(HAL_BTN_START1);
+    bool start2 = hal_input_read(HAL_BTN_START2);
+    bool up     = hal_input_read(HAL_BTN_UP);
+    bool down   = hal_input_read(HAL_BTN_DOWN);
+    bool left   = hal_input_read(HAL_BTN_LEFT);
+    bool right  = hal_input_read(HAL_BTN_RIGHT);
+    bool jump   = hal_input_read(HAL_BTN_SHOOT);
+    bool rotate = hal_input_read(HAL_BTN_ROTATE);
+    bool mirror = hal_input_read(HAL_BTN_MIRROR);
+
+    dkong_input_update(&g_system, coin, start1, start2,
+                       up, down, left, right, jump, rotate, mirror);
+
+    // Frame-budget instrument -- the same one the other sketches carry.
+    // `frame` alone means nothing, because hal_video_acquire_scanline()
+    // BLOCKS until Core 1 frees a buffer: the loop measures
+    // max(work, DVI frame period) and pins at ~16.7ms as soon as the work
+    // fits. `work` is the real Core 0 cost. See DEVNOTES.md #16/#25.
+    //
+    // Worth watching on this game in particular: it is the first here to
+    // run a DMA burst inside the frame (the 8257 moves ~384 bytes through
+    // the CPU's own read/write path once per frame), and its renderer walks
+    // every sprite for every scanline.
+    static uint32_t frame_count = 0;
+    static uint32_t work_max = 0;
+    uint32_t t0 = micros();
+    dkong_run_frame(&g_system);
+    uint32_t frame_us   = micros() - t0;
+    uint32_t blocked_us = hal_video_take_blocked_us();
+    uint32_t work_us    = (frame_us > blocked_us) ? (frame_us - blocked_us) : 0;
+    if (work_us > work_max) work_max = work_us;
+
+    if ((++frame_count % 60u) == 0) {
+        Serial.print("[dkong] frame ");
+        Serial.print(frame_count);
+        Serial.print(", frame ");
+        Serial.print(frame_us);
+        Serial.print("us (work ");
+        Serial.print(work_us);
+        Serial.print("us, blocked ");
+        Serial.print(blocked_us);
+        Serial.print("us), work_max ");
+        Serial.print(work_max);
+        Serial.print("us, audio ");
+        Serial.print(dkong_debug_audio_us());
+        Serial.println("us");
+    }
+}
+
+void setup1() {
+    while (!g_video_ready) {
+        tight_loop_contents(); // spin until Core 0 is ready to feed continuously
+    }
+    hal_video_run(); // never returns
+}
+
+void loop1() {
+    // Unreachable -- hal_video_run() in setup1() never returns.
+}

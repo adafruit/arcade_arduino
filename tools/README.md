@@ -11,6 +11,7 @@ galaga_host/     ArcadeMachine_Galaga   (3x Z80)
 pacman_host/     ArcadeMachine_Pacman   (1x Z80)
 invaders_host/   ArcadeMachine_Invaders (1x i8080)
 mspacman_host/   ArcadeMachine_MsPacman (1x Z80, banked/encrypted ROM)
+dkong_host/      ArcadeMachine_DKong    (1x Z80 + i8257 DMA + 8035 sound CPU)
 ```
 
 ```sh
@@ -18,6 +19,7 @@ mspacman_host/   ArcadeMachine_MsPacman (1x Z80, banked/encrypted ROM)
 ./pacman_host/build.sh   && ./pacman_host/pacman_host     --frames 5000
 ./invaders_host/build.sh && ./invaders_host/invaders_host --frames 5000
 ./mspacman_host/build.sh && ./mspacman_host/mspacman_host --frames 5000
+./dkong_host/build.sh    && ./dkong_host/dkong_host       --frames 5000
 ```
 
 Each harness searches upward for its own `*_assets/` directory, or takes an
@@ -185,6 +187,52 @@ per-instance function pointers on the `z80` struct, so the harness captures
 those after init and substitutes counting wrappers that delegate to the
 originals — the same trick `galaga_host --watch` uses, and the reason
 neither needs a single `#ifdef` in machine code.
+
+### `--dma`: the other instrument for hardware you cannot see
+
+Same idea as `--banks`, different machine. Donkey Kong's sprites reach the
+video hardware only through an i8257 DMA controller, and if that emulation
+is wrong the screen shows a perfectly good background tilemap with no
+Mario, no barrels and no Kong. That reads as "the renderer is broken" and
+sends you into the wrong file.
+
+```sh
+./dkong_host/dkong_host --frames 1200 --dma
+```
+```
+  8257 transfers: 1193  bytes moved: 459305
+  peak sprites on one scanline: 8   16-limit hit: 0 times
+```
+
+Roughly one transfer per frame of ~384 bytes is healthy. Zero transfers is
+called out explicitly in the output, because that is the case worth naming
+rather than leaving to be inferred from a small number.
+
+The sprite counters are there for a second reason: this hardware buffers one
+scanline into a 64x9 line RAM, which limits it to **16 sprites per
+scanline**, and the game relies on that. The port emulates the limit rather
+than ignoring it, so `16-limit hit` going up is correct behaviour under
+load, not a warning.
+
+### Judging sound you cannot simulate
+
+`dkong_host` carries four sound flags, and each exists because a different
+question could not be answered any other way:
+
+- `--wav FILE` captures the machine's own fill callback to a 16-bit WAV.
+  Donkey Kong's discrete channels are approximations tuned by ear against
+  recordings, exactly as Galaga's 54XX explosion was, and an approximation
+  can only be judged by listening.
+- `--audio` reports sound-CPU activity and audio-FIFO health. Zero cycles,
+  or a FIFO that under-runs, are conditions worth naming rather than
+  inferring from a WAV that sounds wrong.
+- `--sndtrace N` dumps the sound CPU's instruction stream. "Is the CPU
+  executing the code I think it is" is a question about the CPU; three
+  rounds of poking at audio output failed to answer it and one trace did.
+- `--channels M` solos individual channels (bit0 DAC/music, bit1 stomp,
+  bit2 jump, bit3 walk). Once a channel is mixed at the RIGHT level it
+  disappears under the music in a spectrum, and its own verification becomes
+  impossible. "I cannot see it" is not "it is not there".
 
 ### PPM dumps and the half-width buffer
 

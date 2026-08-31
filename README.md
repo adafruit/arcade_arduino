@@ -10,7 +10,9 @@ one-board arcade firmware, organized so the pieces that *aren't* specific
 to one game or one board are reusable for the next port:
 
 - **`ArcadeCPU_i8080`** — the Intel 8080 CPU interpreter. No hardware or
-  game knowledge at all.
+  game knowledge at all. `ArcadeCPU_Z80` and `ArcadeCPU_MCS48` are its
+  siblings, added for the Namco/Nintendo games and for Donkey Kong's
+  sound board.
 - **`ArcadeHAL`** — plain C function contracts (video/audio/input/storage).
   No implementation lives here.
 - **`ArcadeMachine_*`** — one library per game (`ArcadeMachine_Invaders`,
@@ -40,6 +42,7 @@ just read `ArcadeHAL/src/*.h` for the contracts themselves.
 | Pac-Man | [`pacman_fruitjam/`](pacman_fruitjam/README.md) | The project's first **Z80**-based port (`ArcadeCPU_Z80`) and first tile+sprite video hardware (`ArcadeMachine_Pacman`), with fully synthesized Namco WSG sound — built from scratch against the real ROM/PROM dump and verified against MAME's driver source; see its README for citations. |
 | Galaga | [`galaga_fruitjam/`](galaga_fruitjam/README.md) | The project's first **multi-CPU** machine — three Z80s sharing RAM — plus a Namco 06XX/51XX/54XX custom I/O chain and a fourth video layer (the 05XX starfield). Synthesized WSG *and* 54XX explosion audio. |
 | Ms. Pac-Man | [`mspacman_fruitjam/`](mspacman_fruitjam/README.md) | The project's first machine that is another machine **plus a daughterboard**: stock Pac-Man hardware with the aux board's three extra ROMs, an address/data-line **encrypted** program bank, and eight address ranges that flip banks on any access. First **banked** address space and first ROM decode in the project. |
+| Donkey Kong | [`dkong_fruitjam/`](dkong_fruitjam/README.md) | The project's first **Nintendo** board and first **DMA-driven** sprites — the Z80 never writes sprite RAM, an i8257 controller does. Also its first **active-high** inputs, first **NMI** interrupt, and first **resistor-network** palette. Sound is an emulated **8035 sound CPU** (`ArcadeCPU_MCS48`, the project's third CPU axis) driving a DAC, plus approximations of its discrete analog channels tuned against recordings of a real machine. |
 
 Each game's own README covers its specific ROM/sample layout, controls, and
 any known quirks. They all share the building steps below.
@@ -61,6 +64,13 @@ any known quirks. They all share the building steps below.
    `-Os` is not fast enough for any of them), so you generally don't need
    to set this by hand, but double-check it matches that sketch's
    `sketch.yaml` if the IDE doesn't pick it up automatically.
+   **This failure looks like a hardware fault, not a build setting.** At
+   `-Os` Ms. Pac-Man needs 19.5ms of a 16.66ms frame and goes solid red
+   (`DEVNOTES.md` #49); Galaga needs 17.8ms and flashes red throughout play
+   (#35). Red means *either* a missing SD card *or* a starved DVI queue, so
+   check the serial heartbeat before suspecting the card — and check the
+   optimisation level before suspecting the emulation. `arduino-cli` reads
+   `sketch.yaml` automatically; the IDE does not always.
 5. Prepare an SD card (FAT32, **MBR** partition scheme — not GPT/exFAT,
    which macOS Disk Utility defaults to on "Erase") with that game's own
    ROM/sample layout — see its README.
@@ -105,12 +115,39 @@ is just a fourth "board".
 ./tools/pacman_host/build.sh   && ./tools/pacman_host/pacman_host     --frames 5000
 ./tools/invaders_host/build.sh && ./tools/invaders_host/invaders_host --frames 5000
 ./tools/mspacman_host/build.sh && ./tools/mspacman_host/mspacman_host --frames 5000
+./tools/dkong_host/build.sh    && ./tools/dkong_host/dkong_host       --frames 5000
 ```
 
 A hardware iteration costs minutes; this costs about a second, with unlimited
 tracing, real frame rendering to PPM, and audio captured to WAV. Most of the
 hard bugs in this project turned out to live in the emulated machine, where
 this is by far the fastest place to find them. See `tools/README.md`.
+
+## Debugging on hardware
+
+Every game here is flashed firmware with no OS, so the loop is: add an
+instrument, reflash, read the serial line. `arduino-cli upload` takes
+seconds (a 1200-baud touch into BOOTSEL, then a UF2 copy), so this is faster
+than attaching a debugger and it leaves the instrument behind for next time.
+
+**No SWD/OpenOCD/Debug Probe is needed or used** — earlier sessions fought
+75–200 second SWD loads before working this out. See `DEVNOTES.md`'s "How
+hardware debugging actually works on this project".
+
+Each sketch prints a once-per-second heartbeat:
+
+```
+[dkong] frame 1980, frame 16665us (work 11815us, blocked 4850us), work_max 15563us, audio 3045us
+```
+
+`frame` on its own tells you nothing — `hal_video_acquire_scanline()`
+blocks, so it pins at the DVI frame period as soon as the work fits.
+**`work` is the real cost** and `blocked` is the slack (`DEVNOTES.md` #25).
+Reading it while a serial monitor is open needs the port free — see
+`DEVNOTES.md` for the Arduino IDE Serial Monitor conflict.
+
+For anything about the emulated machine rather than the board, use the host
+harnesses above instead; they answer the same questions in about a second.
 
 ## More detail
 
@@ -157,3 +194,8 @@ are non-obvious and worth reading before touching `ArcadeBoard_FruitJam`,
   against [MAME](https://github.com/mamedev/mame)'s `midw8080` driver
   source, not inferred by analogy — see `ArcadeMachine_LunarRescue/src/`'s
   own file-header comments for the exact formulas and where each came from.
+- Donkey Kong's memory map, i8257 DMA wiring, tile/sprite layouts,
+  per-scanline sprite selection and resistor-network palette were verified
+  against the same project's `dkong` driver (`dkong.cpp`, `dkong_v.cpp`)
+  plus `i8257.cpp` and `resnet.cpp` — see `ArcadeMachine_DKong/src/`'s own
+  file-header comments.

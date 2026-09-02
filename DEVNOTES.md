@@ -2922,3 +2922,46 @@ Still open: whether the walking effect's remaining difference is this
 filter or something in the channel that carries it. #47's rule applies --
 timbre questions need ISOLATED recordings, so a capture of that one sound
 from both machines is what settles it, not a gameplay clip of either.
+
+### 68. The first sound sweep was confounded, and it invented a systematic bug
+
+#67's investigation needed isolated captures of one effect, so
+`--sound-sweep` was added: inject one sound command per slot into a single
+capture. Thirty-two slots, one run, a neat table of band shares -- and the
+table said something striking: EVERY one of the 31 non-silent effects had
+more high-frequency content than the cabinet recording (1k-3k at 7-23%
+against 2-3%, >3k at 3-7% against 1%). A systematic "noisy" excess,
+apparently matching the verbal report exactly.
+
+**It was an artifact of the experiment.** Injecting command 0x07 on its own
+from a fresh boot produces SILENCE. What the sweep's slots contained was
+mostly continuous music started by one of the earlier commands and still
+playing, sampled 32 times. The "31 effects" were largely one effect.
+
+Re-run properly -- one command per harness run, each from a fresh boot,
+nothing else ever injected -- only **19** commands make any sound at all,
+and the picture inverts:
+
+```
+                      <150 150-400 400-1k 1k-3k  >3k    peaks (Hz)
+  real cabinet walk      4     58-71  20-32   2-3    1   587,196,190,294,285,233
+  0x11 (240ms burst)    19        78      3     1    0   220,226,214,208,196,233
+  0x17 (120ms blip)     27        68      3     1    0   285,294,277,302,269,262
+  0x19 (sustained,      19        47     22    10    1   370,185,932,359,740,1397
+        ~200ms cycle)
+```
+
+Several effects have **essentially zero energy above 3kHz**, matching the
+cabinet. There is no evidence of a systematic treble excess; the previous
+paragraph's confident table was measuring the wrong thing.
+
+**The lesson is not "be careful with sweeps".** It is that a sweep over a
+STATEFUL device is not a sequence of independent trials -- the sound board
+carries state between commands, so slot N shows the accumulated result of
+0..N, not command N. A control was available and cheap the whole time:
+inject ONE command and listen. That single run would have shown 0x07 was
+silent and killed the whole table in one command.
+
+DEVNOTES #32's rule keeps reappearing in new costumes: a comparison among
+variants cannot detect a fault they all share -- and here every variant
+shared the same background music.

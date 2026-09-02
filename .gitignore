@@ -29,3 +29,10 @@ build/
 # macOS debug bundles. `build/` above already covers their object dirs.
 tools/*_host/*_host
 tools/*_host/*.dSYM/
+
+# CPU conformance runner (tools/m6502_test/) -- its binary, and the
+# third-party 6502 test programs it runs, which are fetched rather than
+# vendored (see that tool's main.cpp header).
+tools/m6502_test/m6502_test
+tools/m6502_test/*.dSYM/
+tools/m6502_test/programs/

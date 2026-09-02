@@ -436,10 +436,34 @@ BTIME_ARAMFUNC static void ay_run(ay_t *a, uint32_t ticks,
 // evaluated at THIS port's 22050 Hz output rate, with MAME's pre-warping
 // (wc = fs*2*tan(pi*fc/fs)) -- not at MAME's own internal rate, because the
 // point is to realise the same analog filter at the rate we actually run.
+// GAIN TRIM ON THE BAND-PASS PATH. MAME's own value here is explicitly a
+// calibration rather than a measurement -- its comment reads:
+//
+//     With R51 being 1K, the gain is way to high (23.5). Therefore R51
+//     is set to 5k, but this is a hack. With the modification, sound
+//     levels are in line with observations.
+//
+// and the "observations" it names are two 1982 recordings found on a web
+// page. Trimming it further against an actual cabinet standing in the room
+// therefore CONTINUES MAME's calibration with a better reference; it is not
+// a departure from the source.
+//
+// Why it needed trimming at all: 8 of the 13 sound effects on this board run
+// through channel 2A, and the walking effect's tone (184-220Hz) sits
+// directly on this filter's 187Hz peak, so it collects the full gain where
+// other effects catch only the skirt. Reported by ear as the walk being
+// right in character but "a bit too loud compared to the rest of the audio"
+// after the cabinet-speaker high-pass (#69) had already fixed its balance
+// against the music. 0.7 is equivalent to R51 ~= 7.1k.
+//
+// Ear-tuned, and labelled as such -- the same status as Galaga's 54XX
+// explosion and Donkey Kong's discrete channels. See DEVNOTES.md #70.
+#define BP_GAIN_TRIM 0.7f
+
 #define BP_A1  (-1.9692312072f)
 #define BP_A2  ( 0.9720299897f)
-#define BP_B0  (-0.0985942864f) // gain already folded in
-#define BP_B2  ( 0.0985942864f) // = -B0; B1 is 0 for a band-pass
+#define BP_B0  (-0.0985942864f * BP_GAIN_TRIM) // gain already folded in
+#define BP_B2  ( 0.0985942864f * BP_GAIN_TRIM) // = -B0; B1 is 0 for a band-pass
 
 // Op-amp mixer: DISC_MIXER_IS_OP_AMP with both inputs through 100k and
 // rF = 10k, so each contributes rF/R = 0.1. Its 150pF across rF puts a pole

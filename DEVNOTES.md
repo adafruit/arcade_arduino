@@ -3017,3 +3017,85 @@ question was never "what does this filter do to the mix in general" but
 
 `OUTPUT_GAIN` went 300000 -> 400000 to recover the ~1.48x of level the
 filter costs; the device's measured peak had the headroom for it.
+
+### 70. Trimming the band-pass gain, and MAME's value being a hack already
+
+After #69 fixed the walk's balance against the music, it was still reported
+as right in character but "a bit too loud compared to the rest of the
+audio".
+
+That is a tuning question, not a modelling one, and MAME's own source says
+so. Its comment on the band-pass input resistor reads:
+
+    With R51 being 1K, the gain is way to high (23.5). Therefore R51
+    is set to 5k, but this is a hack. With the modification, sound
+    levels are in line with observations.
+
+-- and the "observations" it names are two 1982 recordings found on a web
+page. So the reference value was already ear-calibrated against recordings.
+Trimming it against an actual cabinet standing in the room CONTINUES that
+calibration with a better reference rather than departing from the source.
+
+`BP_GAIN_TRIM` is 0.7, equivalent to R51 ~= 7.1k. Labelled ear-tuned, the
+same status as Galaga's 54XX explosion and Donkey Kong's discrete channels.
+The measured walk/music balance stays inside the cabinet recording's range
+after the trim (below-400Hz 54-66% against the reference's 62-76%).
+
+**Why the walk specifically.** Mapping every effect to its channels with
+`--ay-trace` shows the board's architecture plainly:
+
+```
+  commands 0x01-0x05  ->  AY1 only   = the MUSIC
+  commands 0x11-0x1E  ->  AY2 only   = the SOUND EFFECTS
+  of those, 8 of 13 use AY2 channel A = the band-passed one
+```
+
+The walk is not loud by volume register -- it uses 0x0D where several
+others use 0x0F. It is loud because its tone (184-220Hz) sits directly on
+the filter's 187Hz peak, so it collects the full 7x where the others catch
+only the skirt. A gain trim is therefore the right control; attenuating the
+effect itself would have been the wrong one.
+
+### 71. Sound commands are not being lost, and the sync point that proved it
+
+The report that throwing pepper at an enemy produces both the pepper and
+the "boing" AT ONCE, where a real machine plays them in sequence, suggested
+a cross-CPU race. `--latch-trace` showed the game really does write two
+commands in one frame:
+
+```
+  [frame 782] main CPU -> sound board: 0x19
+  [frame 782] main CPU -> sound board: 0x00
+```
+
+a write-then-clear pulse. And since this port runs the main CPU for a full
+96-cycle scanline before the sound CPU gets its 32, a pulse that begins and
+ends inside that window would be invisible to the sound CPU -- exactly the
+kind of thing MAME avoids by routing this write through
+`machine().scheduler().synchronize()`.
+
+A `latch_reads` counter beside the existing `latch_writes` made it
+checkable, and reported 12 sent against 11 collected. So a sync point was
+implemented: a latch write asks the frame loop to run the sound CPU
+immediately, with a cumulative cycle target so the borrowed time is repaid.
+
+**It changed the count not at all**, and measuring per-window showed why:
+
+```
+  frames    0-249   4 sent, 3 collected
+  frames  250-1999  every window 1:1
+```
+
+The single shortfall is at BOOT, where the game pokes the latch before the
+sound ROM has cleared its interrupt mask -- and real hardware ignores that
+one too. **No commands are lost during play**, so the race is not the cause
+of the overlap, and the sync point was reverted rather than kept as an
+unmeasured change that perturbs cross-CPU interleaving (#34: a workaround's
+cost outlives its purpose silently).
+
+The counter stays, with its warning threshold set so that one shortfall
+does not cry wolf. Its value is exactly what it did here: it made
+"commands are being lost" a question with an answer instead of a suspicion.
+The overlap's real cause is still open, and the next step is identifying
+which commands the pepper and the boing actually are -- `--sound-at` can
+then reproduce the pair with any spacing.

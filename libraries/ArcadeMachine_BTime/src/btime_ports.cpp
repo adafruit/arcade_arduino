@@ -64,6 +64,14 @@ static uint32_t g_opcode_swaps;
 static uint32_t g_mirror_reads;
 static uint32_t g_latch_writes;
 static uint32_t g_system_reads;
+static btime_latch_trace_cb g_latch_trace; // see btime_ports.h
+
+// Commands the sound CPU actually COLLECTED, against g_latch_writes, which
+// counts what the main CPU sent. The game writes a command and then clears
+// the latch to 0x00, sometimes within the same frame, so if the sound CPU
+// does not get to run in between it sees only the clear and the effect is
+// silently lost. Two counters make that visible as a number.
+static uint32_t g_latch_reads;
 
 // Swaps X and Y within a 32x32 page, exactly as MAME's
 // btime_mirrorvideoram_r/w() and btime_mirrorcolorram_r/w() do:
@@ -187,6 +195,7 @@ BTIME_RAMFUNC static void main_write(void *userdata, uint16_t addr, uint8_t val)
         s->soundlatch = val;
         s->sound_irq  = true;
         g_latch_writes++;
+        if (g_latch_trace) g_latch_trace(val);
         return;
     case 0x4004:                         // bnj_scroll_w<0>()
         s->bnj_scroll0 = val;
@@ -271,6 +280,7 @@ BTIME_RAMFUNC static uint8_t audio_read(void *userdata, uint16_t addr) {
         //     if (!has_separate_acknowledge() && !side_effects_disabled())
         //         set_latch_written(false);
         // So the sound CPU dismisses its own IRQ by fetching the command.
+        if (s->sound_irq) g_latch_reads++; // only count a real collection
         s->sound_irq = false;
         return s->soundlatch;
     }
@@ -370,6 +380,8 @@ void btime_ports_reset_cpus(btime_system *system) {
     system->had_written = false;
 }
 
+void btime_debug_set_latch_trace(btime_latch_trace_cb cb) { g_latch_trace = cb; }
+
 void btime_debug_inject_sound_command(btime_system *system, uint8_t cmd) {
     // The same two effects the main CPU's write to 0x4003 has.
     system->soundlatch = cmd;
@@ -393,7 +405,10 @@ void btime_ports_take_counters(uint32_t *out_vblank_reads,
                                uint32_t *out_opcode_swaps,
                                uint32_t *out_mirror_reads,
                                uint32_t *out_latch_writes,
-                               uint32_t *out_system_reads) {
+                               uint32_t *out_system_reads,
+                               uint32_t *out_latch_reads) {
+    if (out_latch_reads) *out_latch_reads = g_latch_reads;
+    g_latch_reads = 0;
     if (out_vblank_reads) *out_vblank_reads = g_vblank_reads;
     if (out_opcode_swaps) *out_opcode_swaps = g_opcode_swaps;
     if (out_mirror_reads) *out_mirror_reads = g_mirror_reads;

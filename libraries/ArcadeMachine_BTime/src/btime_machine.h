@@ -204,6 +204,11 @@ typedef struct {
     // it actually asked the sound board for. Distinguishes "the sound CPU
     // is broken" from "nothing ever asked it for a sound".
     uint32_t latch_writes;
+    // Commands the sound CPU actually collected. If this is LESS than
+    // latch_writes, commands are being lost: the game writes a command and
+    // then clears the latch to 0x00, so a sound CPU that does not get to
+    // run in between sees only the clear.
+    uint32_t latch_reads;
     // Interrupts actually delivered to the sound CPU. The NMI is the music
     // sequencer's clock (~976 Hz when enabled) and the IRQ is a command
     // arriving, so a silent machine with zero NMIs and a silent machine

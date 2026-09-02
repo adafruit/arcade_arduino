@@ -208,8 +208,9 @@ static void run_scanline(btime_system *system, uint32_t line) {
     {
         const uint32_t start = system->cpu.cyc;
         if (!system->coin_irq_pending) {
-            while ((uint32_t)(system->cpu.cyc - start) < BTIME_MAIN_CYCLES_PER_LINE)
+            while ((uint32_t)(system->cpu.cyc - start) < BTIME_MAIN_CYCLES_PER_LINE) {
                 m6502_step(&system->cpu);
+            }
         } else {
             while ((uint32_t)(system->cpu.cyc - start) < BTIME_MAIN_CYCLES_PER_LINE) {
                 if (system->coin_irq_pending) {
@@ -405,7 +406,7 @@ void btime_debug_take_counters(const btime_system *system,
     if (!out) return;
     btime_ports_take_counters(&out->vblank_reads, &out->opcode_swaps,
                               &out->mirror_reads, &out->latch_writes,
-                              &out->system_reads);
+                              &out->system_reads, &out->latch_reads);
     out->main_irqs = g_main_irqs;
     out->main_irq_windows = g_main_irq_windows;
     g_main_irqs = 0;

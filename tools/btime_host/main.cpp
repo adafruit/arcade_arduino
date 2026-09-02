@@ -48,6 +48,7 @@ extern "C" void host_storage_set_rom_dir(const char *dir);
 // what decides whether it goes through this board's band-pass, since only
 // AY2 channel A does.
 static bool g_ay_trace = false;
+static bool g_latch_trace_on = false;
 static const char *ay_reg_name(uint8_t r) {
     static const char *n[16] = {
         "A_fine", "A_coarse", "B_fine", "B_coarse", "C_fine", "C_coarse",
@@ -75,6 +76,13 @@ extern "C" void host_audio_fill(int32_t *out, int count);
 
 static btime_system g_system;
 static long g_frame;
+
+// Declared here rather than beside the other trace helper because it needs
+// g_frame: a command's TIMING is the whole point of logging it.
+static void latch_trace(uint8_t cmd) {
+    if (g_latch_trace_on)
+        printf("[frame %ld] main CPU -> sound board: 0x%02X\n", g_frame, (unsigned)cmd);
+}
 
 // FNV-1a over the emulated machine, for A/B comparisons that must not
 // change emulation (see BTIME_PORT_PLAN.md's note on why byte-identical PPM
@@ -176,6 +184,9 @@ static void print_counters(void) {
            " unmasked scanlines)\n", c.main_irqs, c.main_irq_windows);
     printf("  sound commands sent       : %-10" PRIu32 " (main CPU -> latch)\n",
            c.latch_writes);
+    printf("  sound commands collected  : %-10" PRIu32 " %s\n", c.latch_reads,
+           (c.latch_reads < c.latch_writes)
+               ? "<-- FEWER THAN SENT: commands are being lost" : "");
     printf("  sound CPU IRQs / NMIs     : %" PRIu32 " / %" PRIu32 "\n",
            c.sound_irqs, c.sound_nmis);
     printf("  AY register writes        : %" PRIu32 "\n", c.ay_reg_writes);
@@ -329,6 +340,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--hold-frames") && i + 1 < argc) g_hold_frames = atol(argv[++i]);
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav_path = argv[++i];
         else if (!strcmp(argv[i], "--ay-trace")) g_ay_trace = true;
+        else if (!strcmp(argv[i], "--latch-trace")) g_latch_trace_on = true;
         else if (!strcmp(argv[i], "--sound-at") && i + 2 < argc && at_n < 8) {
             at_frame[at_n] = atol(argv[++i]);
             at_cmd[at_n]   = strtol(argv[++i], NULL, 0);
@@ -376,6 +388,7 @@ int main(int argc, char **argv) {
 
     if (wav_path) wav_open(wav_path);
     if (g_ay_trace) btime_audio_set_reg_trace(&ay_trace);
+    if (g_latch_trace_on) btime_debug_set_latch_trace(&latch_trace);
 
     print_state("after reset");
 

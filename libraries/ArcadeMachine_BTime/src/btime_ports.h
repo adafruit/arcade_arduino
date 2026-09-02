@@ -39,13 +39,22 @@ void btime_ports_coin_irq(btime_system *system);
 // directly reproduces any effect on demand, with nothing else playing.
 void btime_debug_inject_sound_command(btime_system *system, uint8_t cmd);
 
+// DEBUG: trace of every command the main CPU hands the sound board (its
+// writes to 0x4003). Set a callback to log them, NULL to disable at zero
+// cost. Exists to answer questions about SEQUENCING -- when two effects are
+// reported as running together that should follow one another, the first
+// thing to establish is what the game actually asked for and when.
+typedef void (*btime_latch_trace_cb)(uint8_t cmd);
+void btime_debug_set_latch_trace(btime_latch_trace_cb cb);
+
 // Reports and resets the three diagnostic counters this module owns; see
 // btime_machine.h's btime_debug_take_counters(), which wraps this.
 void btime_ports_take_counters(uint32_t *out_vblank_reads,
                                uint32_t *out_opcode_swaps,
                                uint32_t *out_mirror_reads,
                                uint32_t *out_latch_writes,
-                               uint32_t *out_system_reads);
+                               uint32_t *out_system_reads,
+                               uint32_t *out_latch_reads);
 
 #ifdef __cplusplus
 }

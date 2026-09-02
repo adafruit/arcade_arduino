@@ -130,6 +130,23 @@ void loop() {
     btime_input_update(&g_system, coin, start1, start2,
                        up, down, left, right, pepper, rotate, mirror);
 
+    // BUTTON WITNESS. Reported in the heartbeat so that "the board does not
+    // see this combination" and "the game declines this combination" can be
+    // told apart -- they look identical from the player's side, and the
+    // emulation accepts every combination in the host harness. `now` is
+    // this frame's state; `seen` is the OR over the whole heartbeat
+    // interval, so a tap that falls between two prints still shows up.
+    const uint16_t btn_now = (uint16_t)((coin ? 1u : 0) | (start1 ? 2u : 0)
+                           | (start2 ? 4u : 0) | (up ? 8u : 0)
+                           | (down ? 16u : 0) | (left ? 32u : 0)
+                           | (right ? 64u : 0) | (pepper ? 128u : 0)
+                           | (rotate ? 256u : 0) | (mirror ? 512u : 0));
+    static uint16_t btn_seen = 0;
+    static uint16_t btn_combo = 0; // pepper seen TOGETHER with a direction
+    btn_seen |= btn_now;
+    if ((btn_now & 128u) && (btn_now & (8u | 16u | 32u | 64u)))
+        btn_combo |= btn_now;
+
     // Frame-budget instrument -- the same one the other sketches carry.
     // `frame` alone means nothing, because hal_video_acquire_scanline()
     // BLOCKS until Core 1 frees a buffer: the loop measures
@@ -190,6 +207,16 @@ void loop() {
         Serial.print(c.ay_reg_writes);
         Serial.print(" ill ");
         Serial.print(c.illegal_ops);
+
+        // Buttons: CSSudlrP.. as bits, then the pepper+direction witness.
+        Serial.print(" | btn now ");
+        Serial.print(btn_now, BIN);
+        Serial.print(" seen ");
+        Serial.print(btn_seen, BIN);
+        Serial.print(" pepper+dir ");
+        Serial.print(btn_combo, BIN);
+        btn_seen = 0;
+        btn_combo = 0;
 
         // Sound health. `audio` is the measured cost of the synthesis
         // against the 16660us budget -- measured rather than inferred,

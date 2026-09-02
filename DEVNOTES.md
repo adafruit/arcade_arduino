@@ -3155,3 +3155,48 @@ whole machine -- including sound sequencing and effect durations -- runs
 **4.45% fast**. That widens the swallow window by the same 4.45%, which is
 far too small to explain the report but is the only timing error known to
 exist.
+
+### 73. "Can't throw pepper while walking" is not in the emulation
+
+Reported on hardware: pepper cannot be thrown while a direction is held --
+the player has to stop first -- where the real cabinet allows it.
+
+**The emulation accepts every combination.** In the host harness, with the
+game in play and a throw known to register at that frame, the toss command
+(0x16) is sent for all of:
+
+```
+  pepper alone                  -> 0x16 sent
+  pepper + right                -> 0x16 sent
+  pepper + left                 -> 0x16 sent
+  pepper + right + down         -> 0x16 sent
+  pepper + right + up           -> 0x16 sent
+  pepper + left + right         -> 0x16 sent
+```
+
+**And the board reads buttons independently.** hal_input_read()'s debounce
+state is per-button (filt[index]), so a held direction cannot gate another
+input; and Space Invaders, which requires firing while moving and is
+confirmed working on this hardware, exercises exactly that path with the
+same code.
+
+Note also, from mapping the throw across frames, that the game itself
+declines throws during certain intervals (frames 800-1050 of a scripted
+session, between two level events) and accepts them either side. So "the
+button did nothing" has an innocent explanation available at any given
+moment, which is worth knowing before blaming the input path.
+
+**A button witness** was added to the heartbeat for this -- btn now (this
+frame), btn seen (OR over the heartbeat interval, so a tap between prints
+still registers) and pepper+dir (pepper observed together with any
+direction). It distinguishes "the board never saw the combination" from
+"the game declined it", which are indistinguishable from the player's side.
+
+**First capture with it was uninterpretable, and the reason is worth
+recording.** It showed spurious-looking presses on up, left, right and
+start1 with the controls apparently untouched -- which reads exactly like
+floating inputs. But the same heartbeats showed 60-102 sound commands, i.e.
+the game was being actively played at the time. A capture of someone
+playing cannot answer "are the inputs clean at rest". Control the variable
+first (#32, again): ask for a few seconds of hands-off, THEN a few seconds
+of deliberately holding a direction and tapping the button.

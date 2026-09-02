@@ -55,6 +55,11 @@ void hal_video_run(void) { for (;;) { } } // never called by the harness
 // display backend (see arcade_hal_video.h).
 uint32_t hal_video_take_blocked_us(void) { return 0; }
 
+// There is no display backend to starve here. Always 0 -- and that is the
+// point: this failure mode is device-only, which is exactly why it needs an
+// on-device counter rather than a harness measurement.
+uint32_t hal_video_take_starve_count(void) { return 0; }
+
 // --- input ---------------------------------------------------------------
 
 const uint8_t HAL_INPUT_BUTTON_COUNT = 7; // matches ArcadeBoard_FruitJam's pin table

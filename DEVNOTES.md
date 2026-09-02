@@ -2390,3 +2390,900 @@ closer look if that ever changes.
 
 **Still not verified:** the later stages beyond the second (elevators,
 rivets).
+
+## Burger Time port (`ArcadeCPU_M6502`, `ArcadeMachine_BTime`, `btime_fruitjam/`)
+
+The project's first **6502** machine, its first **encrypted-opcode** CPU
+(a DECO CPU-7), its first game with **no vblank interrupt at all**, and its
+first **palette held in RAM** rather than decoded from a PROM. The
+pre-implementation research, with every MAME citation, is in
+`BTIME_PORT_PLAN.md`; this section is only what actually happened when the
+code ran.
+
+### 50. Two silent failure modes, and the counters that told them apart
+
+This machine can fail in two ways that produce no error, no crash and no
+blank screen, so `tools/btime_host --counters` was written before the
+renderer was:
+
+- **The vblank poll.** With no vblank interrupt anywhere on the board, the
+  program finds the beam by reading bit 7 of `0x4003` -- a bit the
+  schematics wire into a DIP-switch port. A port returning a constant there
+  hangs the game in a wait loop, which looks exactly like a broken
+  renderer, a bad ROM load or a dead CPU. Counting the reads separates
+  them: **~3,600 per frame** means the program is alive and looking at
+  video timing.
+- **The CPU-7 descrambler.** It only fires when a write has happened since
+  the last opcode fetch AND `(pc & 0x104) == 0x104`. Get the mask or the
+  flag wrong and the count is zero and the machine executes
+  plausible-looking wrong code. Zero is *also* what a correct
+  implementation reports if the case is never reached, so the number is the
+  only way to tell "not implemented" from "not exercised".
+
+Both were nonzero on the first run, and the attract screen rendered
+correctly first try.
+
+### 51. The attract demo renders a full playfield, so "it works" was wrong
+
+The first gameplay-looking screenshot -- level 1, burgers, ladders, plates,
+four sprites animating and moving -- was the **attract demo**. Coins were
+being ignored completely.
+
+What caught it was the control run the playbook insists on: the same
+sequence **with no coin at all** produced byte-identical counters *and*
+byte-identical sprite positions. A screenshot could never have shown this,
+because the thing being rendered was real; it just was not a game. This is
+DEVNOTES #32's lesson in a new costume -- a symptom that could plausibly be
+authentic still deserves a measurement.
+
+### 52. A ten-cycle interrupt window, and why per-scanline interrupt checks are not enough
+
+Two bugs in a row on the same code path, and the second is the interesting
+one.
+
+**First**, the coin IRQ was modelled as a one-shot: raise it, and on the
+next scanline call `m6502_gen_irq()`. MAME raises it with
+
+```
+m_maincpu->set_input_line(0, HOLD_LINE);
+```
+
+and HOLD_LINE means *assert the line and clear it automatically when the
+CPU acknowledges* -- not "pulse once". `m6502_gen_irq()` has its own
+`if (idf == 0)` guard, so offering the interrupt while the program has
+interrupts masked silently discards it. Holding the flag until the CPU can
+take it is the faithful model.
+
+**That fix changed nothing**, and the reason is the real finding.
+Disassembling where the main CPU actually sits:
+
+```
+CA32: 58              CLI
+CA33: EA EA EA EA     NOP x4
+CA37: 78              SEI
+...
+CA49: AD 03 40        LDA $4003     ; the vblank poll
+CA4C: 30 FB           BMI $CA49
+```
+
+The program runs with interrupts masked and opens a window **about ten
+cycles wide, once per frame**. A scanline is 96 cycles, so checking the IRQ
+line only at scanline boundaries lands inside that window essentially
+never. Moving the check to *between every instruction* -- which is what a
+real 6502 does, sampling its IRQ line at each instruction boundary -- fixed
+it, and the whole chain lit up at once:
+
+```
+                        before      after
+SYSTEM port reads          0         278     <- the game polls for START
+coin IRQs delivered        0           1
+sound commands sent        1           7
+AY register writes        88        3448     <- the music is playing
+```
+
+The diagnostic lied too, and in a way worth remembering: a per-scanline
+sample of the I flag reported "unmasked scanlines: 0", which reads as
+"this program never enables interrupts" when it actually means "your
+sampling interval is ten times wider than the thing you are sampling".
+**Measure the quantity at the granularity it changes at** -- the same
+mistake as #35's frame totals hiding within-frame deficits.
+
+Validated by making the negative control diverge: with the fix, the no-coin
+run differs from the coin run on every counter; before it, the two were
+identical. A control that does not diverge invalidates the matching result
+it was supposed to validate.
+
+### 53. Two open questions from the port plan, answered by counting
+
+- **Does anything READ the X/Y-swapped video/colour RAM mirrors, or only
+  write them?** It reads them: **0 reads during attract, ~11,000 per 900
+  frames once a game is running**. The read path is load-bearing, not
+  decorative.
+- **Is the background layer used in normal play?** Yes -- `bnj_scroll0`
+  goes to `0x13` when a level starts (bit 4 = enable, bits 0-1 = coarse
+  scroll 3). It is the level playfield itself, so the layer is not an
+  optional extra for bonus screens.
+
+Still open: what `0xB000-0xBFFF` (mapped as ROM, unpopulated in this set)
+returns on real hardware, and whether the program ever reads it.
+
+### 54. No decode caches, because the graphics are straight bitplanes -- SUPERSEDED BY #59
+
+**This entry's conclusion was wrong and is kept for the reasoning trail.**
+The renderer described below measured 62% of the frame on device and the
+caches it dismisses are now in place; see #59. The mistake was not the
+arithmetic, it was calling an unmeasured trade a decision.
+
+`ArcadeMachine_Pacman` and `_DKong` decode their graphics ROMs once into
+pixel caches because those ROMs pack pixels into awkward interleaved
+nibbles. Burger Time's are three parallel bitplanes, so extracting one row
+of one character is three byte reads plus a bit-spread -- cheap enough to do
+on demand every frame. What that avoids:
+
+```
+char pixel cache  [1024][8][8]   would be  64 KB
+sprite cache      [256][16][16]  would be  64 KB
+the bit-spread table used instead is        2 KB
+```
+
+Deliberately *not* following the neighbouring games here; if `work` ever
+needs the headroom on hardware, a char pixel cache is the obvious lever,
+but measure first (#35).
+
+### 55. Sound: the network was worth implementing rather than approximating
+
+Donkey Kong's and Galaga's discrete channels had to be approximated -- 555
+timers, diode mixers and RC networks solved in floating point are not
+something to run inside an audio path on this hardware. Burger Time's
+analog side is small enough to just *do*:
+
+```
+five channels summed flat, x0.2
+channel 2A alone -> band-pass op-amp filter
+2-input op-amp mixer (100k/100k into rF=10k -> 0.1 each)
+10k/10uF high-pass
+3ohm/100uF high-pass        <- the cabinet speaker, NOT implemented
+```
+
+Two things worth recording.
+
+**The band-pass is a bass channel, and knowing that is the difference
+between judging the sound and guessing at it.** MAME's
+`DISC_OP_AMP_FILTER_IS_BAND_PASS_1M` reset code turns the measured
+component values (R51=5k, R50=10k, R49=47k, C=C=0.068uF) into
+
+```
+rTotal = R51 || R50                        = 3333.3
+fc     = 1/(2*pi*sqrt(rTotal*rF*c1*c2))    = 186.99 Hz
+d      = (c1+c2)/sqrt(rF/rTotal*c1*c2)     = 0.5326   (Q ~ 1.88)
+gain   = -rF/rTotal * c2/(c1+c2)           = -7.05
+```
+
+So channel 2A is a ~187 Hz peak with 7x gain, rolling off hard above
+800 Hz. That immediately explains the driver's own note that on two 1982
+recordings "the filtered sound is way louder than the music" -- it is the
+thump channel, and it is *supposed* to dominate. This is the "derive what
+you can" half of #46: the pitch and shape of this filter are derivable
+exactly, so no recording was needed for it.
+
+**The amplitude tables are a resistor model, not a log curve.** MAME's
+`build_single_table()` with `ay8910_param` was evaluated offline for this
+board's two load resistances (5k on five channels, 1k on 2A -- and the fact
+that the odd load resistor is on the same channel the netlist filters is a
+useful confirmation the schematic was read right). Those tables carry a
+large DC offset by design, because they are voltage-divider ratios; the
+10k/10uF high-pass is what removes it, so zero-basing them "to clean them
+up" would be changing the model.
+
+**Deliberately not implemented:** the final 3 ohm / 100 uF high-pass. It is
+a 530 Hz corner modelling the cabinet's 4-ohm speaker, and the Fruit Jam has
+its own speaker with its own response -- applying an arcade cabinet's
+speaker model on top of a different real speaker models the wrong thing
+twice. Noted here rather than silently dropped; if the port sounds boomier
+than a real machine, this is the first thing to add back.
+
+### 56. The filters have to be warmed up, or every boot starts with a thump
+
+Both the DC blocker and the band-pass start with zeroed state while their
+input sits at the amplitude tables' idle DC level, so the first fraction of
+a second is a decaying transient as they settle. Measured in a host capture
+before the fix: **RMS 678 for the first half second, with no energy above
+55 Hz** -- i.e. inaudible as a tone and perfectly audible as a click.
+
+Running the generator dry for 200 ms at init settles both against the true
+idle DC (which is what the registers hold at that point anyway) and drops
+the boot transient by about 9x. Cheap, and it costs one comment to explain
+why it is not dead code.
+
+Worth noting how it was found: the *spectrum* said 0 at every musical
+frequency while the *RMS* said 678. Either number alone would have been
+misleading -- one says "silence", the other says "loud".
+
+### 57. What the audio measurements actually say
+
+From `tools/btime_host --wav` over 40 seconds through the level-start music
+and gameplay:
+
+```
+ring underruns / overruns : 0 / 0
+peak sample               : 21123  (64.5% of full scale, 0 clipped samples)
+dominant pitches          : A4 440, C5 523, D5 587 together at one point;
+                            A#3 233 with A#5 932 an octave-and-a-bit apart
+```
+
+Pitches landing on the equal-tempered grid, in chords, is the check that
+the tone dividers and the clock/8 rate are right -- a wrong clock divisor
+would still produce "music", just transposed, and the ear is a poor judge of
+absolute pitch. **Measure the interval structure, not the mean.** That is
+#46's other half.
+
+The output gain is the one value not derived from MAME: its netlist gain is
+in volt-ish units that do not survive the change of amplitude
+representation, so `OUTPUT_GAIN` was set against the measured peak above.
+Only real hardware can judge whether it is right.
+
+### 58. The sequential render path silently skipped audio entirely
+
+`btime_run_frame()` has two paths: tate interleaves rendering with CPU
+execution, landscape/180 run the whole frame and then draw. The audio slice
+call was added to the interleaved path only -- mirroring
+`dkong_machine.cpp`'s shape, where the sequential path calls a whole-frame
+audio function instead. Here that function does not exist, so **the game was
+completely silent in two of its four rotations.**
+
+Nothing about the picture changes, so only a number shows it:
+
+```
+rotation 0 (landscape)  ring underruns: 441000   peak sample: 0
+rotation 1 (tate)       ring underruns:      0   peak sample: 21123
+rotation 2 (180)        ring underruns: 441000   peak sample: 0
+rotation 3 (tate CW)    ring underruns:      0   peak sample: 21123
+```
+
+Caught by checking the audio counters in **all four rotations** rather than
+in the default one. That is the same discipline as #51's no-coin control:
+the default path worked, so every measurement taken on it agreed with
+itself.
+
+The fix slices the audio off the sequential path's own scanline loop rather
+than generating a whole frame's worth after it, which keeps #48's "never a
+long uninterrupted burst between scanline submissions" rule intact for free
+-- 272 small slices instead of one 6ms call.
+
+**Generalisable:** when a feature has per-mode code paths, a per-mode sweep
+of the diagnostics is cheap and finds exactly the class of bug that testing
+the default can never find. It cost one loop over four values.
+
+### 59. First flash: red screen, working sound, and what that combination proves
+
+The first hardware flash gave a red screen -- but the startup jingle played,
+COIN made a coin sound, and pressing start brought up the background music,
+"very slow".
+
+That combination is diagnostic on its own, and it rules out the frightening
+reading of red. On this board red means EITHER a failed asset load OR a
+starved DVI queue, and the asset-error path in `loop()` returns early after
+drawing nothing but the error colour -- so a card problem would have been
+SILENT. Sound playing at all proved both 6502s, the sound latch, the NMI
+timer and both AYs were running, and that the SD card had loaded. Red was
+therefore the other meaning, and "very slow" was the same fact from the
+other side: frames were taking far longer than 16.66ms, so the whole machine
+ran slow.
+
+Not the `-Os` trap either (#49) -- this was flashed `opt=Optimize3`
+explicitly. The port was simply too slow.
+
+### 60. The host harness cannot see flash stalls, and it lied about audio by 3.5x
+
+With serial working (see #63) the on-device heartbeat gave the breakdown the
+host could not:
+
+```
+                     host harness    device
+CPUs                    91us          10231us
+render                 168us           7198us
+audio                   12us           6442us     <-- 7.5% vs 27%
+```
+
+The ratios are not off by a constant. On the host, audio was 4.4% of the
+frame and looked irrelevant; on device it was 27% and the second-biggest
+cost. The reason is structural rather than a mistake in the measurement:
+**the host has no XIP**, so it cannot see the cost of running code out of
+flash, and `generate_one_sample`/`ay_tick` were still in flash -- only the
+ISR copy-out had been marked `__not_in_flash_func`. Six PSG channels ticking
+at 187.5kHz is ~6,250 calls a frame, every one stalling.
+
+**The host harness is the right tool for "what is the machine doing" and the
+wrong tool for "where does the time go".** Use it for logic; use the device's
+own heartbeat for budget. Moving the interpreters, the port decode, the
+render path and the synthesis into `.time_critical` SRAM sections was worth
+more than every algorithmic change that followed.
+
+### 61. "The counter cannot wrap twice, so `while` can be `if`" -- wrong
+
+The AY tone counter rises by exactly 1 per tick and subtracts its period on
+every crossing, so it can never wrap twice and MAME's `while` looked like it
+could be an `if`. It cannot: that is only true **while the period is
+constant**. When the sound CPU writes a SMALLER period -- which is exactly
+what changing a note does -- the counter left over from the old period can be
+far above the new one, and `while` unwinds it fully where `if` subtracts once
+and leaves the channel a phase behind.
+
+Caught by comparing a captured WAV byte-for-byte against one taken before
+the change: identical for 2.6 seconds, then diverging at the moment the
+music started. Without that comparison it would have shipped as "the music
+sounds a bit off".
+
+Also worth recording as a near-miss: the first attempt at restoring it wrote
+`while (++c >= p)`, which increments on every iteration and is a third,
+different function. The increment belongs outside the loop.
+
+### 62. What actually fixed the budget, and the two fixes that measured zero
+
+Measured on device at each step, `work` against a 16.66ms budget:
+
+```
+  22.4ms  ->  starting point (after the render decode caches, #59)
+  18.2ms  ->  port decode dispatched on the high address nibble
+  16.9ms  ->  bg palette base baked into the cache; emit loop specialised
+  16.2ms  ->  AY state hoisted into locals for a whole sample's ticks
+  16.2ms  ->  the two per-sample software-float DIVIDES hoisted out
+  14.1ms  ->  direct-read page table in the CPU core
+```
+
+**Honest final figure: `work` is 11.6-16.2ms typical with a `work_max` of
+17.5ms** observed over a 23,000-frame run. So it fits the 16.66ms budget in
+the ordinary case and still peaks slightly OVER it in the heaviest scenes
+(the background layer being enabled is the likely difference). That is
+better than Galaga's position and worse than Donkey Kong's. Whether it is
+visibly clean is an eyes-on question, not a number one.
+
+Remaining named levers, in expected-value order: fixed-point audio filters
+(this target has no hardware FPU, so ~20 emulated float ops per sample
+remain), halving the AY's internal 187.5kHz tick rate (a documented
+approximation, ~1.5ms), and a full char-layer pen bitmap updated on VRAM
+writes instead of re-rendering 32 cells per scanline.
+
+The two biggest single wins were both about **not paying for indirection**:
+
+- **Port decode order.** The first version tested its address ranges in
+  memory-map order, which put ROM -- the target of every opcode and operand
+  fetch -- behind eight comparisons. A `switch (addr >> 12)` is one indexed
+  branch. Worth 3.2ms.
+- **A direct-read page table in ArcadeCPU_M6502.** The memory callback is an
+  *indirect* call, so it cannot be inlined and costs more than the read it
+  performs; at ~14,500 instructions a frame across two cores that is tens of
+  thousands of calls. An optional `rd_page[256]` table lets pure-memory
+  pages be read directly, with pages that have side effects (I/O, the
+  swapped mirrors, the sound latch whose READ clears the IRQ, partly-mapped
+  pages) left NULL. Worth 2.1ms. Verified by A/B: the full machine-state
+  digest is identical over 1,200 frames with the table on and off.
+
+Also worth knowing: this target builds `-mfloat-abi=softfp` with **no
+`-mfpu`**, so every float operation is software-emulated and a divide is
+~120 cycles. The audio path was computing two constant divides per sample.
+
+**And two changes that measured exactly nothing**, recorded because guessing
+produced them and only measurement could have stopped them:
+
+- Removing a `memset` of 1280 bytes per scanline (307KB/frame). Estimated
+  0.8ms. Actual: zero.
+- Spreading the 240 scanline submissions across all 272 game scanlines
+  instead of only the visible ones, to close a ~1.9ms gap where Core 1 had
+  nothing to drain. A textbook #48 fix, and correct in principle -- kept for
+  that reason -- but `work`, `blocked` and `frame` all moved by less than
+  their noise.
+
+Two wrong predictions out of six attempts is the normal rate. That is the
+argument for measuring after every one rather than batching them.
+
+### 63. The device peak revealed clipping the host capture never saw
+
+`OUTPUT_GAIN` was set against a 40-second host capture that peaked at 64.5%
+of full scale with zero clipped samples -- comfortable headroom, apparently.
+The on-device heartbeat then reported a peak of **37004** against a 32767
+ceiling during play: real clipping, on sound combinations the host capture
+simply never hit.
+
+A capture is a sample of behaviour, not a bound on it. The gain is now set
+from the device's peak with margin.
+
+### 64. Reading serial needs raw termios, or the port returns nothing
+
+Three attempts to read the heartbeat returned zero bytes from a board that
+was running perfectly, which looked exactly like the silent-hang case #43
+warns about, and nearly cost a detour into setting up the SWD probe.
+
+The port was being opened without configuring the tty, so the line
+discipline never delivered anything. This works:
+
+```sh
+stty -f /dev/cu.usbmodem312401 115200 raw -echo
+perl -e 'alarm 20; open(F,"<","/dev/cu.usbmodem312401") or die; $|=1;
+         while(sysread(F,$b,256)){print $b}'
+```
+
+The `stty` line is the part that matters. Note also that **openocd IS
+available** on this machine after all -- it ships inside the arduino-pico
+core at
+`Arduino15/packages/rp2040/tools/pqt-openocd/<version>/bin/openocd`, which
+is why `which openocd` and a shallow filesystem search both missed it. The
+earlier notes claiming there is no openocd binary here were wrong; what is
+true is that USB flashing is faster and no debugging in this file has needed
+the probe.
+
+### 65. Red bars: the audio producer was bursty, not slow
+
+With the frame budget fixed (#62) the game played well at proper speed and
+upright -- but with **red bars flashing rapidly** across an otherwise good
+picture. Distinct from #59's fully red screen: brief mid-frame starvation,
+not a whole frame missed.
+
+`work` was 15-16ms of 16.66, so the frame total looked survivable. The cause
+was distribution, and the mechanism was in the audio producer's pacing:
+
+- The board's audio ISR drains `BUFFER_SAMPLES` (**256**) in a single call,
+  every ~11.6ms.
+- The producer was purely LEVEL-paced -- "top the ring back up to target, up
+  to 8 samples per slice".
+- So each ISR call dropped the level by 256 at once, and the next ~32 slices
+  each generated their full 8-sample allowance to refill. Eight samples is
+  ~68 AY ticks; a burst between two scanline submissions is precisely what
+  starves the queue (#18/#20/#34/#36/#48, now for the seventh time).
+
+The frequency matched: bursts at roughly the ISR's own rate, which is what
+"flashing rapidly" looks like.
+
+**Fixed by pacing off the RATE and letting the ring absorb the ISR's
+bursts** -- nominal 22050/60/240 = 1.53 samples per slice as a 16.16
+accumulator, ring deepened to 2048 with a 768 target (three times the drain
+size), and prefilled at init. Result: `frame` pinned at exactly 16665us (a
+flat 60fps for the first time), `work` down to 12.5ms, and the starvation
+counter frozen at its boot value over a 90-second capture.
+
+**Two things the device taught that no reasoning would have:**
+
+The per-slice cap had to be **2, not 3**. One sample costs ~17 AY ticks
+across both chips, about 10us; a scanline's whole budget is 16665/240 = 69us
+and the CPU and renderer already want ~49us. A 3-sample slice asks for 79us
+and runs a per-scanline deficit that accumulates against the 8-buffer queue
+(~555us) and starves it after ~55 scanlines. With sound actually playing the
+starve counter climbed 2882 -> 4720 -> 9925 while `work` sat at 14.8ms.
+**Frame totals cannot see within-frame deficits** -- #35, and this is the
+clearest demonstration of it in the file.
+
+The drift correction had to be **symmetric**. With only the "below target"
+half, the ring level climbed steadily -- 866, 900, 934, 968, 1002, about
+0.57 samples per frame. The nominal rate is right but the BOARD'S ACTUAL
+rate is not 22050: the I2S PIO divider is integer-plus-fraction and the real
+consumption works out near 22016Hz. Left alone the ring fills in ~37
+seconds and sits full: no dropped samples, but ~93ms of latency. The
+consumer's clock is whatever the hardware does, not what the constant says.
+
+### 66. A starvation counter, because nothing else could see this
+
+Three separate visual symptoms in this port (#59's red screen, #65's red
+bars, and the residual question of whether either was really gone) were
+invisible to every instrument the project had. `work` and `blocked` describe
+the frame as a whole; DVI starvation is a within-frame event.
+
+`hal_video_take_starve_count()` is now part of the ArcadeHAL video contract:
+the Fruit Jam backend increments a counter whenever submitting a scanline
+leaves the valid queue at or below one entry, i.e. whenever Core 1 is about
+to run dry. The unlocked read is deliberate -- a diagnostic, where a race
+costs a miscount, on a path that runs 240 times a frame. The host stub
+returns 0, which is honest: this failure mode is device-only, which is
+exactly why it needed an on-device counter.
+
+It immediately paid for itself twice, distinguishing "fixed" from "not yet
+fixed" without a camera or a second pair of eyes, and it answers the
+question DEVNOTES #35 left open for Galaga: whether a starvation signal
+corresponds to anything visible. Here it did, exactly.
+
+### 67. The cabinet speaker's high-pass, and a prediction that came true
+
+Compared by ear against a real Burger Time cabinet, the port's sound was
+reported as very close except for one effect (walking across a burger),
+which was "a bit low and noisy" where the original is "rounder and more
+musical".
+
+#55 recorded a deliberate omission: MAME's final
+`DISCRETE_CRFILTER(NODE_43, NODE_41, 3.0, CAP_U(100))` models the CABINET's
+4-ohm speaker as a 530 Hz high-pass, and it was left out because the Fruit
+Jam has its own speaker with its own response -- with the note that "if the
+port sounds boomier than a real machine, this is the first thing to try
+adding back". That is exactly the report.
+
+Measured effect of enabling it, over the same captured gameplay:
+
+```
+                <250Hz   250Hz-1k   1k-3k   >3k
+  without        33%       57%        8%      3%
+  with           18%       63%       14%      6%
+  overall level: 1.48x quieter
+```
+
+So it halves the sub-250Hz content and roughly doubles the treble share --
+the "low" half of the description directly.
+
+**It is now switchable (`BTIME_SPEAKER_HPF`, default 0) rather than
+decided**, because two things make this a listening question and not an
+arithmetic one: the omission argument is still sound (the real speaker is
+in the signal path either way), and MAME's own resistance value is a guess
+at a speaker, not a measurement of one.
+
+**Note for whoever does the A/B: level-match first.** The filtered version
+is 1.48x quieter, and a loudness difference will decide an ear comparison
+before timbre gets a vote -- the same confound as #46's matching mean pitch
+hiding a wrong sound. `tools/btime_host --wav` can render both, and a
+gain-compensated copy makes the comparison honest.
+
+Still open: whether the walking effect's remaining difference is this
+filter or something in the channel that carries it. #47's rule applies --
+timbre questions need ISOLATED recordings, so a capture of that one sound
+from both machines is what settles it, not a gameplay clip of either.
+
+### 68. The first sound sweep was confounded, and it invented a systematic bug
+
+#67's investigation needed isolated captures of one effect, so
+`--sound-sweep` was added: inject one sound command per slot into a single
+capture. Thirty-two slots, one run, a neat table of band shares -- and the
+table said something striking: EVERY one of the 31 non-silent effects had
+more high-frequency content than the cabinet recording (1k-3k at 7-23%
+against 2-3%, >3k at 3-7% against 1%). A systematic "noisy" excess,
+apparently matching the verbal report exactly.
+
+**It was an artifact of the experiment.** Injecting command 0x07 on its own
+from a fresh boot produces SILENCE. What the sweep's slots contained was
+mostly continuous music started by one of the earlier commands and still
+playing, sampled 32 times. The "31 effects" were largely one effect.
+
+Re-run properly -- one command per harness run, each from a fresh boot,
+nothing else ever injected -- only **19** commands make any sound at all,
+and the picture inverts:
+
+```
+                      <150 150-400 400-1k 1k-3k  >3k    peaks (Hz)
+  real cabinet walk      4     58-71  20-32   2-3    1   587,196,190,294,285,233
+  0x11 (240ms burst)    19        78      3     1    0   220,226,214,208,196,233
+  0x17 (120ms blip)     27        68      3     1    0   285,294,277,302,269,262
+  0x19 (sustained,      19        47     22    10    1   370,185,932,359,740,1397
+        ~200ms cycle)
+```
+
+Several effects have **essentially zero energy above 3kHz**, matching the
+cabinet. There is no evidence of a systematic treble excess; the previous
+paragraph's confident table was measuring the wrong thing.
+
+**The lesson is not "be careful with sweeps".** It is that a sweep over a
+STATEFUL device is not a sequence of independent trials -- the sound board
+carries state between commands, so slot N shows the accumulated result of
+0..N, not command N. A control was available and cheap the whole time:
+inject ONE command and listen. That single run would have shown 0x07 was
+silent and killed the whole table in one command.
+
+DEVNOTES #32's rule keeps reappearing in new costumes: a comparison among
+variants cannot detect a fault they all share -- and here every variant
+shared the same background music.
+
+### 69. The walking sound: isolated it was fine, in the mix it buried the music
+
+Once #68's isolation worked, the user identified command **0x11** as the
+walking-across-a-burger effect and said it sounded **very good on its own**.
+That single fact relocated the whole problem: the synthesis of the effect
+was right, and what was wrong was how it MIXED.
+
+`--ay-trace` (register-write logging) named the channel immediately:
+
+```
+AY2 r7 enable = F8   tone A ON  B ON  C ON | noise all OFF
+AY2 r8 A_vol  = 0D   AY2 A period 0x1FD -> 184Hz ... 0x1A9 -> 220Hz
+AY2 r9 B_vol  = 0B   AY2 B period 0x3FD ->  92Hz ... 0x3A9 -> 100Hz
+```
+
+**The walk is on AY2 channel A -- the one channel this board sends through
+the 7x band-pass peaking at 187Hz** (#55), with its tone sitting right on
+that peak. Note also there is no noise anywhere in it, so "noisy" was never
+the noise generator.
+
+Working the amplitudes through: 2A contributes
+`0.1 x 7.05 x 0.1441 = 0.102` while a flat 5k channel contributes
+`0.1 x 0.2 x 0.2183 = 0.0044` -- a **~23:1 advantage for a 200Hz tone over
+500-700Hz music**. So during a walk the effect swamps the tune.
+
+Measured against a recording of a real machine walking over its music:
+
+```
+                      below ~400Hz   400Hz-1kHz   music in top peaks?
+  real cabinet           62-76%        20-32%     yes, 587Hz throughout
+  filter OFF             76-85%        12-20%     no
+  filter ON              61-72%        20-30%     yes, 587/494/659/523
+```
+
+**So #67's omission was wrong, and the cabinet speaker high-pass is now the
+default.** A real cabinet speaker cannot reproduce 200Hz well; MAME models
+exactly that with its 3ohm/100uF CR filter, and leaving it out let a
+band-passed bass channel dominate in a way no real machine does. The
+reasoning for omitting it ("the Fruit Jam has its own speaker") was sound in
+the abstract and simply lost to measurement.
+
+**Worth recording how nearly this went the other way.** #67 measured the
+filter's effect on a passage WITHOUT the walk, saw it raise the treble share
+from 3% to 6%, and concluded it moved *away* from the cabinet recording.
+That measurement was correct and the inference from it was worthless,
+because the passage did not contain the phenomenon under investigation. The
+question was never "what does this filter do to the mix in general" but
+"what does it do to a 200Hz effect competing with 600Hz music".
+
+`OUTPUT_GAIN` went 300000 -> 400000 to recover the ~1.48x of level the
+filter costs; the device's measured peak had the headroom for it.
+
+### 70. Trimming the band-pass gain, and MAME's value being a hack already
+
+After #69 fixed the walk's balance against the music, it was still reported
+as right in character but "a bit too loud compared to the rest of the
+audio".
+
+That is a tuning question, not a modelling one, and MAME's own source says
+so. Its comment on the band-pass input resistor reads:
+
+    With R51 being 1K, the gain is way to high (23.5). Therefore R51
+    is set to 5k, but this is a hack. With the modification, sound
+    levels are in line with observations.
+
+-- and the "observations" it names are two 1982 recordings found on a web
+page. So the reference value was already ear-calibrated against recordings.
+Trimming it against an actual cabinet standing in the room CONTINUES that
+calibration with a better reference rather than departing from the source.
+
+`BP_GAIN_TRIM` is 0.7, equivalent to R51 ~= 7.1k. Labelled ear-tuned, the
+same status as Galaga's 54XX explosion and Donkey Kong's discrete channels.
+The measured walk/music balance stays inside the cabinet recording's range
+after the trim (below-400Hz 54-66% against the reference's 62-76%).
+
+**Why the walk specifically.** Mapping every effect to its channels with
+`--ay-trace` shows the board's architecture plainly:
+
+```
+  commands 0x01-0x05  ->  AY1 only   = the MUSIC
+  commands 0x11-0x1E  ->  AY2 only   = the SOUND EFFECTS
+  of those, 8 of 13 use AY2 channel A = the band-passed one
+```
+
+The walk is not loud by volume register -- it uses 0x0D where several
+others use 0x0F. It is loud because its tone (184-220Hz) sits directly on
+the filter's 187Hz peak, so it collects the full 7x where the others catch
+only the skirt. A gain trim is therefore the right control; attenuating the
+effect itself would have been the wrong one.
+
+### 71. Sound commands are not being lost, and the sync point that proved it
+
+The report that throwing pepper at an enemy produces both the pepper and
+the "boing" AT ONCE, where a real machine plays them in sequence, suggested
+a cross-CPU race. `--latch-trace` showed the game really does write two
+commands in one frame:
+
+```
+  [frame 782] main CPU -> sound board: 0x19
+  [frame 782] main CPU -> sound board: 0x00
+```
+
+a write-then-clear pulse. And since this port runs the main CPU for a full
+96-cycle scanline before the sound CPU gets its 32, a pulse that begins and
+ends inside that window would be invisible to the sound CPU -- exactly the
+kind of thing MAME avoids by routing this write through
+`machine().scheduler().synchronize()`.
+
+A `latch_reads` counter beside the existing `latch_writes` made it
+checkable, and reported 12 sent against 11 collected. So a sync point was
+implemented: a latch write asks the frame loop to run the sound CPU
+immediately, with a cumulative cycle target so the borrowed time is repaid.
+
+**It changed the count not at all**, and measuring per-window showed why:
+
+```
+  frames    0-249   4 sent, 3 collected
+  frames  250-1999  every window 1:1
+```
+
+The single shortfall is at BOOT, where the game pokes the latch before the
+sound ROM has cleared its interrupt mask -- and real hardware ignores that
+one too. **No commands are lost during play**, so the race is not the cause
+of the overlap, and the sync point was reverted rather than kept as an
+unmeasured change that perturbs cross-CPU interleaving (#34: a workaround's
+cost outlives its purpose silently).
+
+The counter stays, with its warning threshold set so that one shortfall
+does not cry wolf. Its value is exactly what it did here: it made
+"commands are being lost" a question with an answer instead of a suspicion.
+The overlap's real cause is still open, and the next step is identifying
+which commands the pepper and the boing actually are -- `--sound-at` can
+then reproduce the pair with any spacing.
+
+### 72. Pepper toss vs enemy hit: the ROM declines it, nothing is lost
+
+The report: throwing pepper AT an enemy plays the toss and the "boing"
+together as "a bit of a mess", where a real machine plays them in sequence.
+
+With effects auditionable in isolation (#68) the two commands were
+identified by ear -- **0x16 is the toss, 0x18 is the hit** -- and the
+channel map explains why they interact at all:
+
+```
+  0x16 (toss)  AY2 channel B, NOISE, vol 0x0E   <- the only noise effect
+  0x18 (hit)   AY2 channels B and C, TONE, envelope shape 0x09
+```
+
+They contend for channel B. `--ay-trace` shows the hit's handler doing a
+clean takeover -- `enable=FF`, all volumes zero, then `enable=F9` for tone
+on B/C -- so there is no register conflict and the toss's noise really is
+switched off.
+
+Measuring the interaction across command spacings:
+
+```
+  gap        hit's sweep writes   audio duration   outcome
+   17-200ms          0                0.35s        hit SWALLOWED
+   400-1000ms       15            0.80-1.40s       hit plays, sequential
+```
+
+The transition sits exactly at the toss's own ~350ms length: a hit arriving
+while the toss is still sounding never plays.
+
+**And that is the ROM's decision, not a lost command.** The counters read
+**3 sent, 3 collected in both cases** -- the sound CPU receives the hit
+command during the toss and chooses not to start it. Combined with #71
+(commands are only ever lost at boot, as on real hardware) and a CPU that
+passes Klaus Dormann's suites, there is no defect to find in the command
+path. The port is faithfully reproducing what this ROM does.
+
+So the remaining possibilities are all OUTSIDE the command path, and worth
+listing because the next session will otherwise re-derive them:
+
+1. What is heard as "both at once" may be the toss over the MUSIC (AY1
+   keeps playing throughout) rather than toss over hit.
+2. The in-game command timing may differ from synthetic injection -- the
+   game may send the hit repeatedly, so a later copy lands after the toss
+   ends and plays.
+3. The reference cabinet may not be running this ROM revision, or may not
+   be MAME-derived at all.
+
+The one KNOWN deviation that could bear on it is documented in
+BTIME_PORT_PLAN.md section 7 and still unfixed: this port runs one game
+frame per 60Hz display frame against the board's real 57.4449Hz, so the
+whole machine -- including sound sequencing and effect durations -- runs
+**4.45% fast**. That widens the swallow window by the same 4.45%, which is
+far too small to explain the report but is the only timing error known to
+exist.
+
+### 73. "Can't throw pepper while walking" -- REPORT RETRACTED, checks worth keeping
+
+Reported on hardware: pepper cannot be thrown while a direction is held --
+the player has to stop first -- where the real cabinet allows it. **The
+report was withdrawn after the checks below: it works fine on hardware and
+the original observation was a mistake at the controls.** No code changed.
+
+Kept because the checks are the useful part, and because they establish
+things worth not re-deriving.
+
+**The emulation accepts every combination.** In the host harness, with the
+game in play and a throw known to register at that frame, the toss command
+(0x16) is sent for all of:
+
+```
+  pepper alone                  -> 0x16 sent
+  pepper + right                -> 0x16 sent
+  pepper + left                 -> 0x16 sent
+  pepper + right + down         -> 0x16 sent
+  pepper + right + up           -> 0x16 sent
+  pepper + left + right         -> 0x16 sent
+```
+
+**And the board reads buttons independently.** hal_input_read()'s debounce
+state is per-button (filt[index]), so a held direction cannot gate another
+input; and Space Invaders, which requires firing while moving and is
+confirmed working on this hardware, exercises exactly that path with the
+same code.
+
+Note also, from mapping the throw across frames, that the game itself
+declines throws during certain intervals (frames 800-1050 of a scripted
+session, between two level events) and accepts them either side. So "the
+button did nothing" has an innocent explanation available at any given
+moment, which is worth knowing before blaming the input path.
+
+**A button witness** was added to the heartbeat for this -- btn now (this
+frame), btn seen (OR over the heartbeat interval, so a tap between prints
+still registers) and pepper+dir (pepper observed together with any
+direction). It distinguishes "the board never saw the combination" from
+"the game declined it", which are indistinguishable from the player's side.
+
+**First capture with it was uninterpretable, and the reason is worth
+recording.** It showed spurious-looking presses on up, left, right and
+start1 with the controls apparently untouched -- which reads exactly like
+floating inputs. But the same heartbeats showed 60-102 sound commands, i.e.
+the game was being actively played at the time. A capture of someone
+playing cannot answer "are the inputs clean at rest". Control the variable
+first (#32, again): a few seconds of hands-off, THEN a few seconds of
+deliberately holding a direction and tapping the button.
+
+**The controlled capture settled it, and left two facts worth keeping:**
+
+```
+  sec  1-28   active play
+  sec 29-45   hands off:  btn seen = 0 on every heartbeat
+```
+
+1. **The GPIO inputs are clean at rest.** Seventeen consecutive seconds of
+   nothing, so the earlier "spurious presses" were the player's own hands.
+   Worth knowing the next time an input is suspected on this board.
+2. **The board reports pepper simultaneously with a direction, in all four
+   directions** -- pepper+dir was nonzero at seconds 3, 4, 10, 11, 20 and
+   21 (LEFT+PEPPER, RIGHT+PEPPER, UP+PEPPER, DOWN+RIGHT+PEPPER,
+   DOWN+PEPPER). That witness tests simultaneity WITHIN ONE FRAME rather
+   than an OR over the heartbeat interval, which is the distinction that
+   makes it evidence at all.
+
+So both ends were shown sound -- board and emulation -- before the report
+was withdrawn, which is exactly the outcome the check was designed to
+produce. The witness stays in the heartbeat: it cost nothing and it turns
+"the controls feel wrong" from an argument into a measurement.
+
+
+### 74. KNOWN DIVERGENCE: a close-range pepper hit loses its "boing"
+
+**Status: characterised, not fixed, and deliberately left.** This is the one
+behavioural difference between this port and a real Burger Time cabinet
+that is known and understood.
+
+**Symptom, as observed on hardware by someone with a cabinet to compare
+against:** throw pepper at an enemy far away and you hear the toss and then
+the "boing". Throw at an enemy right next to you and the two "merge into
+one sound". A real cabinet plays both, at any distance.
+
+**Mechanism, fully measured.** Distance sets the gap between the two sound
+commands the main CPU sends, and the outcome switches on that gap:
+
+```
+  gap between 0x16 (toss) and 0x18 (hit)     hit's sweep writes   outcome
+  17-200ms                                          0             declined
+  400-1000ms                                       15             plays
+```
+
+The transition sits exactly at the toss effect's own **~350ms length**: a
+hit command arriving while the toss is still sounding never starts.
+
+**It is not a lost command and not an input problem.** The counters read 3
+sent, 3 collected in both cases (#71) -- the sound CPU receives the hit
+command during the toss and its own program declines to start it. The CPU
+passes Klaus Dormann's suites, the latch semantics match
+generic_latch_8_device, and commands are only ever dropped at boot, as on
+real hardware.
+
+**THE MOST LIKELY REMAINING CAUSE, and the cheapest test.** If the real
+machine plays a close-range boing, then on the real machine the hit command
+must arrive AFTER its toss has finished -- which means the real toss is
+SHORTER than this port's ~350ms. Everything else about the effect was
+judged good by ear, but timbre was what was judged; nobody has compared
+DURATION.
+
+So the test is one recording: **the pepper toss alone, from the cabinet,
+timed.** If it is materially shorter than 350ms, the bug is in this port's
+effect duration and the sound CPU's timebase is where to look -- most
+likely the ~976Hz NMI that sequences its software volume ramps, or the
+4.45% overall speed error below.
+
+Other candidates, in order:
+
+1. **The 4.45% speed error.** This port runs one game frame per 60Hz
+   display frame against the board's real 57.4449Hz, so all sound
+   sequencing including effect durations runs 4.45% fast -- which makes the
+   toss 4.45% SHORTER here, i.e. it works against this symptom rather than
+   causing it. Documented in BTIME_PORT_PLAN.md section 7 and still unfixed.
+2. **ROM revision.** The comparison cabinet is a modern reproduction; the
+   `btime` parent set used here is Data East set 1, and `btime3` / `btimem`
+   are documented revisions with behavioural differences.
+
+**Why it is being left:** it costs one sound effect at close range in one
+situation, everything else about the port matches the reference, and the
+next step needs a recording nobody has yet needed to make. Recorded here so
+it is a known quantity rather than a mystery.

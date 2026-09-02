@@ -2616,3 +2616,35 @@ The output gain is the one value not derived from MAME: its netlist gain is
 in volt-ish units that do not survive the change of amplitude
 representation, so `OUTPUT_GAIN` was set against the measured peak above.
 Only real hardware can judge whether it is right.
+
+### 58. The sequential render path silently skipped audio entirely
+
+`btime_run_frame()` has two paths: tate interleaves rendering with CPU
+execution, landscape/180 run the whole frame and then draw. The audio slice
+call was added to the interleaved path only -- mirroring
+`dkong_machine.cpp`'s shape, where the sequential path calls a whole-frame
+audio function instead. Here that function does not exist, so **the game was
+completely silent in two of its four rotations.**
+
+Nothing about the picture changes, so only a number shows it:
+
+```
+rotation 0 (landscape)  ring underruns: 441000   peak sample: 0
+rotation 1 (tate)       ring underruns:      0   peak sample: 21123
+rotation 2 (180)        ring underruns: 441000   peak sample: 0
+rotation 3 (tate CW)    ring underruns:      0   peak sample: 21123
+```
+
+Caught by checking the audio counters in **all four rotations** rather than
+in the default one. That is the same discipline as #51's no-coin control:
+the default path worked, so every measurement taken on it agreed with
+itself.
+
+The fix slices the audio off the sequential path's own scanline loop rather
+than generating a whole frame's worth after it, which keeps #48's "never a
+long uninterrupted burst between scanline submissions" rule intact for free
+-- 272 small slices instead of one 6ms call.
+
+**Generalisable:** when a feature has per-mode code paths, a per-mode sweep
+of the diagnostics is cheap and finds exactly the class of bug that testing
+the default can never find. It cost one loop over four values.

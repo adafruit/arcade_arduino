@@ -257,9 +257,29 @@ static void run_frame_interleaved(btime_system *system) {
     }
 }
 
+// Landscape/180. The renderer needs the frame's final state before it can
+// emit even one physical scanline (each of those scanlines is a raster
+// COLUMN), so the drawing cannot be interleaved -- the same known,
+// deprioritised limitation ArcadeMachine_Pacman has in these orientations.
+//
+// THE AUDIO STILL IS interleaved, and that is not a detail. An earlier
+// version of this function ran only the CPUs and then drew, exactly
+// mirroring dkong_machine.cpp's shape -- which meant
+// btime_audio_run_slice() was never called at all in these two rotations
+// and the game was SILENT in them. Nothing about the picture changes, so
+// only a number shows it: 441,000 ring underruns against 0 in tate. Caught
+// by checking the audio counters in ALL FOUR rotations rather than in the
+// default one, which is the same discipline as running the no-coin control
+// (DEVNOTES.md #51).
+//
+// Slicing off the scanline loop here rather than generating a whole frame's
+// audio in one call afterwards also keeps the #48 rule intact for free: no
+// single slice is a long uninterrupted burst.
 static void run_frame_sequential(btime_system *system) {
-    for (uint32_t line = 0; line < BTIME_SCANLINES_PER_FRAME; line++)
+    for (uint32_t line = 0; line < BTIME_SCANLINES_PER_FRAME; line++) {
         run_scanline(system, line);
+        btime_audio_run_slice(line, BTIME_SCANLINES_PER_FRAME);
+    }
     btime_draw_frame(system);
 }
 

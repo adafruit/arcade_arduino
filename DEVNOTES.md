@@ -2390,3 +2390,137 @@ closer look if that ever changes.
 
 **Still not verified:** the later stages beyond the second (elevators,
 rivets).
+
+## Burger Time port (`ArcadeCPU_M6502`, `ArcadeMachine_BTime`, `btime_fruitjam/`)
+
+The project's first **6502** machine, its first **encrypted-opcode** CPU
+(a DECO CPU-7), its first game with **no vblank interrupt at all**, and its
+first **palette held in RAM** rather than decoded from a PROM. The
+pre-implementation research, with every MAME citation, is in
+`BTIME_PORT_PLAN.md`; this section is only what actually happened when the
+code ran.
+
+### 50. Two silent failure modes, and the counters that told them apart
+
+This machine can fail in two ways that produce no error, no crash and no
+blank screen, so `tools/btime_host --counters` was written before the
+renderer was:
+
+- **The vblank poll.** With no vblank interrupt anywhere on the board, the
+  program finds the beam by reading bit 7 of `0x4003` -- a bit the
+  schematics wire into a DIP-switch port. A port returning a constant there
+  hangs the game in a wait loop, which looks exactly like a broken
+  renderer, a bad ROM load or a dead CPU. Counting the reads separates
+  them: **~3,600 per frame** means the program is alive and looking at
+  video timing.
+- **The CPU-7 descrambler.** It only fires when a write has happened since
+  the last opcode fetch AND `(pc & 0x104) == 0x104`. Get the mask or the
+  flag wrong and the count is zero and the machine executes
+  plausible-looking wrong code. Zero is *also* what a correct
+  implementation reports if the case is never reached, so the number is the
+  only way to tell "not implemented" from "not exercised".
+
+Both were nonzero on the first run, and the attract screen rendered
+correctly first try.
+
+### 51. The attract demo renders a full playfield, so "it works" was wrong
+
+The first gameplay-looking screenshot -- level 1, burgers, ladders, plates,
+four sprites animating and moving -- was the **attract demo**. Coins were
+being ignored completely.
+
+What caught it was the control run the playbook insists on: the same
+sequence **with no coin at all** produced byte-identical counters *and*
+byte-identical sprite positions. A screenshot could never have shown this,
+because the thing being rendered was real; it just was not a game. This is
+DEVNOTES #32's lesson in a new costume -- a symptom that could plausibly be
+authentic still deserves a measurement.
+
+### 52. A ten-cycle interrupt window, and why per-scanline interrupt checks are not enough
+
+Two bugs in a row on the same code path, and the second is the interesting
+one.
+
+**First**, the coin IRQ was modelled as a one-shot: raise it, and on the
+next scanline call `m6502_gen_irq()`. MAME raises it with
+
+```
+m_maincpu->set_input_line(0, HOLD_LINE);
+```
+
+and HOLD_LINE means *assert the line and clear it automatically when the
+CPU acknowledges* -- not "pulse once". `m6502_gen_irq()` has its own
+`if (idf == 0)` guard, so offering the interrupt while the program has
+interrupts masked silently discards it. Holding the flag until the CPU can
+take it is the faithful model.
+
+**That fix changed nothing**, and the reason is the real finding.
+Disassembling where the main CPU actually sits:
+
+```
+CA32: 58              CLI
+CA33: EA EA EA EA     NOP x4
+CA37: 78              SEI
+...
+CA49: AD 03 40        LDA $4003     ; the vblank poll
+CA4C: 30 FB           BMI $CA49
+```
+
+The program runs with interrupts masked and opens a window **about ten
+cycles wide, once per frame**. A scanline is 96 cycles, so checking the IRQ
+line only at scanline boundaries lands inside that window essentially
+never. Moving the check to *between every instruction* -- which is what a
+real 6502 does, sampling its IRQ line at each instruction boundary -- fixed
+it, and the whole chain lit up at once:
+
+```
+                        before      after
+SYSTEM port reads          0         278     <- the game polls for START
+coin IRQs delivered        0           1
+sound commands sent        1           7
+AY register writes        88        3448     <- the music is playing
+```
+
+The diagnostic lied too, and in a way worth remembering: a per-scanline
+sample of the I flag reported "unmasked scanlines: 0", which reads as
+"this program never enables interrupts" when it actually means "your
+sampling interval is ten times wider than the thing you are sampling".
+**Measure the quantity at the granularity it changes at** -- the same
+mistake as #35's frame totals hiding within-frame deficits.
+
+Validated by making the negative control diverge: with the fix, the no-coin
+run differs from the coin run on every counter; before it, the two were
+identical. A control that does not diverge invalidates the matching result
+it was supposed to validate.
+
+### 53. Two open questions from the port plan, answered by counting
+
+- **Does anything READ the X/Y-swapped video/colour RAM mirrors, or only
+  write them?** It reads them: **0 reads during attract, ~11,000 per 900
+  frames once a game is running**. The read path is load-bearing, not
+  decorative.
+- **Is the background layer used in normal play?** Yes -- `bnj_scroll0`
+  goes to `0x13` when a level starts (bit 4 = enable, bits 0-1 = coarse
+  scroll 3). It is the level playfield itself, so the layer is not an
+  optional extra for bonus screens.
+
+Still open: what `0xB000-0xBFFF` (mapped as ROM, unpopulated in this set)
+returns on real hardware, and whether the program ever reads it.
+
+### 54. No decode caches, because the graphics are straight bitplanes
+
+`ArcadeMachine_Pacman` and `_DKong` decode their graphics ROMs once into
+pixel caches because those ROMs pack pixels into awkward interleaved
+nibbles. Burger Time's are three parallel bitplanes, so extracting one row
+of one character is three byte reads plus a bit-spread -- cheap enough to do
+on demand every frame. What that avoids:
+
+```
+char pixel cache  [1024][8][8]   would be  64 KB
+sprite cache      [256][16][16]  would be  64 KB
+the bit-spread table used instead is        2 KB
+```
+
+Deliberately *not* following the neighbouring games here; if `work` ever
+needs the headroom on hardware, a char pixel cache is the obvious lever,
+but measure first (#35).

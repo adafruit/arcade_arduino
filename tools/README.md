@@ -17,6 +17,8 @@ pacman_host/     ArcadeMachine_Pacman   (1x Z80)
 invaders_host/   ArcadeMachine_Invaders (1x i8080)
 mspacman_host/   ArcadeMachine_MsPacman (1x Z80, banked/encrypted ROM)
 dkong_host/      ArcadeMachine_DKong    (1x Z80 + i8257 DMA + 8035 sound CPU)
+btime_host/      ArcadeMachine_BTime    (2x 6502, one of them encrypted)
+m6502_test/      ArcadeCPU_M6502 conformance runner -- NOT a machine harness
 ```
 
 ```sh
@@ -25,7 +27,18 @@ dkong_host/      ArcadeMachine_DKong    (1x Z80 + i8257 DMA + 8035 sound CPU)
 ./invaders_host/build.sh && ./invaders_host/invaders_host --frames 5000
 ./mspacman_host/build.sh && ./mspacman_host/mspacman_host --frames 5000
 ./dkong_host/build.sh    && ./dkong_host/dkong_host       --frames 5000
+./btime_host/build.sh    && ./btime_host/btime_host       --frames 5000 \
+                              --rom ../../btime_assets/rom
 ```
+
+`m6502_test/` is the odd one out: it runs only the CPU core, against the
+standard 6502 test suites (Klaus Dormann's functional test, Bruce Clark's
+decimal test, AllSuiteA), and reports cycle counts against upstream's
+published figures. Burger Time is this project's first 6502 machine, and a
+CPU bug does not present as a CPU bug -- it presents as wrong graphics, a
+hang, or a game that boots and then misbehaves. Removing the interpreter
+from the suspect list costs one command. Its test binaries are third-party
+and fetched rather than vendored; see its `main.cpp` header.
 
 Each harness searches upward for its own `*_assets/` directory, or takes an
 explicit path (`--rom DIR` for the two Namco games, `--assets DIR` for

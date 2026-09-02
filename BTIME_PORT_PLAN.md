@@ -829,6 +829,10 @@ cycles on Ms. Pac-Man when followed strictly:
   screens?~~ **ANSWERED: it is the level playfield.** `bnj_scroll0` goes to
   `0x13` when a level starts (bit 4 enable, coarse scroll 3), so the layer is
   not an optional extra.
+- **NEW, still open: a close-range pepper hit loses its boing.** Fully
+  characterised in `DEVNOTES.md` #74; the next step is a timed recording of
+  the pepper toss alone from a real cabinet, to test whether this port's
+  ~350ms toss is longer than the real one.
 - ~~Which AY channel is 2A in practice (the filtered one)?~~ **ANSWERED by
   derivation rather than by ear:** the band-pass works out to a ~187 Hz peak
   with Q ≈ 1.9 and 7× gain, so 2A is the bass/thump channel — and its 1 kΩ

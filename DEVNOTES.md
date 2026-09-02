@@ -3227,3 +3227,63 @@ So both ends were shown sound -- board and emulation -- before the report
 was withdrawn, which is exactly the outcome the check was designed to
 produce. The witness stays in the heartbeat: it cost nothing and it turns
 "the controls feel wrong" from an argument into a measurement.
+
+
+### 74. KNOWN DIVERGENCE: a close-range pepper hit loses its "boing"
+
+**Status: characterised, not fixed, and deliberately left.** This is the one
+behavioural difference between this port and a real Burger Time cabinet
+that is known and understood.
+
+**Symptom, as observed on hardware by someone with a cabinet to compare
+against:** throw pepper at an enemy far away and you hear the toss and then
+the "boing". Throw at an enemy right next to you and the two "merge into
+one sound". A real cabinet plays both, at any distance.
+
+**Mechanism, fully measured.** Distance sets the gap between the two sound
+commands the main CPU sends, and the outcome switches on that gap:
+
+```
+  gap between 0x16 (toss) and 0x18 (hit)     hit's sweep writes   outcome
+  17-200ms                                          0             declined
+  400-1000ms                                       15             plays
+```
+
+The transition sits exactly at the toss effect's own **~350ms length**: a
+hit command arriving while the toss is still sounding never starts.
+
+**It is not a lost command and not an input problem.** The counters read 3
+sent, 3 collected in both cases (#71) -- the sound CPU receives the hit
+command during the toss and its own program declines to start it. The CPU
+passes Klaus Dormann's suites, the latch semantics match
+generic_latch_8_device, and commands are only ever dropped at boot, as on
+real hardware.
+
+**THE MOST LIKELY REMAINING CAUSE, and the cheapest test.** If the real
+machine plays a close-range boing, then on the real machine the hit command
+must arrive AFTER its toss has finished -- which means the real toss is
+SHORTER than this port's ~350ms. Everything else about the effect was
+judged good by ear, but timbre was what was judged; nobody has compared
+DURATION.
+
+So the test is one recording: **the pepper toss alone, from the cabinet,
+timed.** If it is materially shorter than 350ms, the bug is in this port's
+effect duration and the sound CPU's timebase is where to look -- most
+likely the ~976Hz NMI that sequences its software volume ramps, or the
+4.45% overall speed error below.
+
+Other candidates, in order:
+
+1. **The 4.45% speed error.** This port runs one game frame per 60Hz
+   display frame against the board's real 57.4449Hz, so all sound
+   sequencing including effect durations runs 4.45% fast -- which makes the
+   toss 4.45% SHORTER here, i.e. it works against this symptom rather than
+   causing it. Documented in BTIME_PORT_PLAN.md section 7 and still unfixed.
+2. **ROM revision.** The comparison cabinet is a modern reproduction; the
+   `btime` parent set used here is Data East set 1, and `btime3` / `btimem`
+   are documented revisions with behavioural differences.
+
+**Why it is being left:** it costs one sound effect at close range in one
+situation, everything else about the port matches the reference, and the
+next step needs a recording nobody has yet needed to make. Recorded here so
+it is a known quantity rather than a mystery.

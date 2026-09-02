@@ -43,6 +43,23 @@ and whether the audio level and tone are right (the gain was set from a
 measured peak, not derived, and the cabinet's speaker filter is deliberately
 omitted).
 
+## Known issues
+
+**A close-range pepper hit loses its "boing".** Throw pepper at a distant
+enemy and you hear the toss then the hit; throw at one right next to you and
+you hear only the toss. A real cabinet plays both at any distance.
+
+The mechanism is measured: distance sets the gap between the two sound
+commands, and a hit arriving within the toss effect's own ~350 ms is
+declined by the sound ROM itself (3 commands sent, 3 collected — nothing is
+lost). The likeliest cause is that this port's toss lasts longer than the
+real one, which would need a timed recording of the toss alone from a real
+machine to confirm. See `DEVNOTES.md` #74 for the full characterisation and
+the ranked candidates.
+
+Everything else reported against a real cabinet now matches: picture,
+speed, and the walking effect's character and level.
+
 ## Sound
 
 Two AY-3-8910 PSGs driven by a dedicated 500 kHz 6502, into a small

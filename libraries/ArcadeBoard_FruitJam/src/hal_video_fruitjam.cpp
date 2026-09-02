@@ -94,6 +94,13 @@ bool hal_video_init(void) {
 // anything (audio, a new video layer) to a frame that already fits.
 static volatile uint32_t s_blocked_us = 0;
 
+// Starvation-risk counter; see arcade_hal_video.h. Incremented when a
+// submit leaves the valid-scanline queue at or below one entry, meaning
+// Core 1 is about to run dry. The unlocked read is deliberate: this is a
+// diagnostic, a race costs at most a miscount, and the locked variant
+// would add a critical section to a path that runs 240 times a frame.
+static volatile uint32_t s_starve_events = 0;
+
 uint16_t *hal_video_acquire_scanline(void) {
     uint16_t *buf;
     uint32_t t0 = time_us_32();
@@ -110,6 +117,13 @@ uint32_t hal_video_take_blocked_us(void) {
 
 void hal_video_submit_scanline(uint16_t *buf) {
     queue_add_blocking_u32(&dvi.q_colour_valid, &buf);
+    if (queue_get_level_unsafe(&dvi.q_colour_valid) <= 1u) s_starve_events++;
+}
+
+uint32_t hal_video_take_starve_count(void) {
+    uint32_t v = s_starve_events;
+    s_starve_events = 0;
+    return v;
 }
 
 // Runs on whatever core calls it and never returns -- see hal_video.h's

@@ -78,6 +78,17 @@ void hal_video_run(void);
 // blocking may return 0.
 uint32_t hal_video_take_blocked_us(void);
 
+// Number of times, since the last call, that submitting a scanline left the
+// display backend with almost nothing queued -- i.e. how often the producer
+// came within a hair of starving the output. Resets on read.
+//
+// This exists because DVI starvation is the one failure in this project that
+// is loud on screen (red bars or a fully red frame) and completely invisible
+// to every other instrument: `work` can sit comfortably inside the frame
+// budget while an uneven patch inside that frame drains the queue anyway
+// (DEVNOTES.md #35). A board with no such failure mode may return 0.
+uint32_t hal_video_take_starve_count(void);
+
 #ifdef __cplusplus
 }
 #endif

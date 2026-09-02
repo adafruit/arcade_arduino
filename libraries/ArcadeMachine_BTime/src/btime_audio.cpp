@@ -487,8 +487,26 @@ BTIME_ARAMFUNC static void ay_run(ay_t *a, uint32_t ticks,
 // (as ArcadeMachine_Pacman does, where it is cheap enough) would put a
 // ~2200-AY-tick burst in an interrupt that must not starve the PicoDVI
 // scanline queue, which has only ~555us of slack.
-#define RING_SIZE   1024u  // power of two
-#define RING_TARGET 512u   // samples kept queued ahead of the ISR
+#define RING_SIZE   2048u  // power of two
+#define RING_TARGET 768u   // samples kept queued ahead of the ISR
+
+// Nominal production rate, in samples per slice, as a 16.16 fixed-point
+// fraction: 22050 samples/sec / 60 frames/sec / 240 slices/frame = 1.531.
+// See btime_audio_run_slice() for why this is now rate-paced rather than
+// purely level-paced.
+#define SLICE_RATE_Q16 ((uint32_t)(((uint64_t)BTIME_AUDIO_SAMPLE_RATE << 16) / (60u * 240u)))
+// Hard cap on samples generated in any one slice. TWO, not three, and the
+// device set the number. One sample costs ~17 AY ticks across both chips,
+// roughly 10us; a scanline's whole budget is 16665/240 = 69us and the CPU
+// and renderer already want ~49us of it. A 3-sample slice therefore asks
+// for 79us and runs a per-scanline DEFICIT, which accumulates against the
+// 8-buffer queue (~555us) and starves it after ~55 scanlines -- visible as
+// the starve counter climbing while `work` sat comfortably at 14.8ms of
+// 16.66. Frame totals cannot see within-frame deficits (DEVNOTES.md #35).
+// At 2 the nominal 1.53 still has 0.47 x 240 = 113 samples per frame of
+// catch-up capacity, which is far more than the drift needs.
+#define SLICE_MAX 2u
+#define RING_DEADBAND 96u // no correction within +/-96 samples of target
 
 static int16_t  g_ring[RING_SIZE];
 static volatile uint32_t g_ring_head; // write index (producer, Core 0)
@@ -515,6 +533,9 @@ static float g_dcb_prev_in, g_dcb_prev_out;
 #define TICKS_NUM (BTIME_AY_STEP_RATE)
 #define TICKS_DEN (BTIME_AUDIO_SAMPLE_RATE)
 static uint32_t g_tick_accum;
+
+// 16.16 accumulator for the nominal per-slice production rate.
+static uint32_t g_slice_accum;
 
 BTIME_ARAMFUNC static int16_t generate_one_sample(void) {
     // Advance the chips by the right (fractional) number of ticks and
@@ -644,37 +665,87 @@ void btime_audio_init(void) {
     for (int i = 0; i < 4410; i++) (void)generate_one_sample();
     g_peak = 0; // the warm-up is not a real peak
 
+    // PREFILL the ring to its target before the game starts. With the
+    // rate-paced producer above, an empty ring would take a couple of
+    // hundred slices to reach target one catch-up sample at a time -- and
+    // would underrun the whole way. This runs before Core 1 starts the DVI
+    // pump, so it is free.
+    g_slice_accum = 0;
+    for (uint32_t i = 0; i < RING_TARGET; i++) {
+        g_ring[g_ring_head & (RING_SIZE - 1u)] = generate_one_sample();
+        g_ring_head++;
+    }
+    g_peak = 0;
+
     hal_audio_set_fill_callback(&fill_audio);
 }
 
-// Tops the ring back up to RING_TARGET, a few samples at a time.
+// Produces this slice's audio: a NOMINAL RATE plus at most one sample of
+// catch-up, capped hard at SLICE_MAX.
 //
-// Paced off the RING'S OWN FILL LEVEL rather than off a samples-per-frame
-// constant, and that is the point: the ISR consumes at exactly 22050 Hz of
-// REAL time while frames arrive at whatever rate the DVI pump allows, so a
-// producer clocked off the emulated frame would drift against the consumer
-// forever. DEVNOTES.md's cycle-vs-real-time audio-clock lesson is the same
-// mistake in a different costume. Self-levelling here needs no rate
-// constant at all.
+// The first version was purely level-paced -- "top the ring back up to
+// RING_TARGET, up to 8 samples per slice" -- which self-corrects for clock
+// drift with no rate constant at all, and that part was right. What it got
+// wrong was SMOOTHNESS. The board's audio ISR drains BUFFER_SAMPLES (256)
+// in a single call every ~11.6ms, so the ring level drops by 256 all at
+// once and the next ~32 slices each generated their full 8-sample
+// allowance to refill it. Eight samples is ~68 AY ticks, five times the
+// cost of an ordinary slice, so every ISR call was followed by a burst of
+// expensive slices -- and a burst between two scanline submissions is
+// exactly what starves the DVI queue. On hardware that showed as RED BARS
+// flashing rapidly across an otherwise perfectly good picture, at roughly
+// the ISR's own rate. See DEVNOTES.md #65.
+//
+// So: pace off the rate, and let the ring absorb the ISR's bursts (it is
+// now 2048 samples deep with a 768 target, three times the drain size).
+// The single sample of catch-up keeps the drift correction that made the
+// level-paced version right in the first place -- the ISR consumes at
+// exactly 22050Hz of REAL time while frames arrive at whatever rate the
+// DVI pump allows, so a producer clocked purely off the emulated frame
+// would drift against the consumer forever (DEVNOTES.md's
+// cycle-vs-real-time audio-clock lesson).
 BTIME_ARAMFUNC void btime_audio_run_slice(uint32_t slice, uint32_t slice_count) {
-    // Cap per slice so no single slice becomes a long uninterrupted burst
-    // between two scanline submissions (DEVNOTES.md #18/#20/#34/#36/#48).
-    // 8 x 240 slices = 1920 samples of catch-up per frame, against the ~368
-    // actually consumed, so recovery from a stall is quick without any
-    // slice being expensive.
 #if BTIME_AUDIO_PROFILING
     const uint32_t t0 = micros();
 #endif
 
-    uint32_t budget = 8;
+    // How many samples this slice owes, at the nominal rate.
+    g_slice_accum += SLICE_RATE_Q16;
+    uint32_t budget = g_slice_accum >> 16;
+    g_slice_accum &= 0xFFFFu;
+
+    // Drift correction, SYMMETRIC and spread across slices instead of
+    // bursting: one sample more while the ring is below target, one fewer
+    // while it is above, with a deadband so it does not hunt.
+    //
+    // Both directions are needed, and the device proved it. With only the
+    // "below" half, the heartbeat showed the ring level climbing steadily
+    // -- 866, 900, 934, 968, 1002 -- about 0.57 samples per frame. The
+    // nominal rate is right (22050/60/240) but the BOARD'S ACTUAL rate is
+    // not 22050: the I2S PIO divider is integer-plus-fraction, so the real
+    // consumption works out around 22016Hz. Left alone, the ring fills to
+    // RING_SIZE in about 37 seconds and then sits there -- no dropped
+    // samples, because production simply throttles, but ~93ms of audio
+    // latency and a stream of counted overruns.
+    //
+    // This is the cycle-vs-real-time audio-clock lesson once more: the
+    // consumer's clock is whatever the hardware actually does, not what the
+    // constant says, so the producer has to be told by the ring rather than
+    // by arithmetic.
+    const uint32_t queued_now = g_ring_head - g_ring_tail;
+    if (queued_now < RING_TARGET - RING_DEADBAND) {
+        budget++;
+    } else if (queued_now > RING_TARGET + RING_DEADBAND && budget > 0) {
+        budget--;
+    }
+    if (budget > SLICE_MAX) budget = SLICE_MAX;
 
     while (budget--) {
         const uint32_t head = g_ring_head;
         const uint32_t queued = head - g_ring_tail;
-        if (queued >= RING_TARGET) break;
+        if (queued + 1u >= RING_SIZE) { g_overruns++; break; }
         g_ring[head & (RING_SIZE - 1u)] = generate_one_sample();
         g_ring_head = head + 1u;
-        if (queued + 1u >= RING_SIZE) { g_overruns++; break; }
     }
 
 #if BTIME_AUDIO_PROFILING

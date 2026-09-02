@@ -153,6 +153,9 @@ void loop() {
     btime_run_frame(&g_system);
     uint32_t frame_us   = micros() - t0;
     uint32_t blocked_us = hal_video_take_blocked_us();
+    uint32_t starve     = hal_video_take_starve_count();
+    static uint32_t starve_total = 0;
+    starve_total += starve;
     uint32_t work_us    = (frame_us > blocked_us) ? (frame_us - blocked_us) : 0;
     if (work_us > work_max) work_max = work_us;
 
@@ -175,6 +178,8 @@ void loop() {
         Serial.print(blocked_us);
         Serial.print("us), work_max ");
         Serial.print(work_max);
+        Serial.print("us, starve ");
+        Serial.print(starve_total);
         Serial.print("us | vblank ");
         Serial.print(c.vblank_reads);
         Serial.print(" swaps ");

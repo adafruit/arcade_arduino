@@ -2811,3 +2811,71 @@ is why `which openocd` and a shallow filesystem search both missed it. The
 earlier notes claiming there is no openocd binary here were wrong; what is
 true is that USB flashing is faster and no debugging in this file has needed
 the probe.
+
+### 65. Red bars: the audio producer was bursty, not slow
+
+With the frame budget fixed (#62) the game played well at proper speed and
+upright -- but with **red bars flashing rapidly** across an otherwise good
+picture. Distinct from #59's fully red screen: brief mid-frame starvation,
+not a whole frame missed.
+
+`work` was 15-16ms of 16.66, so the frame total looked survivable. The cause
+was distribution, and the mechanism was in the audio producer's pacing:
+
+- The board's audio ISR drains `BUFFER_SAMPLES` (**256**) in a single call,
+  every ~11.6ms.
+- The producer was purely LEVEL-paced -- "top the ring back up to target, up
+  to 8 samples per slice".
+- So each ISR call dropped the level by 256 at once, and the next ~32 slices
+  each generated their full 8-sample allowance to refill. Eight samples is
+  ~68 AY ticks; a burst between two scanline submissions is precisely what
+  starves the queue (#18/#20/#34/#36/#48, now for the seventh time).
+
+The frequency matched: bursts at roughly the ISR's own rate, which is what
+"flashing rapidly" looks like.
+
+**Fixed by pacing off the RATE and letting the ring absorb the ISR's
+bursts** -- nominal 22050/60/240 = 1.53 samples per slice as a 16.16
+accumulator, ring deepened to 2048 with a 768 target (three times the drain
+size), and prefilled at init. Result: `frame` pinned at exactly 16665us (a
+flat 60fps for the first time), `work` down to 12.5ms, and the starvation
+counter frozen at its boot value over a 90-second capture.
+
+**Two things the device taught that no reasoning would have:**
+
+The per-slice cap had to be **2, not 3**. One sample costs ~17 AY ticks
+across both chips, about 10us; a scanline's whole budget is 16665/240 = 69us
+and the CPU and renderer already want ~49us. A 3-sample slice asks for 79us
+and runs a per-scanline deficit that accumulates against the 8-buffer queue
+(~555us) and starves it after ~55 scanlines. With sound actually playing the
+starve counter climbed 2882 -> 4720 -> 9925 while `work` sat at 14.8ms.
+**Frame totals cannot see within-frame deficits** -- #35, and this is the
+clearest demonstration of it in the file.
+
+The drift correction had to be **symmetric**. With only the "below target"
+half, the ring level climbed steadily -- 866, 900, 934, 968, 1002, about
+0.57 samples per frame. The nominal rate is right but the BOARD'S ACTUAL
+rate is not 22050: the I2S PIO divider is integer-plus-fraction and the real
+consumption works out near 22016Hz. Left alone the ring fills in ~37
+seconds and sits full: no dropped samples, but ~93ms of latency. The
+consumer's clock is whatever the hardware does, not what the constant says.
+
+### 66. A starvation counter, because nothing else could see this
+
+Three separate visual symptoms in this port (#59's red screen, #65's red
+bars, and the residual question of whether either was really gone) were
+invisible to every instrument the project had. `work` and `blocked` describe
+the frame as a whole; DVI starvation is a within-frame event.
+
+`hal_video_take_starve_count()` is now part of the ArcadeHAL video contract:
+the Fruit Jam backend increments a counter whenever submitting a scanline
+leaves the valid queue at or below one entry, i.e. whenever Core 1 is about
+to run dry. The unlocked read is deliberate -- a diagnostic, where a race
+costs a miscount, on a path that runs 240 times a frame. The host stub
+returns 0, which is honest: this failure mode is device-only, which is
+exactly why it needed an on-device counter.
+
+It immediately paid for itself twice, distinguishing "fixed" from "not yet
+fixed" without a camera or a second pair of eyes, and it answers the
+question DEVNOTES #35 left open for Galaga: whether a starvation signal
+corresponds to anything visible. Here it did, exactly.

@@ -1,9 +1,32 @@
+; SPDX-FileCopyrightText: 2020 Raspberry Pi (Trading) Ltd.
 ; SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
 ;
-; SPDX-License-Identifier: MIT
+; SPDX-License-Identifier: BSD-3-Clause
 
 ; audio_i2s.pio — I2S transmitter for TLV320DAC3100 on Fruit Jam
 ; 16-bit stereo, MSB first
+;
+; The .program below is pico-extras' audio_i2s program
+; (src/rp2_common/pico_audio_i2s/audio_i2s.pio, Copyright (c) 2020 Raspberry
+; Pi (Trading) Ltd., BSD-3-Clause), reached via pico-infoNES -- which is
+; where invaders_pico copied it from (invaders_pico/DEVNOTES.md's credits),
+; and this file came from invaders_pico in turn. Same eight instructions
+; with the same operands and the same side-set pin order (bit1 = WS/LRCLK,
+; bit0 = BCLK); this listing is upstream's rotated by exactly 4 instructions
+; -- i.e. by one channel -- starting on the WS-low `set` rather than the
+; WS-high one. That is why every side value here reads as the opposite
+; channel phase from upstream's listing while the program is identical.
+; bitloop1/bitloop0 became left_data/right_data and upstream's
+; `public entry_point` became .wrap_target/.wrap.
+;
+; NOTE that pico-infoNES as a project is GPL-3.0, but this file is not: it
+; carries pico-extras' BSD-3-Clause terms, which travel with the file rather
+; than being replaced by the license of a project that copied it.
+;
+; The % c-sdk block at the bottom is NOT from upstream -- pico-extras keeps
+; its state-machine setup in a separate audio_i2s.c. It is written for this
+; board's TLV320DAC3100 and pin assignment, and is what the second copyright
+; line above covers.
 ;
 ; OUT pin 0:       DIN  (GPIO 24)
 ; Side-set pin 0:  BCLK (GPIO 26)

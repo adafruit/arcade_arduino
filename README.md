@@ -204,7 +204,12 @@ are non-obvious and worth reading before touching `ArcadeBoard_FruitJam`,
   comments for what is cited and what is approximated.
 - Pico SDK port this was ported from: [adafruit/invaders_pico](https://github.com/adafruit/invaders_pico)
 - DVI output: [PicoDVI](https://github.com/Wren6991/PicoDVI) by Luke Wren, via [Adafruit's fork](https://github.com/adafruit/PicoDVI)
-- I2S PIO program: [pico-infoNES](https://github.com/xrp-works/pico-infoNES)
+- I2S PIO program: Raspberry Pi's [pico-extras](https://github.com/raspberrypi/pico-extras)
+  (`pico_audio_i2s/audio_i2s.pio`, BSD-3-Clause), reached via pico-infoNES —
+  see `ArcadeBoard_FruitJam/src/audio_i2s.pio`'s own header for the
+  instruction-by-instruction comparison. The state-machine setup in that
+  file's `% c-sdk` block is this project's own, written for the
+  TLV320DAC3100.
 - SD card SPI driver: [wili8jam](https://github.com/wili8jam)
 - FatFs: [ChaN](http://elm-chan.org/fsw/ff/)
 - Lunar Rescue's ROM/color-PROM map and sound-trigger wiring were verified

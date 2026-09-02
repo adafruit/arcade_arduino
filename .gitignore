@@ -36,3 +36,7 @@ tools/*_host/*.dSYM/
 tools/m6502_test/m6502_test
 tools/m6502_test/*.dSYM/
 tools/m6502_test/programs/
+
+# Claude Code worktrees -- transient checkouts with their own build output.
+# Narrow on purpose: a future tracked .claude/settings.json stays visible.
+.claude/worktrees/

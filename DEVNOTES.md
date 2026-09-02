@@ -2879,3 +2879,46 @@ It immediately paid for itself twice, distinguishing "fixed" from "not yet
 fixed" without a camera or a second pair of eyes, and it answers the
 question DEVNOTES #35 left open for Galaga: whether a starvation signal
 corresponds to anything visible. Here it did, exactly.
+
+### 67. The cabinet speaker's high-pass, and a prediction that came true
+
+Compared by ear against a real Burger Time cabinet, the port's sound was
+reported as very close except for one effect (walking across a burger),
+which was "a bit low and noisy" where the original is "rounder and more
+musical".
+
+#55 recorded a deliberate omission: MAME's final
+`DISCRETE_CRFILTER(NODE_43, NODE_41, 3.0, CAP_U(100))` models the CABINET's
+4-ohm speaker as a 530 Hz high-pass, and it was left out because the Fruit
+Jam has its own speaker with its own response -- with the note that "if the
+port sounds boomier than a real machine, this is the first thing to try
+adding back". That is exactly the report.
+
+Measured effect of enabling it, over the same captured gameplay:
+
+```
+                <250Hz   250Hz-1k   1k-3k   >3k
+  without        33%       57%        8%      3%
+  with           18%       63%       14%      6%
+  overall level: 1.48x quieter
+```
+
+So it halves the sub-250Hz content and roughly doubles the treble share --
+the "low" half of the description directly.
+
+**It is now switchable (`BTIME_SPEAKER_HPF`, default 0) rather than
+decided**, because two things make this a listening question and not an
+arithmetic one: the omission argument is still sound (the real speaker is
+in the signal path either way), and MAME's own resistance value is a guess
+at a speaker, not a measurement of one.
+
+**Note for whoever does the A/B: level-match first.** The filtered version
+is 1.48x quieter, and a loudness difference will decide an ear comparison
+before timbre gets a vote -- the same confound as #46's matching mean pitch
+hiding a wrong sound. `tools/btime_host --wav` can render both, and a
+gain-compensated copy makes the comparison honest.
+
+Still open: whether the walking effect's remaining difference is this
+filter or something in the channel that carries it. #47's rule applies --
+timbre questions need ISOLATED recordings, so a capture of that one sound
+from both machines is what settles it, not a gameplay clip of either.

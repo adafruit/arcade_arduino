@@ -453,14 +453,29 @@ BTIME_ARAMFUNC static void ay_run(ay_t *a, uint32_t ticks,
 // a = RC / (RC + T), T = 1 / sample rate. Written out so the compiler folds
 // it at build time rather than dividing at run time.
 #define DCB_A (DCB_RC / (DCB_RC + 1.0f / (float)BTIME_AUDIO_SAMPLE_RATE))
-// The second CR filter (3 ohm / 100uF, fc = 530 Hz) models the CABINET's
-// 4-ohm speaker, and is DELIBERATELY NOT IMPLEMENTED here. It is an
-// aggressive high-pass that would thin the sound considerably, and the
-// Fruit Jam has its own speaker with its own response -- applying an
-// arcade cabinet's speaker model on top of a different real speaker is
-// modelling the wrong thing twice. Noted rather than silently dropped;
-// if the sound is boomier than a real machine, this is the first thing to
-// try adding back.
+// The second CR filter models the CABINET's 4-ohm speaker:
+// DISCRETE_CRFILTER(NODE_43, NODE_41, 3.0, CAP_U(100)), a high-pass at
+// 1/(2*pi*3*100uF) = 530 Hz. It was initially left out on the reasoning
+// that the Fruit Jam has its own speaker with its own response, so
+// applying an arcade cabinet's speaker model on top of a different real
+// speaker models the wrong thing twice.
+//
+// IT IS NOW SWITCHABLE, because that reasoning made a prediction and the
+// prediction came true: without it the port keeps low-frequency content a
+// real machine sheds, which was written down at the time as "if the sound
+// is boomier than a real machine, this is the first thing to try adding
+// back". Compared against a real Burger Time cabinet, one effect was
+// reported as "a bit low and noisy" where the original is "rounder and
+// more musical" -- exactly the signature of missing a 530 Hz high-pass.
+//
+// Set BTIME_SPEAKER_HPF to 1 to include it. Left at 0 by default until an
+// A/B against the real cabinet says which is closer; see DEVNOTES.md #67.
+#ifndef BTIME_SPEAKER_HPF
+#define BTIME_SPEAKER_HPF 0
+#endif
+// a = RC / (RC + T), RC = 3 ohm * 100uF = 300us.
+#define SPK_RC 0.0003f
+#define SPK_A (SPK_RC / (SPK_RC + 1.0f / (float)BTIME_AUDIO_SAMPLE_RATE))
 
 // Final output scale. NOT derived: MAME's DISCRETE_OUTPUT gain of
 // 32767/5*35 is expressed in the netlist's volt-ish units, which do not
@@ -527,6 +542,7 @@ static float g_inv_scale[17];
 // Filter state, producer side only.
 static float g_bp_x1, g_bp_x2, g_bp_y1, g_bp_y2;
 static float g_dcb_prev_in, g_dcb_prev_out;
+static float g_spk_prev_in, g_spk_prev_out; // cabinet-speaker HPF, see above
 
 // AY ticks per output sample: 187500 / 22050 = 8.50340..., carried as a
 // fraction so the pitch does not drift.
@@ -580,7 +596,15 @@ BTIME_ARAMFUNC static int16_t generate_one_sample(void) {
     g_dcb_prev_in = mixed;
     g_dcb_prev_out = dc;
 
+#if BTIME_SPEAKER_HPF
+    // The cabinet speaker's 530 Hz high-pass, same one-pole CR form.
+    const float spk = SPK_A * (g_spk_prev_out + dc - g_spk_prev_in);
+    g_spk_prev_in = dc;
+    g_spk_prev_out = spk;
+    int32_t s = (int32_t)(spk * OUTPUT_GAIN);
+#else
     int32_t s = (int32_t)(dc * OUTPUT_GAIN);
+#endif
     if (s > g_peak) g_peak = s;
     if (-s > g_peak) g_peak = -s;
     if (s >  32767) s =  32767;
@@ -647,6 +671,7 @@ void btime_audio_init(void) {
     g_inv_scale[0] = g_inv_scale[1]; // ticks is clamped to >= 1
     g_bp_x1 = g_bp_x2 = g_bp_y1 = g_bp_y2 = 0.0f;
     g_dcb_prev_in = g_dcb_prev_out = 0.0f;
+    g_spk_prev_in = g_spk_prev_out = 0.0f;
     memset(g_ring, 0, sizeof(g_ring));
 
     // WARM THE FILTERS UP before anything can be heard. Both the DC blocker

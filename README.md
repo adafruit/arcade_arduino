@@ -181,6 +181,14 @@ are non-obvious and worth reading before touching `ArcadeBoard_FruitJam`,
 - Original Space Invaders emulator: [shotto42/invaders](https://github.com/shotto42/invaders)
 - 8080 CPU core: [intarga/i8080e](https://github.com/intarga/i8080e) (MIT)
 - Z80 CPU core: [superzazu/z80](https://github.com/superzazu/z80) (MIT)
+- MCS-48 CPU core (`ArcadeCPU_MCS48`): **ported from**
+  [MAME](https://github.com/mamedev/mame)'s `mcs48_cpu_device`
+  (`src/devices/cpu/mcs48/mcs48.cpp`) — **BSD-3-Clause**, copyright Dan
+  Boris, Mirko Buffoni, Aaron Giles, Couriersud. This is the one library
+  here that follows MAME's *code* rather than only its documented hardware
+  facts, so it carries MAME's licence instead of this project's MIT; see
+  `ArcadeCPU_MCS48/src/mcs48.c`'s header for exactly what came from MAME
+  and what didn't.
 - Pac-Man's memory map, I/O map, tile/sprite/palette decode, and Namco WSG
   sound register map were all verified against
   [MAME](https://github.com/mamedev/mame)'s `pacman` driver source, not

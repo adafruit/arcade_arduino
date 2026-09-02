@@ -1,13 +1,40 @@
+// SPDX-FileCopyrightText: Dan Boris, Mirko Buffoni, Aaron Giles, Couriersud (MAME)
 // SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
 //
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BSD-3-Clause
 
 // Intel MCS-48 interpreter -- see mcs48.h for the architecture notes.
 //
-// Opcode semantics, machine-cycle counts, the timer/counter prescaler and
-// the interrupt model are transcribed from MAME's mcs48_cpu_device
-// (src/devices/cpu/mcs48/mcs48.cpp, upstream mamedev/mame). Where this file
-// deviates it says so and why; there are only two places, both listed here:
+// DERIVED FROM MAME, NOT MERELY VERIFIED AGAINST IT. This file is a port of
+// mcs48_cpu_device (src/devices/cpu/mcs48/mcs48.cpp, upstream mamedev/mame),
+// which is why it carries MAME's BSD-3-Clause terms and copyright holders
+// above rather than this project's usual MIT. Unlike the ArcadeMachine_*
+// libraries -- which take hardware *facts* from MAME's drivers (memory maps,
+// PROM formats, register bits) and implement them independently -- this file
+// follows MAME's own code:
+//
+//  - Its helper decomposition and names are MAME's: burn_cycles(),
+//    push_pc_psw(), pull_pc_psw(), pull_pc(), execute_add(), execute_addc(),
+//    execute_jmp(), execute_call(), execute_jcc(), check_irqs(),
+//    update_regptr(), ram_r(), ram_w().
+//  - Those bodies are statement-for-statement ports, keeping MAME's local
+//    variable names (temp, temp4, carryin, sp, oldtimer, timerover) and its
+//    flag-derivation idioms, e.g. (temp4 << 2) & A_FLAG and
+//    (temp >> 1) & C_FLAG in execute_add(), and the (t1_history & 3) == 2
+//    T1 edge detect in burn_cycles().
+//  - The mcs48 struct in mcs48.h is MAME's member set with the m_ prefix
+//    dropped.
+//
+// What is this project's own: the dispatch (one switch over 146 cases here
+// versus MAME's 256-entry ophandler table), the MCS48_RAMFUNC SRAM placement
+// below, the plain-C API shape, and the two deliberate omissions listed next.
+//
+// BSD-3-Clause carries a no-endorsement clause: MAME's name and the names of
+// the copyright holders above may not be used to promote anything built from
+// this. Attribution like this comment is fine; marketing copy is not.
+//
+// Where this file deviates from MAME's behaviour it says so and why; there
+// are only two places, both listed here:
 //
 //  - The 8243 port expander (MOVD/ANLD/ORLD P4-P7) is not implemented. No
 //    machine in this project has one wired, and a silent no-op would be

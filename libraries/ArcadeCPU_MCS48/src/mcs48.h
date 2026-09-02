@@ -1,6 +1,7 @@
+// SPDX-FileCopyrightText: Dan Boris, Mirko Buffoni, Aaron Giles, Couriersud (MAME)
 // SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
 //
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BSD-3-Clause
 
 // Intel MCS-48 CPU interpreter (8035/8039/8048 family, and the Fujitsu
 // MB8884 clone Donkey Kong's sound board actually carries).
@@ -8,11 +9,25 @@
 // The project's THIRD CPU axis, alongside ArcadeCPU_i8080 and ArcadeCPU_Z80.
 // No hardware or game knowledge lives here.
 //
-// Transcribed from MAME's own mcs48 device (src/devices/cpu/mcs48/mcs48.cpp,
+// PORTED FROM MAME's own mcs48 device (src/devices/cpu/mcs48/mcs48.cpp,
 // upstream mamedev/mame): the opcode table, per-opcode machine-cycle counts,
 // the timer/counter prescaler, and the interrupt model all come from that
 // source rather than from a datasheet reading, so behaviour matches the
 // emulator these games are verified against.
+//
+// This library therefore carries MAME's BSD-3-Clause terms and copyright
+// holders, NOT this project's usual MIT -- it follows MAME's code, not just
+// its documented hardware facts. The mcs48 struct below is MAME's member set
+// with the m_ prefix dropped. mcs48.c's header comment itemises exactly what
+// came from MAME and what is this project's own; read it before assuming any
+// of this file can be relicensed. BSD-3-Clause also forbids using MAME's
+// name or its authors' names to promote anything built from this.
+//
+// The other CPU axes have different origins and different terms:
+// ArcadeCPU_Z80 is superzazu/z80 (MIT) and ArcadeCPU_i8080 descends from
+// intarga/i8080e via shotto42/invaders (MIT). The ArcadeMachine_* libraries
+// are MIT: they take hardware *facts* from MAME's drivers and implement them
+// independently, which is a different relationship from this file's.
 //
 // FOUR THINGS ABOUT THIS ARCHITECTURE THAT SURPRISE PEOPLE COMING FROM THE
 // Z80 OR 8080, each of which is a silent-wrong-behaviour trap rather than a

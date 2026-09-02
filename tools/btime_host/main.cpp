@@ -36,6 +36,7 @@
 #include "btime_video.h"
 #include "btime_assets.h"
 #include "btime_input.h"
+#include "btime_ports.h"
 #include "btime_audio.h"
 #include "arcade_hal_video.h"
 #include "m6502.h"
@@ -273,6 +274,7 @@ int main(int argc, char **argv) {
     bool want_sprites = false;
     press coin, start1, up, down, left, right, pepper;
     const char *wav_path = NULL;
+    long sweep_first = -1, sweep_last = -1, sweep_hold = 60, sweep_start = 300;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atol(argv[++i]);
@@ -294,6 +296,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--pepper-at") && i + 1 < argc) pepper.at = atol(argv[++i]);
         else if (!strcmp(argv[i], "--hold-frames") && i + 1 < argc) g_hold_frames = atol(argv[++i]);
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav_path = argv[++i];
+        else if (!strcmp(argv[i], "--sound-sweep") && i + 2 < argc) {
+            sweep_first = atol(argv[++i]);
+            sweep_last  = atol(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--sweep-hold") && i + 1 < argc) sweep_hold = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--sweep-start") && i + 1 < argc) sweep_start = atol(argv[++i]);
         else if (!strcmp(argv[i], "--costs")) want_costs = true;
         else if (!strcmp(argv[i], "--sprites")) want_sprites = true;
         else if (!strcmp(argv[i], "--sprites-every") && i + 1 < argc) sprites_every = atol(argv[++i]);
@@ -305,7 +313,9 @@ int main(int argc, char **argv) {
                 "          [--sprites] [--sprites-every N]\n"
                 "          [--coin-at N] [--start-at N] [--hold-frames N]\n"
                 "          [--up-at N] [--down-at N] [--left-at N] [--right-at N]\n"
-                "          [--pepper-at N] [--wav FILE]\n", argv[0]);
+                "          [--pepper-at N] [--wav FILE]\n"
+                "          [--sound-sweep FIRST LAST] [--sweep-hold N] [--sweep-start N]\n",
+                argv[0]);
             return 2;
         }
     }
@@ -336,6 +346,19 @@ int main(int argc, char **argv) {
                            left.active(g_frame), right.active(g_frame),
                            pepper.active(g_frame),
                            false, false);              // rotate/mirror
+        // Sound-command sweep: inject one command per slot so each effect
+        // lands in its own stretch of the captured WAV, isolated.
+        if (sweep_first >= 0 && g_frame >= sweep_start) {
+            const long slot = (g_frame - sweep_start) / sweep_hold;
+            const long cmd  = sweep_first + slot;
+            if (cmd <= sweep_last && (g_frame - sweep_start) % sweep_hold == 0) {
+                btime_debug_inject_sound_command(&g_system, (uint8_t)cmd);
+                printf("[frame %ld] slot %ld: sound command 0x%02lX  (wav t=%.2fs)\n",
+                       g_frame, slot, cmd,
+                       (double)g_frame / 60.0);
+            }
+        }
+
         btime_run_frame(&g_system);
         wav_pump();
 

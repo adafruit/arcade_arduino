@@ -370,6 +370,13 @@ void btime_ports_reset_cpus(btime_system *system) {
     system->had_written = false;
 }
 
+void btime_debug_inject_sound_command(btime_system *system, uint8_t cmd) {
+    // The same two effects the main CPU's write to 0x4003 has.
+    system->soundlatch = cmd;
+    system->sound_irq  = true;
+    g_latch_writes++;
+}
+
 void btime_ports_coin_irq(btime_system *system) {
     // INPUT_CHANGED_MEMBER(btime_state::coin_inserted_irq_hi):
     //     if (newval) m_maincpu->set_input_line(0, HOLD_LINE);

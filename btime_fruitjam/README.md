@@ -29,8 +29,10 @@ Frame budget, measured on device over ~5,000 frames:
         | audio 0us q512 under 0 peak 0
 ```
 
-`work` sits at **11.6–16.4 ms of the 16.66 ms budget**, with zero audio ring
-underruns and zero illegal opcodes. That is comparable to Galaga (the
+`work` sits at **11.6–16.2 ms of the 16.66 ms budget, peaking at 17.5 ms**
+over a 23,000-frame run, with zero audio ring underruns and zero illegal
+opcodes. So it fits in the ordinary case and still tops the budget in the
+heaviest scenes; `DEVNOTES.md` §62 lists the remaining levers. That is comparable to Galaga (the
 heaviest game here) and leaves less headroom than Donkey Kong. Getting there
 took a real optimisation pass — the first flash needed 23.6 ms and showed a
 red screen — and `DEVNOTES.md` §59–64 is the measured record of what worked,

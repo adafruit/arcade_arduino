@@ -2731,6 +2731,19 @@ Measured on device at each step, `work` against a 16.66ms budget:
   14.1ms  ->  direct-read page table in the CPU core
 ```
 
+**Honest final figure: `work` is 11.6-16.2ms typical with a `work_max` of
+17.5ms** observed over a 23,000-frame run. So it fits the 16.66ms budget in
+the ordinary case and still peaks slightly OVER it in the heaviest scenes
+(the background layer being enabled is the likely difference). That is
+better than Galaga's position and worse than Donkey Kong's. Whether it is
+visibly clean is an eyes-on question, not a number one.
+
+Remaining named levers, in expected-value order: fixed-point audio filters
+(this target has no hardware FPU, so ~20 emulated float ops per sample
+remain), halving the AY's internal 187.5kHz tick rate (a documented
+approximation, ~1.5ms), and a full char-layer pen bitmap updated on VRAM
+writes instead of re-rendering 32 cells per scanline.
+
 The two biggest single wins were both about **not paying for indirection**:
 
 - **Port decode order.** The first version tested its address ranges in

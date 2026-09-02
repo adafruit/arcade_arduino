@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // ArcadeHAL: input contract.
 //
 // A board backend exposes its physical buttons as a flat array of raw,

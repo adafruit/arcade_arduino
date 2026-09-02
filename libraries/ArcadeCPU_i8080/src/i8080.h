@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2020 Ingrid Rebecca Abraham
+// SPDX-FileCopyrightText: 2024 Stephan Hotto
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 #ifndef CPU_H
 #define CPU_H
 

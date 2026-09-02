@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Lunar Rescue input mapping -- structurally identical to
 // ArcadeMachine_Invaders' invaders_input.cpp; see lrescue_input.h for why
 // left/right + a single fire button is the correct (not simplified)

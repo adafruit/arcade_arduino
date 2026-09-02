@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Donkey Kong tile+sprite renderer.
 //
 // Every hardware fact below was verified against MAME's dkong_v.cpp and

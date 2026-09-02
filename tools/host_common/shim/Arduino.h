@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Host-harness Arduino.h shim -- see ../README.md.
 //
 // Several ArcadeMachine_* sources include <Arduino.h> for DEBUG

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Host-harness driver for ArcadeMachine_Galaga -- see README.md.
 //
 // Runs the real Galaga machine (all 3 Z80 cores, real ROMs, real port

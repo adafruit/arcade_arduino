@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Donkey Kong input mapping -- IN0/IN1/IN2 bit layout verified against
 // MAME's INPUT_PORTS_START( dkong_in0_4 / dkong_in1_4 / dkong_in2 )
 // (src/mame/nintendo/dkong.cpp):

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Pac-Man Z80 bus wiring -- memory map + the one real I/O-space write.
 //
 // Memory map (verified against MAME's pacman_state::pacman_map(),

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Galaga 3x Z80 bus wiring -- memory map + the 06XX custom I/O mux.
 //
 // Memory map verified against MAME's galaga_state::galaga_map()

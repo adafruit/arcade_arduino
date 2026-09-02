@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+#
+# SPDX-License-Identifier: MIT
+
 # Third-party Arduino libraries -- installed via arduino-cli, not our code.
 # Reinstall with:
 #   arduino-cli lib install "PicoDVI - Adafruit Fork" "Adafruit TLV320 I2S" \

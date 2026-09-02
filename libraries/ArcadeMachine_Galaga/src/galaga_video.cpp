@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Galaga tile+sprite renderer -- see galaga_video.h for scope and the
 // citation trail. Every formula below is cited against the exact MAME
 // source line(s) it came from (src/mame/namco/galaga_v.cpp, fetched and

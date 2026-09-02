@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Namco 51XX HLE (high-level emulation) -- coin/credit/joystick I/O chip,
 // reached from the main Z80 through the 06XX mux (see galaga_ports.cpp).
 //

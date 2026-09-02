@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Space Invaders machine lifecycle -- ported from invaders_pico's arcade.c.
 // Orchestrates ArcadeCPU_i8080 + this machine's own port/video/audio/asset
 // modules, talking to hardware only through ArcadeHAL.

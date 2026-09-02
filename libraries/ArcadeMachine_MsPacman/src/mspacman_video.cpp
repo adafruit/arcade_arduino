@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Ms. Pac-Man tile+sprite renderer -- a verbatim copy of
 // ArcadeMachine_Pacman's pacman_video.cpp (same board, same video
 // hardware, same PROMs). Kept as its own file rather than shared because

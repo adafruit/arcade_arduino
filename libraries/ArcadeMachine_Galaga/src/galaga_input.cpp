@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Galaga input mapping implementation -- see galaga_input.h for the bit
 // layout citation.
 #include "galaga_input.h"

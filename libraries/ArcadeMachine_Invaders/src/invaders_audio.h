@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Space Invaders sample-based sound mixer -- board-agnostic.
 // Ported from invaders_pico's pico_sound.c, minus the TLV320DAC3100/I2S
 // hardware bring-up (that's ArcadeBoard_FruitJam's hal_audio_init()). This

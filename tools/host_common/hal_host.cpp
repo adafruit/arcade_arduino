@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Host-harness ArcadeHAL backend, shared by every *_host harness under
 // arcade_arduino/tools/ -- see ../README.md.
 //

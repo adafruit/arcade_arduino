@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Contact-bounce profiler for ArcadeBoard_FruitJam's buttons.
 //
 // WHY THIS EXISTS, and why input_test_fruitjam.ino can't answer the same

@@ -1,3 +1,8 @@
+// SPDX-FileCopyrightText: 2022 ChaN
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: BSD-1-Clause
+
 /*---------------------------------------------------------------------------/
 /  FatFs Configuration — invaders_pico SD card (read-only)
 /---------------------------------------------------------------------------*/

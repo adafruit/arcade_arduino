@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // hal_input.h implementation for Adafruit Fruit Jam.
 // Ported from invaders_pico's pico_input.c (minus game-semantic mapping,
 // which now lives in the sketch -- see invaders_fruitjam.ino).

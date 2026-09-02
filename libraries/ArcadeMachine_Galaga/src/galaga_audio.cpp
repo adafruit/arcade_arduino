@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Namco WSG (3-voice wavetable) synthesis for Galaga.
 //
 // See galaga_audio.h for why this deliberately mirrors

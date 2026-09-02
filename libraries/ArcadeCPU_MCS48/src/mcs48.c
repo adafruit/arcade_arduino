@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Intel MCS-48 interpreter -- see mcs48.h for the architecture notes.
 //
 // Opcode semantics, machine-cycle counts, the timer/counter prescaler and

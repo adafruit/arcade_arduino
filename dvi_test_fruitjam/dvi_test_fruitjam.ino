@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Standalone smoke test for ArcadeBoard_FruitJam's hal_video implementation.
 //
 // Draws scrolling color bars -- no CPU emulator, no ROM, no SD card. This

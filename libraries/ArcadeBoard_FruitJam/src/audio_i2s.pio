@@ -1,3 +1,7 @@
+; SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+;
+; SPDX-License-Identifier: MIT
+
 ; audio_i2s.pio — I2S transmitter for TLV320DAC3100 on Fruit Jam
 ; 16-bit stereo, MSB first
 ;

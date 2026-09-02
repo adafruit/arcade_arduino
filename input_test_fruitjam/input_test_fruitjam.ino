@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Standalone smoke test for ArcadeBoard_FruitJam's hal_input implementation.
 //
 // Prints each button's state whenever it changes -- no CPU emulator, no

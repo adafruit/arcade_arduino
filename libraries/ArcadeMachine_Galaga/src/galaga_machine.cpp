@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Galaga machine lifecycle -- orchestrates 3x ArcadeCPU_Z80 instances +
 // this machine's own port/video/asset modules, talking to hardware only
 // through ArcadeHAL. Same overall shape as pacman_machine.cpp, but the

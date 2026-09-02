@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Donkey Kong Z80 bus wiring: memory map (read_byte/write_byte), the i8257
 // DMA controller, and the video-control latch block. See dkong_ports.cpp's
 // header for the full map and its MAME citations.

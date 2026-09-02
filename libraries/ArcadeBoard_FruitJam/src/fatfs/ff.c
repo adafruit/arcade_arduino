@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2022 ChaN
+//
+// SPDX-License-Identifier: BSD-1-Clause
+
 /*----------------------------------------------------------------------------/
 /  FatFs - Generic FAT Filesystem Module  R0.15 w/patch1                      /
 /-----------------------------------------------------------------------------/

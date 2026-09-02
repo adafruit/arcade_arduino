@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+SPDX-License-Identifier: MIT
+-->
+
 # galaga_host — host-side test harness for ArcadeMachine_Galaga
 
 *(See `../README.md` for what the harnesses are, how they work, and the flags

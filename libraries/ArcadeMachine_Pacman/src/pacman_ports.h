@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Pac-Man Z80 bus wiring: memory map (read_byte/write_byte) and the one
 // real I/O-space access (port_out on port 0, for the interrupt vector).
 //

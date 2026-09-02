@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Galaga ROM/PROM loading -- see galaga_assets.h for the citation trail.
 #include <stdio.h>
 #include <string.h>

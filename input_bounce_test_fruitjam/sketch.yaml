@@ -1,1 +1,5 @@
+# SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+#
+# SPDX-License-Identifier: MIT
+
 default_fqbn: rp2040:rp2040:adafruit_fruitjam:opt=Optimize2

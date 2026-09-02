@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // ArcadeHAL: audio contract.
 //
 // A board backend implements this by turning a stream of PCM sample

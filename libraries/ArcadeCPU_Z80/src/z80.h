@@ -1,3 +1,8 @@
+// SPDX-FileCopyrightText: 2019 Nicolas Allemand
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Vendored verbatim from superzazu/z80 (MIT license, Copyright (c) 2019
 // Nicolas Allemand -- see this library's LICENSE file). Only change from
 // upstream: the extern "C" guard below, added from day one per

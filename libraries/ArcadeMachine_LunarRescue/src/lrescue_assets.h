@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Lunar Rescue ROM/PROM asset manifest -- board-agnostic (drives ArcadeHAL's
 // storage contract).
 //

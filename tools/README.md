@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+SPDX-License-Identifier: MIT
+-->
+
 # Host test harnesses
 
 Each `*_host/` directory builds one ArcadeMachine_* library into a native

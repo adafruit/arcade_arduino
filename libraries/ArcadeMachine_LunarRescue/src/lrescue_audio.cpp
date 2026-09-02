@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Lunar Rescue sample mixer -- the interrupt-safe channel mixer itself is
 // structurally a copy of ArcadeMachine_Invaders' invaders_audio.cpp, plus a
 // bit-banged square-wave channel for the one sound this game synthesizes

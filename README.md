@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+SPDX-License-Identifier: MIT
+-->
+
 # arcade_arduino
 
 Classic arcade games for the [Adafruit Fruit Jam](https://www.adafruit.com/product/6200)

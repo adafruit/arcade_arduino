@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2022 ChaN
+//
+// SPDX-License-Identifier: BSD-1-Clause
+
 /*------------------------------------------------------------------------*/
 /* A Sample Code of User Provided OS Dependent Functions for FatFs        */
 /*------------------------------------------------------------------------*/

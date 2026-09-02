@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+SPDX-License-Identifier: MIT
+-->
+
 # dkong_fruitjam
 
 Donkey Kong on the Adafruit Fruit Jam — see the [top-level README](../README.md)

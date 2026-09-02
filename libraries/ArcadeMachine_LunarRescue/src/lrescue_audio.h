@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Lunar Rescue sample-based sound mixer + one synthesized channel --
 // board-agnostic. Structurally a sibling of ArcadeMachine_Invaders'
 // invaders_audio.*, but with two differences driven by what MAME's own

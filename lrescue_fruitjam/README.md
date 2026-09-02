@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+SPDX-License-Identifier: MIT
+-->
+
 # lrescue_fruitjam
 
 Lunar Rescue on the Adafruit Fruit Jam — see the [top-level README](../README.md)

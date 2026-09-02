@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Host-harness driver for ArcadeMachine_MsPacman -- see ../README.md.
 //
 // Same idea as pacman_host: runs the REAL Ms. Pac-Man machine (the actual

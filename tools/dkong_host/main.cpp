@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Host-harness driver for ArcadeMachine_DKong -- see ../README.md.
 //
 // Runs the REAL Donkey Kong machine (the actual Z80 core, real ROMs/PROMs,

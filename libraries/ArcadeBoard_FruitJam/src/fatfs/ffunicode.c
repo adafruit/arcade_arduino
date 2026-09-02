@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2022 ChaN
+//
+// SPDX-License-Identifier: BSD-1-Clause
+
 /*------------------------------------------------------------------------*/
 /* Unicode Handling Functions for FatFs R0.13 and Later                   */
 /*------------------------------------------------------------------------*/

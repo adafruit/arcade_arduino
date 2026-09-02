@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+SPDX-License-Identifier: MIT
+-->
+
 # invaders_fruitjam
 
 Space Invaders on the Adafruit Fruit Jam — see the [top-level README](../README.md)

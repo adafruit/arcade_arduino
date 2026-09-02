@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // i8080 port I/O -- identical hardware-facing logic to invaders_pico's
 // i8080_ports.c, except play_sound()/stop_sound() (Fruit-Jam-and-earlier
 // pico_sound.c calls) become invaders_audio_play()/invaders_audio_stop()

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Donkey Kong sound implementation -- see dkong_audio.h for what is
 // emulated, what is approximated, and why.
 #include <string.h>

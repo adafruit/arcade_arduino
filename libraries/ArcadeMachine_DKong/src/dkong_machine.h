@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // ArcadeMachine_DKong: top-level Donkey Kong machine state + lifecycle.
 //
 // Built from scratch against the real arcade ROM/PROM dump

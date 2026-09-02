@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Donkey Kong Z80 bus wiring -- memory map plus the i8257 DMA controller
 // that is the only path sprites take to the video hardware.
 //

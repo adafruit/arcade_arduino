@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Namco 54XX HLE implementation -- see galaga_54xx.h for scope, citations,
 // and an honest statement of which parts are derived vs approximated.
 #include "galaga_54xx.h"

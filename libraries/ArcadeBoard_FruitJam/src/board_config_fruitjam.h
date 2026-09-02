@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Adafruit Fruit Jam (RP2350B) board facts: pins, addresses, raw button
 // indices. No game logic lives here -- see invaders_pico's README.md
 // "Controls" table for the physical pinout this mirrors.

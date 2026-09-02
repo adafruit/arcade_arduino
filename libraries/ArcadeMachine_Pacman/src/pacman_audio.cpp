@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Namco WSG (3-voice wavetable) synthesis.
 //
 // Register map and frequency-accumulator model verified against MAME's

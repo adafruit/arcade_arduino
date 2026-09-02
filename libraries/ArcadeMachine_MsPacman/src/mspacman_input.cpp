@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Ms. Pac-Man input mapping -- IN0/IN1 bit layout verified against MAME's
 // INPUT_PORTS_START(mspacman) (src/mame/pacman/pacman.cpp). That is its
 // own port definition rather than a PORT_INCLUDE of pacman's, but the

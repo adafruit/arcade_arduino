@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // CPU-facing I/O contract for the i8080 core's IN/OUT opcodes.
 //
 // This is deliberately NOT machine-aware -- no arcade_system, no game

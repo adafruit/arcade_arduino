@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2022 ChaN
+//
+// SPDX-License-Identifier: BSD-1-Clause
+
 /*-----------------------------------------------------------------------/
 /  Low level disk interface module include file   (C)ChaN, 2019          /
 /-----------------------------------------------------------------------*/

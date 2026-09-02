@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Namco 51XX HLE implementation -- see galaga_51xx.h for the full
 // protocol citation (command bytes from MAME's namco51.cpp header
 // comment; read-side response model corrected against a working

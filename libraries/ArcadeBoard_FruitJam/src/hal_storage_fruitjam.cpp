@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // hal_storage.h implementation for Adafruit Fruit Jam (SD card via the
 // vendored FatFs + wili8jam SPI SD driver -- see fatfs/ and sdcard.c/.h in
 // this library, ported verbatim from invaders_pico).

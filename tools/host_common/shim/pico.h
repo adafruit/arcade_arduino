@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Host-harness pico.h shim -- see ../README.md.
 //
 // Some ArcadeMachine_* audio files include <pico.h> for one thing only:

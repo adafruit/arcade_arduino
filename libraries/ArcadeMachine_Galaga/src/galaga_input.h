@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Galaga input mapping -- IN0/IN1 bit layout verified against MAME's
 // INPUT_PORTS_START(galaga) (src/mame/namco/galaga.cpp, fetched and read
 // directly this session):

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // ArcadeMachine_Invaders: top-level Space Invaders machine state + lifecycle.
 // Ported from invaders_pico's arcade.h/arcade.c. Board-agnostic: talks only
 // to ArcadeHAL and ArcadeCPU_i8080, never to a specific board's libraries.

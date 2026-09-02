@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // ArcadeMachine_LunarRescue: top-level Lunar Rescue machine state + lifecycle.
 // Board-agnostic: talks only to ArcadeHAL and ArcadeCPU_i8080, never to a
 // specific board's libraries. Structurally a sibling of

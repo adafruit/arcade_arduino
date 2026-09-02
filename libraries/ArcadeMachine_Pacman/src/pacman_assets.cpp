@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Pac-Man ROM/PROM loading. Every filename/destination/size below is taken
 // directly from MAME's ROM_START( pacman ) (src/mame/pacman/pacman.cpp) --
 // see pacman_assets.h for why this can't reuse ArcadeMachine_Invaders'

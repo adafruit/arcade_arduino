@@ -1,3 +1,8 @@
+// SPDX-FileCopyrightText: 2019 Nicolas Allemand
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 #include "z80.h"
 #include <inttypes.h> // PRIu32 for the cyc debug print (cyc is uint32_t, see z80.h)
 

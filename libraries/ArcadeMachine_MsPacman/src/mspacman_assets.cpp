@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Ms. Pac-Man ROM/PROM loading, plus the aux board's ROM decode.
 //
 // Every filename/destination/size below is taken directly from MAME's

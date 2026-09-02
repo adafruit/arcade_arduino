@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Space Invaders ROM/asset manifest -- board-agnostic (drives ArcadeHAL's
 // storage contract). Ported from invaders_pico's rom_loader.c and the ROM
 // half of sd_loader.c.

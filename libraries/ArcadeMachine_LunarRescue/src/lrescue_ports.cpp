@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // i8080 port I/O -- every bit assignment below is transcribed directly from
 // MAME's midw8080 driver, not inferred by analogy to Space Invaders:
 //   - IN0/IN1/IN2 read layout: midw8080/8080bw.cpp's sicv_base INPUT_PORTS

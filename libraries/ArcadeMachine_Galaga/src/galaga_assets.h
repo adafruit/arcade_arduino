@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Galaga ROM/PROM loading -- every filename/destination/size below is
 // taken from MAME's ROM_START(galaga) (src/mame/namco/galaga.cpp),
 // SHA1-verified byte-for-byte against galaga_assets/rom/'s actual files

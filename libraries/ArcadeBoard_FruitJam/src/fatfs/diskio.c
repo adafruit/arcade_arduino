@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 /*
  * diskio.c — FatFS low-level disk I/O bridge to SD card SPI driver
  *

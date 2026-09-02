@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Lunar Rescue VRAM renderer. Rotation/mirror/stretch math is copied
 // unchanged from ArcadeMachine_Invaders' invaders_video.cpp (identical VRAM
 // layout and 640x480 4:3 target monitor); the only real difference is

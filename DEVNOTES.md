@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+SPDX-License-Identifier: MIT
+-->
+
 # arcade_arduino — Development Notes
 
 Port of [adafruit/invaders_pico](../invaders_pico) (itself a Pico SDK port of

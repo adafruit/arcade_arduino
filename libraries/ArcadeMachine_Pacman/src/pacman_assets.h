@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Pac-Man ROM/PROM asset manifest -- board-agnostic (drives ArcadeHAL's
 // storage contract). An explicit filename->destination manifest, NOT
 // ArcadeMachine_Invaders' "sort filenames reverse-alphabetically, place

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // lrescue_fruitjam -- Lunar Rescue (ArcadeMachine_LunarRescue) on the
 // Adafruit Fruit Jam (ArcadeBoard_FruitJam). Sibling sketch to
 // invaders_fruitjam.ino -- see that file's header comment for the full

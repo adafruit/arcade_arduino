@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Space Invaders ROM loading -- ported from invaders_pico's rom_loader.c
 // and the ROM half of sd_loader.c, rewired onto ArcadeHAL's storage
 // contract instead of calling FatFs directly.

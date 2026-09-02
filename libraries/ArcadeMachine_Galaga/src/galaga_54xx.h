@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Namco 54XX HLE -- explosion/noise channel.
 //
 // The real 54XX is a Fujitsu MB8844 MCU programmed as a noise generator

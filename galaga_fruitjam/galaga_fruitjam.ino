@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // galaga_fruitjam -- Galaga (ArcadeMachine_Galaga) on the Adafruit Fruit
 // Jam (ArcadeBoard_FruitJam). This sketch is the SAMP composition root: it
 // is the ONLY place that knows both "this game" and "this board" at once.

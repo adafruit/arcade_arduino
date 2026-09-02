@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // i8080 port I/O for the Space Invaders machine.
 // Ported from invaders_pico's i8080_ports.c (itself identical to
 // shotto42/invaders except for the sound backend call).

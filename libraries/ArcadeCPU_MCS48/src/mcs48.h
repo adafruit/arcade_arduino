@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Intel MCS-48 CPU interpreter (8035/8039/8048 family, and the Fujitsu
 // MB8884 clone Donkey Kong's sound board actually carries).
 //

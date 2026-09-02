@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Pac-Man machine lifecycle -- orchestrates ArcadeCPU_Z80 + this machine's
 // own port/video/audio/asset modules, talking to hardware only through
 // ArcadeHAL. Same shape as invaders_machine.cpp/lrescue_machine.cpp.

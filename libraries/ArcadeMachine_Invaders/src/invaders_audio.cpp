@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Space Invaders sample mixer -- ported from invaders_pico's pico_sound.c.
 // Hardware bring-up (codec + I2S/DMA) is gone from this file; it lives in
 // the board backend behind hal_audio_init(). This file keeps the WAV

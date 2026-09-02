@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Space Invaders VRAM renderer -- ported from invaders_pico's pico_video.c
 // render_scanline()/draw_frame()/draw_error_frame(). Hardware bring-up
 // (DVI/HSTX init, the Core 1 scanline pump) is gone from this file; it

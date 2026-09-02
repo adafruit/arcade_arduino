@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Ms. Pac-Man Z80 bus wiring -- the banked address space, the aux board's
 // address-triggered bank switching, and the one real I/O-space write.
 //

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+SPDX-License-Identifier: MIT
+-->
+
 # mspacman_fruitjam
 
 Ms. Pac-Man on the Adafruit Fruit Jam — see the [top-level README](../README.md)

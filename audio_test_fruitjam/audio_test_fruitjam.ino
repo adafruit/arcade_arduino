@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Standalone smoke test for ArcadeBoard_FruitJam's hal_audio implementation.
 //
 // Plays a continuous 440 Hz tone through the TLV320DAC3100 -- no WAV

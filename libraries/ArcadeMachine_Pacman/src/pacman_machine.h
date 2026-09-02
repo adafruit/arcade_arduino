@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // ArcadeMachine_Pacman: top-level Pac-Man machine state + lifecycle.
 //
 // The project's first Z80-based machine -- built from scratch against the

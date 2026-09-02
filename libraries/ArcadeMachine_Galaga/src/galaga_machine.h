@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // ArcadeMachine_Galaga: top-level Galaga machine state + lifecycle.
 //
 // The project's first MULTI-CPU machine (3x Z80: main/sub/sub2, sharing a

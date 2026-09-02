@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // i8080 port I/O for the Lunar Rescue machine.
 // See lrescue_ports.cpp for the MAME source citations behind every bit.
 #ifndef LRESCUE_PORTS_H

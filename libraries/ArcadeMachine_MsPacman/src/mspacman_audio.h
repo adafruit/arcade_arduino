@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Ms. Pac-Man's Namco WSG sound -- IDENTICAL hardware to Pac-Man's, and
 // this file is a verbatim copy of ArcadeMachine_Pacman's pacman_audio.h.
 // The aux daughterboard adds no sound hardware; the same 82s126.1m

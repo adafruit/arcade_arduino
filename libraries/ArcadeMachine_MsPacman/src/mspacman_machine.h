@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // ArcadeMachine_MsPacman: top-level Ms. Pac-Man machine state + lifecycle.
 //
 // Ms. Pac-Man is not its own PCB. It is a stock Pac-Man board with a

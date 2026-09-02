@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // hal_audio.h implementation for Adafruit Fruit Jam (TLV320DAC3100 + PIO I2S).
 //
 // Codec init and I2S PIO driver ported near-verbatim from invaders_pico's

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Galaga 3x Z80 bus wiring -- see galaga_ports.cpp for the full memory map
 // citation and the 06XX mux implementation.
 #ifndef GALAGA_PORTS_H

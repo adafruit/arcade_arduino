@@ -1,4 +1,8 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+#
+# SPDX-License-Identifier: MIT
+
 # Build the Space Invaders host harness. See ../README.md.
 #
 # MACHINE_SRC / OUT can be overridden to build a SECOND binary from a

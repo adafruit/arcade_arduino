@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Standalone smoke test for ArcadeBoard_FruitJam's hal_storage implementation.
 //
 // Mounts the SD card, lists /rom/ and /samples/, and reads the first few

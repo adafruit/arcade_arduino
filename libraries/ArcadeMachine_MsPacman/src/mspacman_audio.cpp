@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Namco WSG (3-voice wavetable) synthesis -- a verbatim copy of
 // ArcadeMachine_Pacman's pacman_audio.cpp. Same sound hardware.
 // ORIGINAL COMMENT FOLLOWS, unchanged:

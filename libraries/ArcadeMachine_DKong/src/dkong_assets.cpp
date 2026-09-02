@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Donkey Kong ROM/PROM loading. Every filename/destination/size below is
 // taken directly from MAME's ROM_START( dkong ) (src/mame/nintendo/dkong.cpp).
 #include <stdio.h>

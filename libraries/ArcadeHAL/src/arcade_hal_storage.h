@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // ArcadeHAL: storage contract.
 //
 // A minimal, filesystem-shaped primitive modeled loosely on stdio: mount,

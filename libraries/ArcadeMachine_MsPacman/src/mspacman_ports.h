@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Ms. Pac-Man Z80 bus wiring: the BANKED memory map (read_byte/write_byte,
 // including the aux board's address-triggered bank switching) and the one
 // real I/O-space access (port_out on port 0, for the interrupt vector).

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Pac-Man's Namco WSG sound: 3-voice wavetable synthesis, board-agnostic
 // (registers as the ArcadeHAL audio fill callback -- never touches a
 // specific board's DAC/I2S code directly).

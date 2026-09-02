@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Ms. Pac-Man tile+sprite VRAM renderer -- board-agnostic (drives ArcadeHAL's
 // video contract, never a specific board's display library).
 //

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Lunar Rescue ROM/PROM loading. See lrescue_assets.h for why this can't
 // reuse ArcadeMachine_Invaders' "sort filenames, load consecutively from
 // 0x0000" convention -- addresses below are taken directly from MAME's

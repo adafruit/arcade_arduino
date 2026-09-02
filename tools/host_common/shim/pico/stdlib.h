@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Host-harness pico/stdlib.h shim -- see ../../README.md.
 //
 // ArcadeCPU_i8080's i8080.c includes this for exactly one symbol:

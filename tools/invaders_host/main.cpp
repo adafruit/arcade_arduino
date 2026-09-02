@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Host-harness driver for ArcadeMachine_Invaders -- see ../README.md.
 //
 // Same idea as pacman_host/galaga_host: runs the REAL Space Invaders machine

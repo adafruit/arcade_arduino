@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Lunar Rescue machine lifecycle -- structurally identical to
 // ArcadeMachine_Invaders' invaders_machine.cpp (same CPU clock, same
 // two-interrupts-per-frame scheme: both games are on the same "8080bw"

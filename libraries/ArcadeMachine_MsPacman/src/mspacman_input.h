@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Pac-Man input mapping.
 //
 // Deliberately does NOT depend on ArcadeHAL's hal_input contract or any

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // hal_video.h implementation for Adafruit Fruit Jam.
 //
 // Ported from invaders_pico's pico_video.c initialize_video()/

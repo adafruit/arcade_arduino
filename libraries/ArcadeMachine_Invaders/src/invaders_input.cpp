@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Space Invaders input mapping -- ported from invaders_pico's
 // pico_input.c's handleInput(), minus the GPIO reads (see invaders_input.h).
 #include "invaders_input.h"

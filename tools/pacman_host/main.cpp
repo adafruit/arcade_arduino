@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Host-harness driver for ArcadeMachine_Pacman -- see ../README.md.
 //
 // Same idea as galaga_host: runs the REAL Pac-Man machine (the actual Z80

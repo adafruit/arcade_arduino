@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 /*
  * sdcard.c — SD card SPI driver for Adafruit Fruit Jam (RP2350B)
  *

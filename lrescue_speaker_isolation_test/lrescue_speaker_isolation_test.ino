@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Standing regression check for ArcadeMachine_LunarRescue's synthesized
 // speaker channel (lrescue_audio.h/.cpp) -- the one genuinely bit-banged
 // (not sampled) audio channel in this codebase, and the trickiest piece of

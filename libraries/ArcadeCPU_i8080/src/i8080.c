@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2020 Ingrid Rebecca Abraham
+// SPDX-FileCopyrightText: 2024 Stephan Hotto
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Intel 8080 emulation — ported from shotto42/invaders (MIT license, original by intarga/i8080e)
 // Changes from original: removed <unistd.h>; replaced exit() with tight_loop_contents() panic.
 

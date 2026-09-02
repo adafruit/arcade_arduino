@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 John Park for Adafruit Industries
+//
+// SPDX-License-Identifier: MIT
+
 // Donkey Kong sound: an MB8884 (8035-class MCS-48) sound CPU driving a DAC,
 // plus an approximation of the board's discrete analog network.
 //

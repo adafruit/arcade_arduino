@@ -15,9 +15,9 @@ one-board arcade firmware, organized so the pieces that *aren't* specific
 to one game or one board are reusable for the next port:
 
 - **`ArcadeCPU_i8080`** — the Intel 8080 CPU interpreter. No hardware or
-  game knowledge at all. `ArcadeCPU_Z80` and `ArcadeCPU_MCS48` are its
-  siblings, added for the Namco/Nintendo games and for Donkey Kong's
-  sound board.
+  game knowledge at all. `ArcadeCPU_Z80`, `ArcadeCPU_MCS48` and
+  `ArcadeCPU_M6502` are its siblings, added for the Namco/Nintendo games,
+  for Donkey Kong's sound board, and for Burger Time.
 - **`ArcadeHAL`** — plain C function contracts (video/audio/input/storage).
   No implementation lives here.
 - **`ArcadeMachine_*`** — one library per game (`ArcadeMachine_Invaders`,
@@ -48,6 +48,7 @@ just read `ArcadeHAL/src/*.h` for the contracts themselves.
 | Galaga | [`galaga_fruitjam/`](galaga_fruitjam/README.md) | The project's first **multi-CPU** machine — three Z80s sharing RAM — plus a Namco 06XX/51XX/54XX custom I/O chain and a fourth video layer (the 05XX starfield). Synthesized WSG *and* 54XX explosion audio. |
 | Ms. Pac-Man | [`mspacman_fruitjam/`](mspacman_fruitjam/README.md) | The project's first machine that is another machine **plus a daughterboard**: stock Pac-Man hardware with the aux board's three extra ROMs, an address/data-line **encrypted** program bank, and eight address ranges that flip banks on any access. First **banked** address space and first ROM decode in the project. |
 | Donkey Kong | [`dkong_fruitjam/`](dkong_fruitjam/README.md) | The project's first **Nintendo** board and first **DMA-driven** sprites — the Z80 never writes sprite RAM, an i8257 controller does. Also its first **active-high** inputs, first **NMI** interrupt, and first **resistor-network** palette. Sound is an emulated **8035 sound CPU** (`ArcadeCPU_MCS48`, the project's third CPU axis) driving a DAC, plus approximations of its discrete analog channels tuned against recordings of a real machine. |
+| Burger Time | [`btime_fruitjam/`](btime_fruitjam/README.md) | The project's first **6502** machine (`ArcadeCPU_M6502`), first **encrypted-opcode** CPU (a DECO CPU-7, descrambled in the fetch path rather than at load time), first game with **no vblank interrupt at all** — it polls a vblank bit wired into a DIP-switch port — and first **palette held in RAM** rather than a PROM. Two 6502s driving two AY-3-8910s; sound synthesis not implemented yet. |
 
 Each game's own README covers its specific ROM/sample layout, controls, and
 any known quirks. They all share the building steps below.
@@ -55,7 +56,7 @@ any known quirks. They all share the building steps below.
 ### Prebuilt firmware
 
 If you'd rather not install the toolchain, ready-to-flash `.uf2` files for
-all six games are attached to each [release](../../releases). Hold **BOOT**
+all seven games are attached to each [release](../../releases). Hold **BOOT**
 while connecting USB (or hold BOOT and tap **RESET**), then copy the `.uf2`
 onto the `RP2350` drive that appears.
 
@@ -133,6 +134,8 @@ is just a fourth "board".
 ./tools/invaders_host/build.sh && ./tools/invaders_host/invaders_host --frames 5000
 ./tools/mspacman_host/build.sh && ./tools/mspacman_host/mspacman_host --frames 5000
 ./tools/dkong_host/build.sh    && ./tools/dkong_host/dkong_host       --frames 5000
+./tools/btime_host/build.sh    && ./tools/btime_host/btime_host       --frames 5000 \
+                                    --rom ../btime_assets/rom
 ```
 
 A hardware iteration costs minutes; this costs about a second, with unlimited
@@ -210,6 +213,19 @@ are non-obvious and worth reading before touching `ArcadeBoard_FruitJam`,
   [danjulio/gcore_galagino](https://github.com/danjulio/gcore_galagino) as
   the behavioural reference — see `ArcadeMachine_Galaga/src/`'s file-header
   comments for what is cited and what is approximated.
+- 6502 CPU core (`ArcadeCPU_M6502`): [superzazu/6502](https://github.com/superzazu/6502) (MIT),
+  the same author as the Z80 core above. Four documented changes from
+  upstream (an `extern "C"` guard, a `uint32_t` cycle counter, an optional
+  `read_opcode` hook for Burger Time's encrypted DECO CPU-7, and an
+  illegal-opcode counter); `tools/m6502_test/` runs the standard 6502 test
+  suites against the vendored copy and reports cycle counts against
+  upstream's published figures.
+- Burger Time's memory maps, DECO CPU-7 opcode scramble, char/sprite/
+  background layouts, palette format, DIP defaults and sound-CPU interrupt
+  wiring were all verified against [MAME](https://github.com/mamedev/mame)'s
+  `btime` driver (`src/mame/dataeast/btime.cpp`, `decocpu7.cpp`) plus
+  `ay8910.cpp`, `gen_latch.cpp` and `src/emu/video/generic.cpp` — see
+  `BTIME_PORT_PLAN.md` and `ArcadeMachine_BTime/src/`'s file headers.
 - Pico SDK port this was ported from: [adafruit/invaders_pico](https://github.com/adafruit/invaders_pico)
 - DVI output: [PicoDVI](https://github.com/Wren6991/PicoDVI) by Luke Wren, via [Adafruit's fork](https://github.com/adafruit/PicoDVI)
 - I2S PIO program: Raspberry Pi's [pico-extras](https://github.com/raspberrypi/pico-extras)

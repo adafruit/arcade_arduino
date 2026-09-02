@@ -2965,3 +2965,55 @@ silent and killed the whole table in one command.
 DEVNOTES #32's rule keeps reappearing in new costumes: a comparison among
 variants cannot detect a fault they all share -- and here every variant
 shared the same background music.
+
+### 69. The walking sound: isolated it was fine, in the mix it buried the music
+
+Once #68's isolation worked, the user identified command **0x11** as the
+walking-across-a-burger effect and said it sounded **very good on its own**.
+That single fact relocated the whole problem: the synthesis of the effect
+was right, and what was wrong was how it MIXED.
+
+`--ay-trace` (register-write logging) named the channel immediately:
+
+```
+AY2 r7 enable = F8   tone A ON  B ON  C ON | noise all OFF
+AY2 r8 A_vol  = 0D   AY2 A period 0x1FD -> 184Hz ... 0x1A9 -> 220Hz
+AY2 r9 B_vol  = 0B   AY2 B period 0x3FD ->  92Hz ... 0x3A9 -> 100Hz
+```
+
+**The walk is on AY2 channel A -- the one channel this board sends through
+the 7x band-pass peaking at 187Hz** (#55), with its tone sitting right on
+that peak. Note also there is no noise anywhere in it, so "noisy" was never
+the noise generator.
+
+Working the amplitudes through: 2A contributes
+`0.1 x 7.05 x 0.1441 = 0.102` while a flat 5k channel contributes
+`0.1 x 0.2 x 0.2183 = 0.0044` -- a **~23:1 advantage for a 200Hz tone over
+500-700Hz music**. So during a walk the effect swamps the tune.
+
+Measured against a recording of a real machine walking over its music:
+
+```
+                      below ~400Hz   400Hz-1kHz   music in top peaks?
+  real cabinet           62-76%        20-32%     yes, 587Hz throughout
+  filter OFF             76-85%        12-20%     no
+  filter ON              61-72%        20-30%     yes, 587/494/659/523
+```
+
+**So #67's omission was wrong, and the cabinet speaker high-pass is now the
+default.** A real cabinet speaker cannot reproduce 200Hz well; MAME models
+exactly that with its 3ohm/100uF CR filter, and leaving it out let a
+band-passed bass channel dominate in a way no real machine does. The
+reasoning for omitting it ("the Fruit Jam has its own speaker") was sound in
+the abstract and simply lost to measurement.
+
+**Worth recording how nearly this went the other way.** #67 measured the
+filter's effect on a passage WITHOUT the walk, saw it raise the treble share
+from 3% to 6%, and concluded it moved *away* from the cabinet recording.
+That measurement was correct and the inference from it was worthless,
+because the passage did not contain the phenomenon under investigation. The
+question was never "what does this filter do to the mix in general" but
+"what does it do to a 200Hz effect competing with 600Hz music".
+
+`OUTPUT_GAIN` went 300000 -> 400000 to recover the ~1.48x of level the
+filter costs; the device's measured peak had the headroom for it.

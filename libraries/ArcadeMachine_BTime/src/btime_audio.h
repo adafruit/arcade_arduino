@@ -95,6 +95,16 @@ uint32_t btime_audio_debug_cost_us(void);
 void btime_audio_debug_take_stats(uint32_t *out_underruns, uint32_t *out_overruns,
                                   uint32_t *out_queued, int32_t *out_peak);
 
+// DEBUG: register-write trace. Set a callback and every AY register write
+// is reported (chip 0/1, register 0-15, value) as it happens; NULL disables
+// it at zero cost. Exists to answer "which channel carries this effect, and
+// what is it doing" -- which decides whether an effect lands on AY2's
+// channel A, the one the board sends through a 7x band-pass, and therefore
+// whether its balance against the music is right. Host harness only in
+// practice; nothing on device registers it.
+typedef void (*btime_audio_reg_trace_cb)(uint8_t chip, uint8_t reg, uint8_t val);
+void btime_audio_set_reg_trace(btime_audio_reg_trace_cb cb);
+
 // Total AY register writes since the last call, then resets. Answers "is
 // the sound CPU actually talking to the PSGs" with a number while the
 // synthesis is still missing -- if this is zero, no amount of waveform code

@@ -154,6 +154,7 @@ typedef struct {
 
 static ay_t g_ay[2];
 static uint32_t g_reg_writes;
+static btime_audio_reg_trace_cb g_reg_trace; // see btime_audio.h
 
 // envelope_t::set_shape(), ay8910.h:243, with mask = ENV_STEP_MASK.
 static void ay_set_shape(ay_t *a, uint8_t shape) {
@@ -468,10 +469,26 @@ BTIME_ARAMFUNC static void ay_run(ay_t *a, uint32_t ticks,
 // reported as "a bit low and noisy" where the original is "rounder and
 // more musical" -- exactly the signature of missing a 530 Hz high-pass.
 //
-// Set BTIME_SPEAKER_HPF to 1 to include it. Left at 0 by default until an
-// A/B against the real cabinet says which is closer; see DEVNOTES.md #67.
+// IT IS NOW ON BY DEFAULT, because the A/B against the real cabinet settled
+// it and the omission argument lost. Measured on the walking effect
+// (AY2 channel A, a 184-220Hz tone) playing over the background music,
+// against a recording of a real machine doing the same thing:
+//
+//                        below ~400Hz   400Hz-1kHz   music in top peaks?
+//     real cabinet          62-76%        20-32%     yes, 587Hz throughout
+//     filter OFF            76-85%        12-20%     no
+//     filter ON             61-72%        20-30%     yes, 587/494/659/523
+//
+// The reason it matters is specific rather than cosmetic. The walk sits on
+// AY2 channel A -- the one channel this board sends through a 7x band-pass
+// peaking at 187Hz -- while the music plays on AY1 through the flat 0.2
+// path. That is a ~15:1 amplitude advantage for a 200Hz tone over 500-700Hz
+// music, so without the cabinet's 530Hz high-pass the effect BURIES the
+// tune. A real cabinet speaker cannot reproduce 200Hz well, and MAME models
+// exactly that. Reported by ear first as "a bit low and noisy" where the
+// original is "rounder and more musical"; see DEVNOTES.md #69.
 #ifndef BTIME_SPEAKER_HPF
-#define BTIME_SPEAKER_HPF 0
+#define BTIME_SPEAKER_HPF 1
 #endif
 // a = RC / (RC + T), RC = 3 ohm * 100uF = 300us.
 #define SPK_RC 0.0003f
@@ -490,7 +507,7 @@ BTIME_ARAMFUNC static void ay_run(ay_t *a, uint32_t ticks,
 // combinations the host capture never happened to hit. The gain is now set
 // from the DEVICE's peak with margin, not the host's. A reminder that a
 // capture is a sample of behaviour, not a bound on it.
-#define OUTPUT_GAIN 300000.0f
+#define OUTPUT_GAIN 400000.0f
 
 // ---------------------------------------------------------------------------
 // Sample ring
@@ -626,9 +643,13 @@ void btime_audio_address_w(uint8_t chip, uint8_t value) {
 
 void btime_audio_data_w(uint8_t chip, uint8_t value) {
     if (chip > 1) return;
-    ay_write(&g_ay[chip], g_ay[chip].addr_latch, value);
+    const uint8_t reg = g_ay[chip].addr_latch;
+    ay_write(&g_ay[chip], reg, value);
     g_reg_writes++;
+    if (g_reg_trace) g_reg_trace(chip, reg, value);
 }
+
+void btime_audio_set_reg_trace(btime_audio_reg_trace_cb cb) { g_reg_trace = cb; }
 
 // __not_in_flash_func: the same deliberate, isolated exception
 // ArcadeMachine_Invaders's invaders_audio.cpp documents in full (see that

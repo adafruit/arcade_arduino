@@ -42,6 +42,33 @@
 #include "m6502.h"
 
 extern "C" void host_storage_set_rom_dir(const char *dir);
+
+// --ay-trace: print every AY register write, decoded. The register names
+// are AY-3-8910's own (ay8910.h's enum); the channel a write belongs to is
+// what decides whether it goes through this board's band-pass, since only
+// AY2 channel A does.
+static bool g_ay_trace = false;
+static const char *ay_reg_name(uint8_t r) {
+    static const char *n[16] = {
+        "A_fine", "A_coarse", "B_fine", "B_coarse", "C_fine", "C_coarse",
+        "noise_period", "enable", "A_vol", "B_vol", "C_vol",
+        "env_fine", "env_coarse", "env_shape", "portA", "portB"};
+    return n[r & 15];
+}
+static void ay_trace(uint8_t chip, uint8_t reg, uint8_t val) {
+    if (!g_ay_trace) return;
+    printf("    AY%u  r%-2u %-13s = %02X", (unsigned)(chip + 1), (unsigned)reg,
+           ay_reg_name(reg), val);
+    if (reg == 7) {
+        printf("   tone A%s B%s C%s | noise A%s B%s C%s",
+               (val & 1) ? "off" : "ON ", (val & 2) ? "off" : "ON ",
+               (val & 4) ? "off" : "ON ", (val & 8) ? "off" : "ON ",
+               (val & 16) ? "off" : "ON ", (val & 32) ? "off" : "ON ");
+    } else if (reg >= 8 && reg <= 10) {
+        printf("   %s", (val & 0x10) ? "envelope-driven" : "fixed level");
+    }
+    printf("\n");
+}
 // Drives the machine's own registered audio fill callback -- the same one
 // the board's audio ISR calls on device. See tools/host_common/hal_host.cpp.
 extern "C" void host_audio_fill(int32_t *out, int count);
@@ -275,6 +302,11 @@ int main(int argc, char **argv) {
     press coin, start1, up, down, left, right, pepper;
     const char *wav_path = NULL;
     long sweep_first = -1, sweep_last = -1, sweep_hold = 60, sweep_start = 300;
+    // --sound-at FRAME CMD, repeatable: inject specific commands at specific
+    // frames. Needed to reproduce an effect PLAYING OVER the music, which is
+    // how it is actually heard and how the reference recording was made --
+    // a sweep can only ever audition one thing at a time.
+    long at_frame[8]; long at_cmd[8]; int at_n = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atol(argv[++i]);
@@ -296,6 +328,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--pepper-at") && i + 1 < argc) pepper.at = atol(argv[++i]);
         else if (!strcmp(argv[i], "--hold-frames") && i + 1 < argc) g_hold_frames = atol(argv[++i]);
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav_path = argv[++i];
+        else if (!strcmp(argv[i], "--ay-trace")) g_ay_trace = true;
+        else if (!strcmp(argv[i], "--sound-at") && i + 2 < argc && at_n < 8) {
+            at_frame[at_n] = atol(argv[++i]);
+            at_cmd[at_n]   = strtol(argv[++i], NULL, 0);
+            at_n++;
+        }
         else if (!strcmp(argv[i], "--sound-sweep") && i + 2 < argc) {
             sweep_first = atol(argv[++i]);
             sweep_last  = atol(argv[++i]);
@@ -314,7 +352,8 @@ int main(int argc, char **argv) {
                 "          [--coin-at N] [--start-at N] [--hold-frames N]\n"
                 "          [--up-at N] [--down-at N] [--left-at N] [--right-at N]\n"
                 "          [--pepper-at N] [--wav FILE]\n"
-                "          [--sound-sweep FIRST LAST] [--sweep-hold N] [--sweep-start N]\n",
+                "          [--sound-sweep FIRST LAST] [--sweep-hold N] [--sweep-start N]\n"
+                "          [--sound-at FRAME CMD]... [--ay-trace]\n",
                 argv[0]);
             return 2;
         }
@@ -336,6 +375,7 @@ int main(int argc, char **argv) {
         printf("[note] optional files missing: %s\n", btime_debug_missing_files());
 
     if (wav_path) wav_open(wav_path);
+    if (g_ay_trace) btime_audio_set_reg_trace(&ay_trace);
 
     print_state("after reset");
 
@@ -346,6 +386,14 @@ int main(int argc, char **argv) {
                            left.active(g_frame), right.active(g_frame),
                            pepper.active(g_frame),
                            false, false);              // rotate/mirror
+        for (int k = 0; k < at_n; k++) {
+            if (g_frame == at_frame[k]) {
+                btime_debug_inject_sound_command(&g_system, (uint8_t)at_cmd[k]);
+                printf("[frame %ld] sound command 0x%02lX  (wav t=%.2fs)\n",
+                       g_frame, at_cmd[k], (double)g_frame / 60.0);
+            }
+        }
+
         // Sound-command sweep: inject one command per slot so each effect
         // lands in its own stretch of the captured WAV, isolated.
         if (sweep_first >= 0 && g_frame >= sweep_start) {

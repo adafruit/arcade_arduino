@@ -3099,3 +3099,59 @@ does not cry wolf. Its value is exactly what it did here: it made
 The overlap's real cause is still open, and the next step is identifying
 which commands the pepper and the boing actually are -- `--sound-at` can
 then reproduce the pair with any spacing.
+
+### 72. Pepper toss vs enemy hit: the ROM declines it, nothing is lost
+
+The report: throwing pepper AT an enemy plays the toss and the "boing"
+together as "a bit of a mess", where a real machine plays them in sequence.
+
+With effects auditionable in isolation (#68) the two commands were
+identified by ear -- **0x16 is the toss, 0x18 is the hit** -- and the
+channel map explains why they interact at all:
+
+```
+  0x16 (toss)  AY2 channel B, NOISE, vol 0x0E   <- the only noise effect
+  0x18 (hit)   AY2 channels B and C, TONE, envelope shape 0x09
+```
+
+They contend for channel B. `--ay-trace` shows the hit's handler doing a
+clean takeover -- `enable=FF`, all volumes zero, then `enable=F9` for tone
+on B/C -- so there is no register conflict and the toss's noise really is
+switched off.
+
+Measuring the interaction across command spacings:
+
+```
+  gap        hit's sweep writes   audio duration   outcome
+   17-200ms          0                0.35s        hit SWALLOWED
+   400-1000ms       15            0.80-1.40s       hit plays, sequential
+```
+
+The transition sits exactly at the toss's own ~350ms length: a hit arriving
+while the toss is still sounding never plays.
+
+**And that is the ROM's decision, not a lost command.** The counters read
+**3 sent, 3 collected in both cases** -- the sound CPU receives the hit
+command during the toss and chooses not to start it. Combined with #71
+(commands are only ever lost at boot, as on real hardware) and a CPU that
+passes Klaus Dormann's suites, there is no defect to find in the command
+path. The port is faithfully reproducing what this ROM does.
+
+So the remaining possibilities are all OUTSIDE the command path, and worth
+listing because the next session will otherwise re-derive them:
+
+1. What is heard as "both at once" may be the toss over the MUSIC (AY1
+   keeps playing throughout) rather than toss over hit.
+2. The in-game command timing may differ from synthetic injection -- the
+   game may send the hit repeatedly, so a later copy lands after the toss
+   ends and plays.
+3. The reference cabinet may not be running this ROM revision, or may not
+   be MAME-derived at all.
+
+The one KNOWN deviation that could bear on it is documented in
+BTIME_PORT_PLAN.md section 7 and still unfixed: this port runs one game
+frame per 60Hz display frame against the board's real 57.4449Hz, so the
+whole machine -- including sound sequencing and effect durations -- runs
+**4.45% fast**. That widens the swallow window by the same 4.45%, which is
+far too small to explain the report but is the only timing error known to
+exist.

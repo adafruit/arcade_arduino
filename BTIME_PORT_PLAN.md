@@ -5,16 +5,31 @@ SPDX-License-Identifier: MIT
 
 # Burger Time port plan (`btime`, Data East 1982)
 
-Research only — **no code written yet**. This is the pre-implementation
-document the [new-port method](README.md#host-test-harnesses) asks for: every
-hardware fact below was read out of MAME's actual driver source (fetched, not
-recalled), and every citation names the file and construct it came from so the
-next session can re-check it in one command.
+**STATUS: the port is written and runs.** This file is kept as the
+pre-implementation research it was — every hardware fact below was read out of
+MAME's actual driver source (fetched, not recalled), and every citation names
+the file and construct it came from, so any of it can be re-checked in one
+command.
 
-When the port lands, this file should be split the way every other game here
-is: hardware facts into `ArcadeMachine_BTime/src/*` file headers, the SD
-layout and controls into `btime_fruitjam/README.md`, and whatever actually
-broke on hardware into `DEVNOTES.md`.
+What exists now, all verified in `tools/btime_host/` and none of it yet run on
+real hardware:
+
+- `libraries/ArcadeCPU_M6502/` — the CPU axis, with `tools/m6502_test/`
+  reporting PASS on Klaus Dormann's functional test, the decimal test and
+  AllSuiteA at cycle counts identical to upstream's.
+- `libraries/ArcadeMachine_BTime/` — memory maps, the DECO CPU-7 descrambler,
+  char/sprite/background video, input, and two emulated AY-3-8910s with the
+  board's discrete network.
+- `btime_fruitjam/` — the sketch, compiling at 113,508 bytes flash and
+  154,848 bytes RAM (29%).
+
+**Read `DEVNOTES.md` §50-57 for what actually happened when it ran**, which is
+the part this document could not predict: two silent failure modes and the
+counters that separate them, the attract demo masquerading as a working game,
+a ten-cycle interrupt window that made per-scanline interrupt checks useless,
+and the two audio measurements that caught a boot thump and set the output
+level. Section 12 below is annotated with which of its open questions are now
+answered.
 
 **Sources used throughout** (upstream `mamedev/mame`, `master`):
 
@@ -146,19 +161,18 @@ its own README reports passing `6502_functional_test`, `6502_decimal_test`,
 
 Two caveats to deal with deliberately rather than discover on hardware:
 
-- **It is a 65C02, and the CPU-7 is NMOS.** The differences that could
-  plausibly matter to an arcade ROM: undocumented/illegal NMOS opcodes (the
-  65C02 gives some of those real meanings), the `JMP ($xxFF)` page-wrap bug
-  (present on NMOS, fixed on CMOS), N/V/Z after decimal-mode `ADC`/`SBC`, and
-  NMOS read-modify-write instructions doing a *double* write. That last one is
-  the only one that could touch hardware here (an `INC $4003` would hit the
-  sound latch twice). The cheap check is a **census in the host harness**:
-  count executions of every opcode the two chips disagree on, plus every RMW
-  to `0x4000-0x4004`, and confirm the counts are zero. Counting the actual
-  thing rather than diffing frames is the lesson of `DEVNOTES.md` #32.
-  Supporting evidence that btime is clean here: MAME needs an undocumented-
-  opcode patch for *Zoar* on this same board (`init_zoar()`, btime.cpp:3181)
-  and needs **none** for btime.
+- ~~**It is a 65C02, and the CPU-7 is NMOS.**~~ **THIS TURNED OUT TO BE
+  WRONG, and in the helpful direction.** The core emulates BOTH an NMOS 6502
+  and a 65C02, selected by an `m65c02_mode` flag that `m6502_init()` leaves
+  at **0** — so the default is already the NMOS part, it has separate cycle
+  tables for each, and the NMOS `JMP ($xxFF)` page-wrap bug is implemented
+  and correctly gated on that flag. No NMOS-ification was needed. The
+  concern was worth having and cost one look at the source to dismiss.
+  (Illegal opcodes are still counted, via the `illegal_ops` counter added to
+  the core: over every run so far, including 5,000-frame games, the count is
+  **zero** — consistent with MAME needing an undocumented-opcode patch for
+  *Zoar* on this same board (`init_zoar()`, btime.cpp:3181) and none for
+  btime.)
 - **Its README reports it does *not* pass `6502_interrupt_test`.** Burger Time
   uses one IRQ (coin), one level-triggered IRQ (sound latch) and one
   edge-triggered NMI (sound timer), so read that core's interrupt path before
@@ -570,11 +584,15 @@ per step
   modulating its volume, and MAME's comment calls this out because emulators
   get it wrong.
 
-Amplitude: MAME builds its 16-step DAC table from a MOSFET/resistor model
-(`build_single_table()` / `build_mosfet_resistor_table()`, ay8910.cpp:1202).
-For this port the standard 16-step logarithmic table is the sane
-approximation; note it as an approximation with the MAME function named, the
-way `dkong_audio.h` does.
+Amplitude: MAME builds its 16-step DAC table from a resistor model
+(`build_single_table()` with `ay8910_param`, ay8910.cpp:820/1227). **The port
+did better than this section proposed:** rather than substituting a generic
+logarithmic table, that model was simply evaluated offline for this board's
+two load resistances (5 kΩ on five channels, 1 kΩ on 2A) and the resulting
+values baked in as constants — exact, and no more expensive at runtime. Note
+that the levels do NOT start at zero, because they are voltage-divider
+ratios; the 10 kΩ/10 µF high-pass is what removes that DC. See
+`btime_audio.cpp`.
 
 Practical shape: 187.5 kHz ÷ 22050 Hz = 8.503 steps per output sample, so
 accumulate and average ~8.5 steps per sample (a box filter is enough
@@ -798,14 +816,32 @@ cycles on Ms. Pac-Man when followed strictly:
 
 ## 12. Open questions
 
-- Does anything in `btime` actually read the X/Y-swapped *mirror* windows, or
-  only write them? Cheap to answer with a census in the harness, and it
-  decides whether the read path needs to exist at all.
+- ~~Does anything in `btime` actually read the X/Y-swapped *mirror* windows,
+  or only write them?~~ **ANSWERED: it reads them.** Zero reads during
+  attract, ~11,000 per 900 frames once a game is running. The read path is
+  load-bearing.
 - `B000-BFFF` is mapped as ROM but unpopulated in this set. What does the real
-  board return, and does the program ever read it? `DEVNOTES.md` #24 is a
-  standing warning that open-bus reads can be load-bearing.
-- Is the background layer used in normal play, or only on particular screens?
-  It gates a whole render path, so knowing when `0x4004` bit 4 is set is worth
-  a counter.
-- Which AY channel is 2A in practice (the filtered one)? Identifying what
-  sound it carries makes the band-pass easy to sanity-check by ear.
+  board return, and does the program ever read it? **Still open.** The port
+  returns 0. `DEVNOTES.md` #24 is a standing warning that open-bus reads can
+  be load-bearing.
+- ~~Is the background layer used in normal play, or only on particular
+  screens?~~ **ANSWERED: it is the level playfield.** `bnj_scroll0` goes to
+  `0x13` when a level starts (bit 4 enable, coarse scroll 3), so the layer is
+  not an optional extra.
+- ~~Which AY channel is 2A in practice (the filtered one)?~~ **ANSWERED by
+  derivation rather than by ear:** the band-pass works out to a ~187 Hz peak
+  with Q ≈ 1.9 and 7× gain, so 2A is the bass/thump channel — and its 1 kΩ
+  load resistor (against 5 kΩ on the other five) independently confirms it is
+  the odd one out. See `DEVNOTES.md` §55.
+
+New open questions the implementation raised, all of them needing hardware:
+
+- Is rotation 1 right on the physical display? (Predicted from MAME's
+  `ROT270`, confirmed in the harness against the framebuffer invariant, but
+  seven-for-seven is a rule, not a measurement of *this* board.)
+- 1:1 or the aspect stretch (§5.7)?
+- Is `OUTPUT_GAIN` sensible, and does leaving out the cabinet's 530 Hz speaker
+  high-pass make the port boomier than a real machine (§6.2, `DEVNOTES.md`
+  §55)?
+- What does `work` measure per frame, and does the no-decode-cache trade
+  (`DEVNOTES.md` §54) need revisiting?

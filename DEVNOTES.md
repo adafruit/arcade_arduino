@@ -3156,10 +3156,15 @@ whole machine -- including sound sequencing and effect durations -- runs
 far too small to explain the report but is the only timing error known to
 exist.
 
-### 73. "Can't throw pepper while walking" is not in the emulation
+### 73. "Can't throw pepper while walking" -- REPORT RETRACTED, checks worth keeping
 
 Reported on hardware: pepper cannot be thrown while a direction is held --
-the player has to stop first -- where the real cabinet allows it.
+the player has to stop first -- where the real cabinet allows it. **The
+report was withdrawn after the checks below: it works fine on hardware and
+the original observation was a mistake at the controls.** No code changed.
+
+Kept because the checks are the useful part, and because they establish
+things worth not re-deriving.
 
 **The emulation accepts every combination.** In the host harness, with the
 game in play and a throw known to register at that frame, the toss command
@@ -3198,5 +3203,27 @@ start1 with the controls apparently untouched -- which reads exactly like
 floating inputs. But the same heartbeats showed 60-102 sound commands, i.e.
 the game was being actively played at the time. A capture of someone
 playing cannot answer "are the inputs clean at rest". Control the variable
-first (#32, again): ask for a few seconds of hands-off, THEN a few seconds
-of deliberately holding a direction and tapping the button.
+first (#32, again): a few seconds of hands-off, THEN a few seconds of
+deliberately holding a direction and tapping the button.
+
+**The controlled capture settled it, and left two facts worth keeping:**
+
+```
+  sec  1-28   active play
+  sec 29-45   hands off:  btn seen = 0 on every heartbeat
+```
+
+1. **The GPIO inputs are clean at rest.** Seventeen consecutive seconds of
+   nothing, so the earlier "spurious presses" were the player's own hands.
+   Worth knowing the next time an input is suspected on this board.
+2. **The board reports pepper simultaneously with a direction, in all four
+   directions** -- pepper+dir was nonzero at seconds 3, 4, 10, 11, 20 and
+   21 (LEFT+PEPPER, RIGHT+PEPPER, UP+PEPPER, DOWN+RIGHT+PEPPER,
+   DOWN+PEPPER). That witness tests simultaneity WITHIN ONE FRAME rather
+   than an OR over the heartbeat interval, which is the distinction that
+   makes it evidence at all.
+
+So both ends were shown sound -- board and emulation -- before the report
+was withdrawn, which is exactly the outcome the check was designed to
+produce. The witness stays in the heartbeat: it cost nothing and it turns
+"the controls feel wrong" from an argument into a measurement.

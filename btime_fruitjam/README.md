@@ -17,16 +17,45 @@ citations for its own facts.
 
 ## Status
 
-Video, input, coin/start and the sound **command** path all work, verified
-in the host harness. **Sound synthesis is not implemented yet** — the sound
-CPU is fully emulated and is driving both AY-3-8910s' registers (thousands
-of writes per second, countable in the heartbeat), but nothing turns those
-registers into samples, so the machine is silent. The audio hardware is
-still brought up and fed silence on every boot, so the DAC/I2S path is
-exercised rather than untested.
+Video, input, coin/start and sound all work, verified in the host harness:
+the attract screen and level 1 render correctly, the game takes a coin,
+starts, responds to the joystick, and both AY-3-8910s produce music and
+effects.
 
-**Not yet run on real hardware.** The rotation default and the aspect
-choice below both want a look on a physical display.
+**Not yet run on real hardware.** The rotation default, the aspect choice
+below, and the audio level all want a look (and a listen) on the real
+board.
+
+## Sound
+
+Two AY-3-8910 PSGs driven by a dedicated 500 kHz 6502, into a small
+discrete network. The chip is emulated following MAME's `ay8910_device` —
+tone, noise and envelope generators clocked at clock/8 = 187.5 kHz, with
+MAME's own resistor-ladder amplitude tables evaluated offline for this
+board's two load resistances.
+
+The network is implemented rather than approximated, which is unusual for
+this project: five channels are summed flat and scaled by 0.2, and channel
+**2A alone** goes through a band-pass filter that works out to a ~187 Hz
+peak with Q ≈ 1.9 and 7× gain — it is the *bass* channel, which is
+consistent with MAME's note that on two 1982 recordings "the filtered sound
+is way louder than the music". One part is deliberately left out: the final
+3 Ω / 100 µF high-pass models the *cabinet's* 4 Ω speaker at 530 Hz, and
+stacking an arcade cabinet's speaker model on top of the Fruit Jam's own
+speaker models the wrong thing twice. If the result is boomier than a real
+machine, that is the first thing to try adding back.
+
+Synthesis runs on Core 0 in slices inside the scanline loop; the audio ISR
+only copies out of a ring buffer. That split is the shape `DEVNOTES.md` #48
+arrived at — a ~2,200-tick synthesis burst inside an interrupt would starve
+the PicoDVI scanline queue, which has only ~555 µs of slack.
+
+The one value that is **not** derived is the output level: MAME's netlist
+gain is in volt-ish units that do not survive the change of amplitude
+representation, so it was set by measuring the peak in the host harness
+(64.5% of full scale, no clipped samples, over a 40-second capture through
+the level-start music and gameplay). Adjust `OUTPUT_GAIN` in
+`btime_audio.cpp` if it is wrong on real hardware.
 
 ## What's new about this machine
 
@@ -147,6 +176,11 @@ modes are both invisible on screen — if `vblank-bit reads` is zero the
 program is not running at all, and if `CPU-7 opcode descrambles` is zero the
 fetch hook is not working — and both look like a rendering bug. The same
 counters go out with the on-device serial heartbeat for the same reason.
+
+`--wav FILE` captures exactly what the board would play, by pumping the
+machine's own fill callback — the same one the audio ISR calls on device.
+It also reports ring-buffer underruns and the peak sample, which is how the
+output level above was set.
 
 `--sprites` prints the eight sprites' enable/code/x/y. A machine whose
 sprites are wrong shows a perfectly good playfield with nothing moving on

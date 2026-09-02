@@ -10,11 +10,13 @@
 // (g_video_ready gating hal_video_run() until Core 0 is continuously
 // feeding scanlines); both apply here unchanged.
 //
-// SOUND SYNTHESIS IS NOT IMPLEMENTED YET -- see btime_audio.h. The sound
-// CPU IS fully emulated and is driving both AY-3-8910s' registers, and the
-// audio hardware is brought up and fed silence, so the DAC/I2S path is
-// exercised on every boot and whoever adds the waveform generation finds a
-// working pipeline and a live register stream rather than an untested one.
+// SOUND IS IMPLEMENTED: two emulated AY-3-8910s plus the board's discrete
+// network (see btime_audio.h for what is modelled and the one part
+// deliberately left out). Synthesis runs on Core 0 in slices inside the
+// scanline loop and the audio ISR only copies out of a ring buffer, which
+// is the split DEVNOTES.md #48 arrived at. Watch `underrun` in the
+// heartbeat: nonzero means Core 0 is not keeping the ring fed, which is a
+// frame-budget symptom rather than a synthesis one.
 //
 // Core 0: game emulation, input polling, board-to-game input mapping.
 // Core 1: hal_video_run() -- drives the DVI signal; never returns.
@@ -24,6 +26,7 @@
 #include <btime_video.h>
 #include <btime_input.h>
 #include <btime_assets.h>
+#include <btime_audio.h>
 #include <board_config_fruitjam.h>
 
 static btime_system    g_system;
@@ -134,9 +137,12 @@ void loop() {
     // fits. `work` is the real Core 0 cost. See DEVNOTES.md #16/#25.
     //
     // What to watch on this game specifically:
-    //  - It runs TWO CPUs, and the sound one is checked for a pending IRQ
-    //    between every instruction (DEVNOTES.md #52), so its cost is not
-    //    negligible even while the synthesis is absent.
+    //  - It runs TWO CPUs, both with their IRQ line checked between every
+    //    instruction rather than once per scanline, because the main
+    //    program's interrupt window is only ten cycles wide (DEVNOTES.md
+    //    #52). That is a correctness requirement, not a tuning choice.
+    //  - The synthesis runs six PSG channels at 187.5 kHz; `audio` below is
+    //    its measured share of the frame.
     //  - Its renderer uses no decode caches (#54), trading 128KB of RAM for
     //    a little more per-pixel work. If `work` is uncomfortable, that
     //    trade is the first thing to revisit -- but measure before assuming
@@ -178,7 +184,23 @@ void loop() {
         Serial.print("/");
         Serial.print(c.ay_reg_writes);
         Serial.print(" ill ");
-        Serial.println(c.illegal_ops);
+        Serial.print(c.illegal_ops);
+
+        // Sound health. `audio` is the measured cost of the synthesis
+        // against the 16660us budget -- measured rather than inferred,
+        // because an unmeasured audio cost is exactly what broke frame
+        // pacing on Donkey Kong (DEVNOTES.md #48).
+        uint32_t under = 0, over = 0, queued = 0;
+        int32_t peak = 0;
+        btime_audio_debug_take_stats(&under, &over, &queued, &peak);
+        Serial.print(" | audio ");
+        Serial.print(btime_audio_debug_cost_us());
+        Serial.print("us q");
+        Serial.print(queued);
+        Serial.print(" under ");
+        Serial.print(under);
+        Serial.print(" peak ");
+        Serial.println(peak);
     }
 }
 

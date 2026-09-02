@@ -41,6 +41,9 @@
 #include "m6502.h"
 
 extern "C" void host_storage_set_rom_dir(const char *dir);
+// Drives the machine's own registered audio fill callback -- the same one
+// the board's audio ISR calls on device. See tools/host_common/hal_host.cpp.
+extern "C" void host_audio_fill(int32_t *out, int count);
 
 static btime_system g_system;
 static long g_frame;
@@ -141,6 +144,80 @@ static void print_counters(void) {
            c.illegal_ops ? "<-- NONZERO: this ROM should not need any" : "");
 }
 
+// --- WAV capture ---------------------------------------------------------
+//
+// Writes a 16-bit mono WAV of exactly what the board would play, by pumping
+// the machine's own fill callback once per frame. Needed here for two
+// reasons: to confirm the AY synthesis makes sound at all, and to MEASURE
+// the peak level, since this port's final output gain is set against a
+// measurement rather than derived from MAME's netlist units.
+static FILE *g_wav;
+static uint32_t g_wav_samples;
+
+static void wav_open(const char *path) {
+    g_wav = fopen(path, "wb");
+    if (!g_wav) { fprintf(stderr, "cannot write %s\n", path); return; }
+    uint8_t hdr[44];
+    memset(hdr, 0, sizeof(hdr));
+    fwrite(hdr, 1, sizeof(hdr), g_wav); // patched in wav_close()
+    g_wav_samples = 0;
+}
+
+static void wav_pump(void) {
+    if (!g_wav) return;
+    static int32_t buf[2048];
+    // Drain exactly one frame's worth of REAL time, carrying the fraction.
+    // The board's ISR consumes at 22050Hz of real time while frames arrive
+    // at the DVI rate, so this uses 60Hz (the display), NOT the emulated
+    // machine's 57.4449Hz -- draining the wrong one makes the captured WAV
+    // play back at the wrong speed, which is exactly the sort of thing that
+    // gets mistaken for the emulation being wrong.
+    static double accum = 0.0;
+    accum += (double)BTIME_AUDIO_SAMPLE_RATE / 60.0;
+    int n = (int)accum;
+    accum -= n;
+    if (n > (int)(sizeof(buf) / sizeof(buf[0]))) n = (int)(sizeof(buf) / sizeof(buf[0]));
+    host_audio_fill(buf, n);
+    for (int i = 0; i < n; i++) {
+        int16_t s = (int16_t)(buf[i] >> 16); // both channels carry the same mono mix
+        fputc(s & 0xff, g_wav);
+        fputc((s >> 8) & 0xff, g_wav);
+    }
+    g_wav_samples += (uint32_t)n;
+}
+
+static void put32(FILE *f, uint32_t v) { fputc(v & 0xff, f); fputc((v >> 8) & 0xff, f); fputc((v >> 16) & 0xff, f); fputc((v >> 24) & 0xff, f); }
+static void put16(FILE *f, uint16_t v) { fputc(v & 0xff, f); fputc((v >> 8) & 0xff, f); }
+
+static void wav_close(void) {
+    if (!g_wav) return;
+    uint32_t data_bytes = g_wav_samples * 2;
+    fseek(g_wav, 0, SEEK_SET);
+    fwrite("RIFF", 1, 4, g_wav); put32(g_wav, 36 + data_bytes);
+    fwrite("WAVEfmt ", 1, 8, g_wav); put32(g_wav, 16);
+    put16(g_wav, 1); put16(g_wav, 1);
+    put32(g_wav, BTIME_AUDIO_SAMPLE_RATE);
+    put32(g_wav, BTIME_AUDIO_SAMPLE_RATE * 2);
+    put16(g_wav, 2); put16(g_wav, 16);
+    fwrite("data", 1, 4, g_wav); put32(g_wav, data_bytes);
+    fclose(g_wav);
+    printf("[wrote %u audio samples (%.2fs)]\n", g_wav_samples,
+           (double)g_wav_samples / BTIME_AUDIO_SAMPLE_RATE);
+    g_wav = NULL;
+}
+
+static void report_audio(void) {
+    uint32_t under = 0, over = 0, queued = 0;
+    int32_t peak = 0;
+    btime_audio_debug_take_stats(&under, &over, &queued, &peak);
+    printf("--- sound (frame %ld) ---\n", g_frame);
+    printf("  ring queued: %" PRIu32 "   underruns: %" PRIu32
+           "   overruns: %" PRIu32 "\n", queued, under, over);
+    printf("  peak sample since last report: %" PRId32 " (%.1f%% of full scale)%s\n",
+           peak, 100.0 * peak / 32767.0,
+           peak >= 32767 ? "  <-- CLIPPING" : "");
+}
+
 // A held button, expressed as a frame window. Six frames is comfortably
 // longer than any once-per-frame poll needs and shorter than a human press.
 static long g_hold_frames = 6;
@@ -184,6 +261,7 @@ int main(int argc, char **argv) {
     long sprites_every = 0;
     bool want_sprites = false;
     press coin, start1, up, down, left, right, pepper;
+    const char *wav_path = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atol(argv[++i]);
@@ -204,6 +282,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--right-at") && i + 1 < argc) right.at = atol(argv[++i]);
         else if (!strcmp(argv[i], "--pepper-at") && i + 1 < argc) pepper.at = atol(argv[++i]);
         else if (!strcmp(argv[i], "--hold-frames") && i + 1 < argc) g_hold_frames = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav_path = argv[++i];
         else if (!strcmp(argv[i], "--sprites")) want_sprites = true;
         else if (!strcmp(argv[i], "--sprites-every") && i + 1 < argc) sprites_every = atol(argv[++i]);
         else {
@@ -214,7 +293,7 @@ int main(int argc, char **argv) {
                 "          [--sprites] [--sprites-every N]\n"
                 "          [--coin-at N] [--start-at N] [--hold-frames N]\n"
                 "          [--up-at N] [--down-at N] [--left-at N] [--right-at N]\n"
-                "          [--pepper-at N]\n", argv[0]);
+                "          [--pepper-at N] [--wav FILE]\n", argv[0]);
             return 2;
         }
     }
@@ -234,6 +313,8 @@ int main(int argc, char **argv) {
     if (btime_debug_missing_files()[0])
         printf("[note] optional files missing: %s\n", btime_debug_missing_files());
 
+    if (wav_path) wav_open(wav_path);
+
     print_state("after reset");
 
     for (g_frame = 0; g_frame < frames; g_frame++) {
@@ -244,6 +325,7 @@ int main(int argc, char **argv) {
                            pepper.active(g_frame),
                            false, false);              // rotate/mirror
         btime_run_frame(&g_system);
+        wav_pump();
 
         if (g_frame == ppm_at && ppm_path) dump_ppm(ppm_path);
         if (counters_every && (g_frame % counters_every) == counters_every - 1)
@@ -258,6 +340,7 @@ int main(int argc, char **argv) {
     if (want_state) print_state("final");
     if (want_sprites) print_sprites();
     if (want_counters) print_counters();
+    if (wav_path) { report_audio(); wav_close(); }
     if (ppm_path && ppm_at < 0) dump_ppm(ppm_path);
     return 0;
 }

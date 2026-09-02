@@ -2524,3 +2524,95 @@ the bit-spread table used instead is        2 KB
 Deliberately *not* following the neighbouring games here; if `work` ever
 needs the headroom on hardware, a char pixel cache is the obvious lever,
 but measure first (#35).
+
+### 55. Sound: the network was worth implementing rather than approximating
+
+Donkey Kong's and Galaga's discrete channels had to be approximated -- 555
+timers, diode mixers and RC networks solved in floating point are not
+something to run inside an audio path on this hardware. Burger Time's
+analog side is small enough to just *do*:
+
+```
+five channels summed flat, x0.2
+channel 2A alone -> band-pass op-amp filter
+2-input op-amp mixer (100k/100k into rF=10k -> 0.1 each)
+10k/10uF high-pass
+3ohm/100uF high-pass        <- the cabinet speaker, NOT implemented
+```
+
+Two things worth recording.
+
+**The band-pass is a bass channel, and knowing that is the difference
+between judging the sound and guessing at it.** MAME's
+`DISC_OP_AMP_FILTER_IS_BAND_PASS_1M` reset code turns the measured
+component values (R51=5k, R50=10k, R49=47k, C=C=0.068uF) into
+
+```
+rTotal = R51 || R50                        = 3333.3
+fc     = 1/(2*pi*sqrt(rTotal*rF*c1*c2))    = 186.99 Hz
+d      = (c1+c2)/sqrt(rF/rTotal*c1*c2)     = 0.5326   (Q ~ 1.88)
+gain   = -rF/rTotal * c2/(c1+c2)           = -7.05
+```
+
+So channel 2A is a ~187 Hz peak with 7x gain, rolling off hard above
+800 Hz. That immediately explains the driver's own note that on two 1982
+recordings "the filtered sound is way louder than the music" -- it is the
+thump channel, and it is *supposed* to dominate. This is the "derive what
+you can" half of #46: the pitch and shape of this filter are derivable
+exactly, so no recording was needed for it.
+
+**The amplitude tables are a resistor model, not a log curve.** MAME's
+`build_single_table()` with `ay8910_param` was evaluated offline for this
+board's two load resistances (5k on five channels, 1k on 2A -- and the fact
+that the odd load resistor is on the same channel the netlist filters is a
+useful confirmation the schematic was read right). Those tables carry a
+large DC offset by design, because they are voltage-divider ratios; the
+10k/10uF high-pass is what removes it, so zero-basing them "to clean them
+up" would be changing the model.
+
+**Deliberately not implemented:** the final 3 ohm / 100 uF high-pass. It is
+a 530 Hz corner modelling the cabinet's 4-ohm speaker, and the Fruit Jam has
+its own speaker with its own response -- applying an arcade cabinet's
+speaker model on top of a different real speaker models the wrong thing
+twice. Noted here rather than silently dropped; if the port sounds boomier
+than a real machine, this is the first thing to add back.
+
+### 56. The filters have to be warmed up, or every boot starts with a thump
+
+Both the DC blocker and the band-pass start with zeroed state while their
+input sits at the amplitude tables' idle DC level, so the first fraction of
+a second is a decaying transient as they settle. Measured in a host capture
+before the fix: **RMS 678 for the first half second, with no energy above
+55 Hz** -- i.e. inaudible as a tone and perfectly audible as a click.
+
+Running the generator dry for 200 ms at init settles both against the true
+idle DC (which is what the registers hold at that point anyway) and drops
+the boot transient by about 9x. Cheap, and it costs one comment to explain
+why it is not dead code.
+
+Worth noting how it was found: the *spectrum* said 0 at every musical
+frequency while the *RMS* said 678. Either number alone would have been
+misleading -- one says "silence", the other says "loud".
+
+### 57. What the audio measurements actually say
+
+From `tools/btime_host --wav` over 40 seconds through the level-start music
+and gameplay:
+
+```
+ring underruns / overruns : 0 / 0
+peak sample               : 21123  (64.5% of full scale, 0 clipped samples)
+dominant pitches          : A4 440, C5 523, D5 587 together at one point;
+                            A#3 233 with A#5 932 an octave-and-a-bit apart
+```
+
+Pitches landing on the equal-tempered grid, in chords, is the check that
+the tone dividers and the clock/8 rate are right -- a wrong clock divisor
+would still produce "music", just transposed, and the ear is a poor judge of
+absolute pitch. **Measure the interval structure, not the mean.** That is
+#46's other half.
+
+The output gain is the one value not derived from MAME: its netlist gain is
+in volt-ish units that do not survive the change of amplitude
+representation, so `OUTPUT_GAIN` was set against the measured peak above.
+Only real hardware can judge whether it is right.

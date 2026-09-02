@@ -22,16 +22,27 @@
 //     goes through a band-pass op-amp filter, the two are mixed, and two
 //     high-passes follow. MAME does not model the uPC1181H amplifier.
 //
-// STATUS: THE SYNTHESIS IS NOT IMPLEMENTED YET. This file currently
-// implements only what the emulated machine can observe -- the register
-// writes and the address latch -- and produces silence. That is deliberate
-// sequencing, not an oversight: the port plan's order of work is video,
-// then input, then audio, each verified separately, and a silent but
-// correctly-clocked sound CPU is what lets the rest of the machine be
-// trusted first. The sound CPU IS fully emulated and running (see
-// btime_run_frame()), so its command handling, NMI timing and register
-// traffic are all exercised and countable now; only the waveform generation
-// is missing.
+// WHAT THIS PORT DOES
+//
+// The chip is EMULATED, following MAME's ay8910_device: tone, noise and
+// envelope generators clocked at clock/8, and MAME's own resistor-ladder
+// amplitude tables evaluated offline for this board's two load resistances.
+//
+// The network is IMPLEMENTED, not approximated, with one documented
+// exception. Channel 2A's band-pass is realised as the same second-order
+// section MAME derives from the measured component values (a ~187 Hz peak,
+// Q ~1.9, 7x gain -- it is the BASS channel); the flat 0.2 sum, the op-amp
+// mixer's 0.1 per input and the 10k/10uF DC blocker are all direct. What is
+// deliberately left out is the SECOND high-pass, which models the cabinet's
+// 4-ohm speaker at 530 Hz: the Fruit Jam has its own speaker with its own
+// response, and stacking an arcade cabinet's speaker model on top of a
+// different real one models the wrong thing twice. See btime_audio.cpp.
+//
+// The one value that is NOT derived is the final output level, for the
+// reason it never is in this project: MAME's netlist gain is in volt-ish
+// units that do not survive the change of amplitude representation, so it
+// was set by measuring the actual peak in the host harness and leaving
+// headroom. Only real hardware can judge it.
 #ifndef BTIME_AUDIO_H
 #define BTIME_AUDIO_H
 
@@ -75,6 +86,14 @@ void btime_audio_run_slice(uint32_t slice, uint32_t slice_count);
 // frames -- the sound half's real cost against the 16660us budget,
 // measured rather than inferred (DEVNOTES.md #48).
 uint32_t btime_audio_debug_cost_us(void);
+
+// Ring-buffer health and the peak sample seen since the last call, then
+// resets all four. `underruns` counts times the ISR found the ring empty --
+// nonzero means Core 0 is not keeping up and the sound will stutter, which
+// is a frame-budget symptom rather than a synthesis one. `peak` is what the
+// OUTPUT_GAIN constant in btime_audio.cpp was set against.
+void btime_audio_debug_take_stats(uint32_t *out_underruns, uint32_t *out_overruns,
+                                  uint32_t *out_queued, int32_t *out_peak);
 
 // Total AY register writes since the last call, then resets. Answers "is
 // the sound CPU actually talking to the PSGs" with a number while the

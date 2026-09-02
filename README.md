@@ -52,6 +52,18 @@ just read `ArcadeHAL/src/*.h` for the contracts themselves.
 Each game's own README covers its specific ROM/sample layout, controls, and
 any known quirks. They all share the building steps below.
 
+### Prebuilt firmware
+
+If you'd rather not install the toolchain, ready-to-flash `.uf2` files for
+all six games are attached to each [release](../../releases). Hold **BOOT**
+while connecting USB (or hold BOOT and tap **RESET**), then copy the `.uf2`
+onto the `RP2350` drive that appears.
+
+The binaries contain no ROM data — you still need the microSD card with
+legally-obtained ROMs described in each game's README. Each release build
+uses the optimization level that game's own `sketch.yaml` pins, which is
+not the same for every game; see below.
+
 ## Building
 
 ### Arduino IDE

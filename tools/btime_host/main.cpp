@@ -122,6 +122,17 @@ static void print_state(const char *tag) {
     printf("\n  digest=%016" PRIX64 "\n", digest_state());
 }
 
+static void print_costs(void) {
+    uint32_t cpu = 0, render = 0, audio = 0;
+    btime_debug_take_costs(&cpu, &render, &audio);
+    const uint32_t tot = cpu + render + audio;
+    printf("--- frame cost breakdown, mean over 60 frames (frame %ld) ---\n", g_frame);
+    printf("  CPUs   : %6" PRIu32 "us  %5.1f%%\n", cpu,    tot ? 100.0*cpu/tot : 0.0);
+    printf("  render : %6" PRIu32 "us  %5.1f%%\n", render, tot ? 100.0*render/tot : 0.0);
+    printf("  audio  : %6" PRIu32 "us  %5.1f%%\n", audio,  tot ? 100.0*audio/tot : 0.0);
+    printf("  total  : %6" PRIu32 "us   (host machine, NOT the device)\n", tot);
+}
+
 static void print_counters(void) {
     btime_counters c;
     memset(&c, 0, sizeof(c));
@@ -253,7 +264,7 @@ int main(int argc, char **argv) {
     const char *rom_dir = ".";
     const char *ppm_path = NULL;
     long ppm_at = -1;
-    bool want_state = false, want_counters = false;
+    bool want_state = false, want_counters = false, want_costs = false;
     long counters_every = 0;
     long digest_every = 0;
     int rotation = -1;
@@ -283,6 +294,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--pepper-at") && i + 1 < argc) pepper.at = atol(argv[++i]);
         else if (!strcmp(argv[i], "--hold-frames") && i + 1 < argc) g_hold_frames = atol(argv[++i]);
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav_path = argv[++i];
+        else if (!strcmp(argv[i], "--costs")) want_costs = true;
         else if (!strcmp(argv[i], "--sprites")) want_sprites = true;
         else if (!strcmp(argv[i], "--sprites-every") && i + 1 < argc) sprites_every = atol(argv[++i]);
         else {
@@ -340,6 +352,7 @@ int main(int argc, char **argv) {
     if (want_state) print_state("final");
     if (want_sprites) print_sprites();
     if (want_counters) print_counters();
+    if (want_costs) print_costs();
     if (wav_path) { report_audio(); wav_close(); }
     if (ppm_path && ppm_at < 0) dump_ppm(ppm_path);
     return 0;

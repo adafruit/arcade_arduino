@@ -143,10 +143,10 @@ void loop() {
     //    #52). That is a correctness requirement, not a tuning choice.
     //  - The synthesis runs six PSG channels at 187.5 kHz; `audio` below is
     //    its measured share of the frame.
-    //  - Its renderer uses no decode caches (#54), trading 128KB of RAM for
-    //    a little more per-pixel work. If `work` is uncomfortable, that
-    //    trade is the first thing to revisit -- but measure before assuming
-    //    it is the cause (#35).
+    //  - The interpreters, the port decode, the render path and the
+    //    synthesis are all placed in SRAM. On this board that is not a
+    //    micro-optimisation: leaving the audio generator in flash alone
+    //    cost 6.4ms of a 16.66ms frame (#60).
     static uint32_t frame_count = 0;
     static uint32_t work_max = 0;
     uint32_t t0 = micros();
@@ -200,7 +200,21 @@ void loop() {
         Serial.print(" under ");
         Serial.print(under);
         Serial.print(" peak ");
-        Serial.println(peak);
+        Serial.print(peak);
+
+        // Where the frame actually goes, measured on the device itself.
+        // The host harness cannot answer this: it has no XIP, so it cannot
+        // see flash-stall costs, and it got the audio share wrong by a
+        // factor of three and a half. See DEVNOTES.md #60.
+        uint32_t cpu_us = 0, render_us = 0, audio_cost = 0;
+        btime_debug_take_costs(&cpu_us, &render_us, &audio_cost);
+        Serial.print(" | cpu ");
+        Serial.print(cpu_us);
+        Serial.print(" render ");
+        Serial.print(render_us);
+        Serial.print(" snd ");
+        Serial.print(audio_cost);
+        Serial.println("us");
     }
 }
 

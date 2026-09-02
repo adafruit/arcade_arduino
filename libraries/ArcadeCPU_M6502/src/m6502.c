@@ -12,9 +12,35 @@
 //     encrypted opcodes -- Burger Time's DECO CPU-7 -- can descramble a
 //     fetch without touching data reads.
 //   - both "treat invalid opcodes as NOPs" paths bump `illegal_ops`.
+//   - m6502_rb() consults the optional rd_page[] table before falling back
+//     to the read_byte callback, and m6502_rw()/m6502_rw_bug() go through
+//     m6502_rb() so they inherit it.
+//
+//   - m6502_step() is placed in SRAM on device via a raw section attribute
+//     (see M6502_RAMFUNC below).
 //
 // The instruction set, cycle tables, addressing modes, NMOS JMP-indirect
 // page bug and interrupt sequence are untouched.
+//
+// SRAM PLACEMENT. On device the interpreter is the hottest code in the
+// machine -- Burger Time runs 34,816 emulated cycles per frame across two
+// of these cores -- and leaving it in flash means every instruction fetch
+// can stall on an XIP cache miss. ArcadeCPU_Z80 carries the identical
+// attribute for the identical reason, where it was the difference between
+// fitting Galaga's 16.67ms frame and overrunning it into a red screen.
+//
+// `.time_critical*` is collected into RAM by the arduino-pico linker
+// scripts (lib/rp2350/memmap_default.ld), the same mechanism pico-sdk's
+// __not_in_flash_func() uses; spelled out as a raw section attribute so
+// this file stays portable C with no pico-sdk include (tools/btime_host and
+// tools/m6502_test compile it natively). Costs SRAM -- check the "Global
+// variables use ..." line after building. The CYCLES_* tables below are
+// deliberately left in flash, since sequential table lookups cache well.
+#if defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE)
+#define M6502_RAMFUNC __attribute__((section(".time_critical.m6502")))
+#else
+#define M6502_RAMFUNC
+#endif
 
 #include "m6502.h"
 
@@ -83,15 +109,18 @@ static const uint16_t STACK_START_ADDR = 0x100;
 // memory helpers (the only functions to use read_byte and write_byte
 // function pointers)
 
-// reads a byte from memory
+// reads a byte from memory. Takes the direct page pointer when the machine
+// has provided one for this page (see m6502.h's rd_page), and falls back to
+// the callback otherwise.
 static inline uint8_t m6502_rb(m6502* const c, uint16_t addr) {
+    const uint8_t *page = c->rd_page[addr >> 8];
+    if (page) return page[addr & 0xFF];
     return c->read_byte(c->userdata, addr);
 }
 
 // reads a word from memory
 static inline uint16_t m6502_rw(m6502* const c, uint16_t addr) {
-    return (c->read_byte(c->userdata, addr + 1) << 8) |
-            c->read_byte(c->userdata, addr);
+    return (m6502_rb(c, addr + 1) << 8) | m6502_rb(c, addr);
 }
 
 // emulates a 6502 bug where the low byte wrapped without incrementing
@@ -103,8 +132,7 @@ static inline uint16_t m6502_rw_bug(m6502* const c, uint16_t addr) {
     }
 
     uint16_t hi_addr = (addr & 0xFF00) | ((addr + 1) & 0xFF);
-    return (c->read_byte(c->userdata, hi_addr) << 8) |
-            c->read_byte(c->userdata, addr);
+    return (m6502_rb(c, hi_addr) << 8) | m6502_rb(c, addr);
 }
 
 // writes a byte to memory
@@ -703,12 +731,13 @@ void m6502_init(m6502* const c) {
     c->read_byte = NULL;
     c->write_byte = NULL;
     c->read_opcode = NULL; // CHANGED FROM UPSTREAM -- see m6502.h
+    for (int i = 0; i < 256; i++) c->rd_page[i] = NULL; // ditto
     c->illegal_ops = 0;    // CHANGED FROM UPSTREAM -- see m6502.h
 }
 
 // executes one instruction stored at the address pointed by
 // the program counter
-void m6502_step(m6502* const c) {
+M6502_RAMFUNC void m6502_step(m6502* const c) {
     if (c->stop || c->wait) {
         return;
     }

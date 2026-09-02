@@ -10,7 +10,7 @@
 // timingtest; see tools/m6502_test/ for this project's own run of the first
 // three against this vendored copy.
 //
-// FOUR CHANGES FROM UPSTREAM, all of them things this project has already
+// FIVE CHANGES FROM UPSTREAM, all of them things this project has already
 // been bitten by once:
 //
 //  1. `extern "C"` guard (DEVNOTES.md problem #2). m6502.c compiles as plain
@@ -37,6 +37,12 @@
 //     undocumented instructions" with a NUMBER rather than an opinion, which
 //     is the lesson of DEVNOTES.md problem #32. Nothing in the emulation
 //     reads it.
+//  5. `m6502_step()` is placed in SRAM on device via a `.time_critical`
+//     section attribute, guarded so the host builds are unaffected. On
+//     device the interpreter is the hottest code in the machine and an XIP
+//     cache miss per instruction fetch is expensive; ArcadeCPU_Z80 carries
+//     the identical attribute, where it was the difference between fitting
+//     Galaga's frame budget and going red. See m6502.c's comment.
 //
 // Everything else, including the instruction set, the cycle tables, the NMOS
 // `JMP ($xxFF)` page-wrap bug (correctly gated on m65c02_mode) and the
@@ -66,6 +72,31 @@ typedef struct m6502 {
     // opcode fetch too (an ordinary 6502). Set it only for a CPU whose
     // opcodes are decoded differently from its data, e.g. the DECO CPU-7.
     uint8_t (*read_opcode)(void*, uint16_t);
+
+    // OPTIONAL FAST-READ PAGE TABLE, one entry per 256-byte page. A
+    // non-NULL entry means "this page is plain readable memory, read it
+    // directly"; NULL means "call read_byte". Leave it all NULL and the
+    // core behaves exactly as before.
+    //
+    // This exists because the callback is an INDIRECT call, which cannot be
+    // inlined and costs more than the read it performs. Burger Time
+    // executes ~14,500 instructions a frame across two of these cores, at
+    // one to three reads each -- tens of thousands of indirect calls per
+    // frame, measured as a large part of 6.7ms of CPU time in a 16.66ms
+    // budget. Pages that are ordinary ROM or RAM do not need a function
+    // call to read.
+    //
+    // It is deliberately READ-only and deliberately NOT used for the opcode
+    // fetch: writes can have side effects (and, on a DECO CPU-7, arm the
+    // opcode descrambler), and the fetch may need decrypting. Only map
+    // pages that are pure memory with no read side effects -- an I/O page,
+    // a mirrored/scrambled window, or a page that is only partly mapped
+    // must stay NULL.
+    //
+    // Still no machine knowledge in this library: the core is told "this
+    // address range is memory at this pointer" and nothing about what it
+    // means.
+    const uint8_t *rd_page[256];
 
     void* userdata; // user custom pointer
 

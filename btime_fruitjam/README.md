@@ -17,14 +17,29 @@ citations for its own facts.
 
 ## Status
 
-Video, input, coin/start and sound all work, verified in the host harness:
-the attract screen and level 1 render correctly, the game takes a coin,
-starts, responds to the joystick, and both AY-3-8910s produce music and
-effects.
+**Running on real hardware.** Flashed to a Fruit Jam over USB; the game
+boots, plays, and both AY-3-8910s produce the startup jingle, the coin
+sound and the background music.
 
-**Not yet run on real hardware.** The rotation default, the aspect choice
-below, and the audio level all want a look (and a listen) on the real
-board.
+Frame budget, measured on device over ~5,000 frames:
+
+```
+[btime] frame 5280, frame 15715us (work 13993us, blocked 1722us),
+        work_max 16405us | vblank 158608 swaps 13365 ill 0
+        | audio 0us q512 under 0 peak 0
+```
+
+`work` sits at **11.6–16.4 ms of the 16.66 ms budget**, with zero audio ring
+underruns and zero illegal opcodes. That is comparable to Galaga (the
+heaviest game here) and leaves less headroom than Donkey Kong. Getting there
+took a real optimisation pass — the first flash needed 23.6 ms and showed a
+red screen — and `DEVNOTES.md` §59–64 is the measured record of what worked,
+what didn't, and the two changes that measured exactly zero.
+
+Still to check on hardware: the rotation default, the aspect choice below,
+and whether the audio level and tone are right (the gain was set from a
+measured peak, not derived, and the cabinet's speaker filter is deliberately
+omitted).
 
 ## Sound
 
@@ -177,6 +192,12 @@ program is not running at all, and if `CPU-7 opcode descrambles` is zero the
 fetch hook is not working — and both look like a rendering bug. The same
 counters go out with the on-device serial heartbeat for the same reason.
 
+**One caution about the harness, learned the hard way (`DEVNOTES.md` §60):**
+it runs natively and therefore has **no XIP**, so it cannot see the cost of
+running code out of flash. It reported audio as 4.4% of the frame where the
+device measured 27%. Use it for *what the machine is doing*; use the device's
+own heartbeat for *where the time goes*.
+
 `--wav FILE` captures exactly what the board would play, by pumping the
 machine's own fill callback — the same one the audio ISR calls on device.
 It also reports ring-buffer underruns and the peak sample, which is how the
@@ -191,6 +212,19 @@ playfield with four sprites animating**, so a screenshot of it is
 indistinguishable from a working game. Run the same sequence with no coin as
 a control — if the counters and sprite positions are identical, the coin is
 not getting in. See `DEVNOTES.md` #51/#52.
+
+To read the heartbeat, configure the tty first or the port returns nothing
+at all (`DEVNOTES.md` §64):
+
+```sh
+stty -f /dev/cu.usbmodem312401 115200 raw -echo
+perl -e 'alarm 20; open(F,"<","/dev/cu.usbmodem312401") or die; $|=1;
+         while(sysread(F,$b,256)){print $b}'
+```
+
+Set `BTIME_COST_PROFILING` to 1 in `btime_machine.cpp` and reflash to get the
+per-frame cpu/render/audio breakdown in that heartbeat; it is off by default
+because it costs ~1,300 `micros()` calls a frame.
 
 There is also `../tools/m6502_test/`, which runs the standard 6502 test
 suites against `ArcadeCPU_M6502` and reports cycle counts against upstream's

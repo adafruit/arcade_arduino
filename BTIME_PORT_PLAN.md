@@ -11,8 +11,9 @@ MAME's actual driver source (fetched, not recalled), and every citation names
 the file and construct it came from, so any of it can be re-checked in one
 command.
 
-What exists now, all verified in `tools/btime_host/` and none of it yet run on
-real hardware:
+What exists now — **and it runs on real hardware**, at a measured `work` of
+11.6–16.4ms against the 16.66ms budget after an optimisation pass recorded in
+`DEVNOTES.md` §59–64:
 
 - `libraries/ArcadeCPU_M6502/` — the CPU axis, with `tools/m6502_test/`
   reporting PASS on Klaus Dormann's functional test, the decimal test and
@@ -843,5 +844,8 @@ New open questions the implementation raised, all of them needing hardware:
 - Is `OUTPUT_GAIN` sensible, and does leaving out the cabinet's 530 Hz speaker
   high-pass make the port boomier than a real machine (§6.2, `DEVNOTES.md`
   §55)?
-- What does `work` measure per frame, and does the no-decode-cache trade
-  (`DEVNOTES.md` §54) need revisiting?
+- ~~What does `work` measure per frame, and does the no-decode-cache trade
+  (`DEVNOTES.md` §54) need revisiting?~~ **ANSWERED, and the trade was
+  wrong.** The first flash needed 23.6ms and went red; decode caches for
+  chars and background tiles were the first fix of six. Final `work` is
+  11.6–16.4ms. See §59–64, and note §54 is now superseded by §59.

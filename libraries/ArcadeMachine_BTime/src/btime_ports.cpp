@@ -45,6 +45,19 @@
 #include "btime_video.h"
 #include "btime_audio.h"
 
+// SRAM placement for the four memory-access callbacks below. Every emulated
+// instruction goes through at least one of them -- an opcode fetch, and often
+// an operand read and a write as well -- so on device they are as hot as the
+// interpreter itself and just as costly to leave in flash. Same raw section
+// attribute and same reasoning as ArcadeCPU_M6502's m6502_step() and
+// galaga_ports.cpp's GALAGA_RAMFUNC; guarded so the host harness (which has
+// no XIP and no linker script) compiles unchanged.
+#if defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE)
+#define BTIME_RAMFUNC __attribute__((section(".time_critical.btime")))
+#else
+#define BTIME_RAMFUNC
+#endif
+
 // Diagnostic counters -- see btime_machine.h's btime_debug_take_counters().
 static uint32_t g_vblank_reads;
 static uint32_t g_opcode_swaps;
@@ -64,22 +77,37 @@ static inline uint16_t swap_xy(uint16_t offset) {
 
 // --- main CPU ------------------------------------------------------------
 
-static uint8_t main_read(void *userdata, uint16_t addr) {
+// DISPATCH ON THE HIGH NIBBLE, not a chain of range tests. The first
+// version of this walked its ranges in map order, which put ROM -- by far
+// the most frequent target, since every opcode and operand fetch lands
+// there -- behind eight comparisons. On device that showed up as 10.2ms of
+// CPU time in a 16.66ms frame, about 177 cycles per emulated instruction.
+// A switch on the top four address bits compiles to one indexed branch, and
+// the cases are ordered so the hot ones (ROM, then zero page and stack) are
+// trivial. See DEVNOTES.md #60.
+BTIME_RAMFUNC static uint8_t main_read(void *userdata, uint16_t addr) {
     btime_system *s = (btime_system *)userdata;
 
-    if (addr < 0x0800) return s->ram[addr];
-    if (addr >= 0x0C00 && addr <= 0x0C0F) return s->paletteram[addr - 0x0C00];
-    if (addr >= 0x1000 && addr <= 0x13FF) return s->videoram[addr - 0x1000];
-    if (addr >= 0x1400 && addr <= 0x17FF) return s->colorram[addr - 0x1400];
-    if (addr >= 0x1800 && addr <= 0x1BFF) {
-        g_mirror_reads++;
-        return s->videoram[swap_xy(addr - 0x1800)];
-    }
-    if (addr >= 0x1C00 && addr <= 0x1FFF) {
+    switch (addr >> 12) {
+    case 0xB: case 0xC: case 0xD: case 0xE: case 0xF: // ROM -- the hot case
+        return s->rom[addr - BTIME_ROM_BASE];
+
+    case 0x0: // 2K RAM (zero page and stack live here), then palette RAM
+        if (addr < 0x0800) return s->ram[addr];
+        if (addr >= 0x0C00 && addr <= 0x0C0F) return s->paletteram[addr - 0x0C00];
+        return 0x00;
+
+    case 0x1: // video/colour RAM and their X/Y-swapped mirrors
+        if (addr <= 0x13FF) return s->videoram[addr - 0x1000];
+        if (addr <= 0x17FF) return s->colorram[addr - 0x1400];
+        if (addr <= 0x1BFF) {
+            g_mirror_reads++;
+            return s->videoram[swap_xy(addr - 0x1800)];
+        }
         g_mirror_reads++;
         return s->colorram[swap_xy(addr - 0x1C00)];
-    }
-    if (addr >= 0x4000 && addr <= 0x4004) {
+
+    case 0x4: // I/O
         switch (addr) {
         case 0x4000: return s->p1;
         case 0x4001: return s->p2;
@@ -97,19 +125,20 @@ static uint8_t main_read(void *userdata, uint16_t addr) {
             g_vblank_reads++;
             return (uint8_t)((s->dsw1 & 0x7F) | (s->vblank ? 0x80 : 0x00));
         case 0x4004: return s->dsw2;
+        default: return 0x00;
         }
-    }
-    if (addr >= BTIME_ROM_BASE) return s->rom[addr - BTIME_ROM_BASE];
 
-    // Everything else is unmapped. MAME's btime_map() leaves these holes
-    // with no handler, so a read returns whatever that address space's
-    // unmapped value is; 0 is this port's assumption, and the port plan
-    // lists it as an open question (DEVNOTES.md #24 is the standing warning
-    // that open-bus reads can be load-bearing on this kind of board).
-    return 0x00;
+    default:
+        // Unmapped. MAME's btime_map() leaves these holes with no handler,
+        // so a read returns whatever that address space's unmapped value
+        // is; 0 is this port's assumption, and the port plan lists it as an
+        // open question (DEVNOTES.md #24 is the standing warning that
+        // open-bus reads can be load-bearing on this kind of board).
+        return 0x00;
+    }
 }
 
-static void main_write(void *userdata, uint16_t addr, uint8_t val) {
+BTIME_RAMFUNC static void main_write(void *userdata, uint16_t addr, uint8_t val) {
     btime_system *s = (btime_system *)userdata;
 
     // THE DECO CPU-7's ENTIRE STATE. MAME's mi_decrypt::write() sets
@@ -119,22 +148,32 @@ static void main_write(void *userdata, uint16_t addr, uint8_t val) {
     // the descrambler for whatever wrote there.
     s->had_written = true;
 
-    if (addr < 0x0800) { s->ram[addr] = val; return; }
-    if (addr >= 0x0C00 && addr <= 0x0C0F) {
-        s->paletteram[addr - 0x0C00] = val;
-        btime_video_palette_write(addr - 0x0C00, val);
+    // Same high-nibble dispatch as main_read(), and for the same reason --
+    // though writes are dominated by RAM (zero page and stack) rather than
+    // by ROM, which is why case 0x0 comes first here.
+    switch (addr >> 12) {
+    case 0x0:
+        if (addr < 0x0800) { s->ram[addr] = val; return; }
+        if (addr >= 0x0C00 && addr <= 0x0C0F) {
+            s->paletteram[addr - 0x0C00] = val;
+            btime_video_palette_write(addr - 0x0C00, val);
+        }
         return;
-    }
-    if (addr >= 0x1000 && addr <= 0x13FF) { s->videoram[addr - 0x1000] = val; return; }
-    if (addr >= 0x1400 && addr <= 0x17FF) { s->colorram[addr - 0x1400] = val; return; }
-    if (addr >= 0x1800 && addr <= 0x1BFF) {
-        s->videoram[swap_xy(addr - 0x1800)] = val;
-        return;
-    }
-    if (addr >= 0x1C00 && addr <= 0x1FFF) {
+
+    case 0x1:
+        if (addr <= 0x13FF) { s->videoram[addr - 0x1000] = val; return; }
+        if (addr <= 0x17FF) { s->colorram[addr - 0x1400] = val; return; }
+        if (addr <= 0x1BFF) { s->videoram[swap_xy(addr - 0x1800)] = val; return; }
         s->colorram[swap_xy(addr - 0x1C00)] = val;
         return;
+
+    case 0x4:
+        break; // handled by the address switch below
+
+    default:
+        return; // unmapped, including ROM space
     }
+
     switch (addr) {
     case 0x4000: return;                 // MAME: .nopw()
     case 0x4002:                         // btime_video_control_w()
@@ -187,9 +226,14 @@ static void main_write(void *userdata, uint16_t addr, uint8_t val) {
 //    but it means a handler at a matching address is genuinely affected,
 //    and "my interrupt handler executes garbage" would otherwise be a
 //    baffling symptom.
-static uint8_t main_read_opcode(void *userdata, uint16_t addr) {
+BTIME_RAMFUNC static uint8_t main_read_opcode(void *userdata, uint16_t addr) {
     btime_system *s = (btime_system *)userdata;
-    uint8_t res = main_read(userdata, addr);
+
+    // Opcodes come out of ROM essentially always, so read it directly here
+    // rather than paying a second call into main_read() for every single
+    // instruction the machine executes.
+    uint8_t res = (addr >= BTIME_ROM_BASE) ? s->rom[addr - BTIME_ROM_BASE]
+                                           : main_read(userdata, addr);
 
     if (s->had_written) {
         s->had_written = false;
@@ -213,10 +257,13 @@ static uint8_t main_read_opcode(void *userdata, uint16_t addr) {
 
 // --- sound CPU -----------------------------------------------------------
 
-static uint8_t audio_read(void *userdata, uint16_t addr) {
+BTIME_RAMFUNC static uint8_t audio_read(void *userdata, uint16_t addr) {
     btime_system *s = (btime_system *)userdata;
 
-    if (addr < 0x2000) return s->audio_ram[addr & 0x03FF]; // .mirror(0x1c00)
+    // The sound CPU's own hot case is its ROM at 0xE000, so test that first;
+    // its RAM at 0x0000 is next. Same reasoning as main_read().
+    if (addr >= 0xE000) return s->audio_rom[addr & 0x0FFF]; // .mirror(0x1000)
+    if (addr < 0x2000) return s->audio_ram[addr & 0x03FF];  // .mirror(0x1c00)
     if (addr >= 0xA000 && addr <= 0xBFFF) {
         // generic_latch_8_device::read(): with no separate acknowledge
         // configured -- and btime configures none -- the READ is what
@@ -227,11 +274,10 @@ static uint8_t audio_read(void *userdata, uint16_t addr) {
         s->sound_irq = false;
         return s->soundlatch;
     }
-    if (addr >= 0xE000) return s->audio_rom[addr & 0x0FFF]; // .mirror(0x1000)
     return 0x00;
 }
 
-static void audio_write(void *userdata, uint16_t addr, uint8_t val) {
+BTIME_RAMFUNC static void audio_write(void *userdata, uint16_t addr, uint8_t val) {
     btime_system *s = (btime_system *)userdata;
     (void)s;
 
@@ -253,6 +299,50 @@ static void audio_write(void *userdata, uint16_t addr, uint8_t val) {
 
 // --- wiring --------------------------------------------------------------
 
+// Fills in ArcadeCPU_M6502's optional direct-read page table for both CPUs.
+// ONLY pages that are pure memory across their whole 256 bytes, with no read
+// side effects, may be mapped -- everything else stays NULL and keeps going
+// through the callbacks above. Getting this wrong is silent, so the reasoning
+// for every page is written out:
+//
+//   main CPU
+//     0x00-0x07  RAM 0x0000-0x07FF                     -> direct
+//     0x08-0x0B  unmapped                              -> NULL (reads 0)
+//     0x0C       palette RAM is only 0x0C00-0x0C0F     -> NULL (partly mapped)
+//     0x0D-0x0F  unmapped                              -> NULL
+//     0x10-0x13  video RAM                             -> direct
+//     0x14-0x17  colour RAM                            -> direct
+//     0x18-0x1F  the X/Y-SWAPPED mirrors               -> NULL (addresses
+//                are permuted, and reads are counted)
+//     0x40       I/O, and 0x4003 has a side effect     -> NULL
+//     0xB0-0xFF  ROM                                   -> direct
+//
+//   sound CPU
+//     0x00-0x1F  RAM, but MIRRORED every 0x400         -> NULL
+//     0xA0-0xBF  the sound latch; READING IT CLEARS
+//                THE IRQ, so it must stay a callback   -> NULL
+//     0xE0-0xFF  ROM, mirrored 0xE000/0xF000           -> direct, via the
+//                same masked pointer the callback uses
+static void wire_fast_pages(btime_system *system) {
+    for (int i = 0; i < 256; i++) {
+        system->cpu.rd_page[i] = NULL;
+        system->audiocpu.rd_page[i] = NULL;
+    }
+
+    for (int pg = 0x00; pg <= 0x07; pg++)
+        system->cpu.rd_page[pg] = system->ram + (pg * 0x100);
+    for (int pg = 0x10; pg <= 0x13; pg++)
+        system->cpu.rd_page[pg] = system->videoram + ((pg - 0x10) * 0x100);
+    for (int pg = 0x14; pg <= 0x17; pg++)
+        system->cpu.rd_page[pg] = system->colorram + ((pg - 0x14) * 0x100);
+    for (int pg = 0xB0; pg <= 0xFF; pg++)
+        system->cpu.rd_page[pg] = system->rom + ((pg * 0x100) - BTIME_ROM_BASE);
+
+    // The sound ROM answers both 0xE000-0xEFFF and its 0xF000 mirror.
+    for (int pg = 0xE0; pg <= 0xFF; pg++)
+        system->audiocpu.rd_page[pg] = system->audio_rom + ((pg & 0x0F) * 0x100);
+}
+
 void btime_ports_wire(btime_system *system) {
     system->cpu.userdata    = system;
     system->cpu.read_byte   = &main_read;
@@ -263,6 +353,8 @@ void btime_ports_wire(btime_system *system) {
     system->audiocpu.read_byte   = &audio_read;
     system->audiocpu.write_byte  = &audio_write;
     system->audiocpu.read_opcode = NULL; // a plain 6502: fetches are reads
+
+    wire_fast_pages(system);
 }
 
 void btime_ports_reset_cpus(btime_system *system) {

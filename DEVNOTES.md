@@ -2507,7 +2507,12 @@ it was supposed to validate.
 Still open: what `0xB000-0xBFFF` (mapped as ROM, unpopulated in this set)
 returns on real hardware, and whether the program ever reads it.
 
-### 54. No decode caches, because the graphics are straight bitplanes
+### 54. No decode caches, because the graphics are straight bitplanes -- SUPERSEDED BY #59
+
+**This entry's conclusion was wrong and is kept for the reasoning trail.**
+The renderer described below measured 62% of the frame on device and the
+caches it dismisses are now in place; see #59. The mistake was not the
+arithmetic, it was calling an unmeasured trade a decision.
 
 `ArcadeMachine_Pacman` and `_DKong` decode their graphics ROMs once into
 pixel caches because those ROMs pack pixels into awkward interleaved
@@ -2648,3 +2653,148 @@ long uninterrupted burst between scanline submissions" rule intact for free
 **Generalisable:** when a feature has per-mode code paths, a per-mode sweep
 of the diagnostics is cheap and finds exactly the class of bug that testing
 the default can never find. It cost one loop over four values.
+
+### 59. First flash: red screen, working sound, and what that combination proves
+
+The first hardware flash gave a red screen -- but the startup jingle played,
+COIN made a coin sound, and pressing start brought up the background music,
+"very slow".
+
+That combination is diagnostic on its own, and it rules out the frightening
+reading of red. On this board red means EITHER a failed asset load OR a
+starved DVI queue, and the asset-error path in `loop()` returns early after
+drawing nothing but the error colour -- so a card problem would have been
+SILENT. Sound playing at all proved both 6502s, the sound latch, the NMI
+timer and both AYs were running, and that the SD card had loaded. Red was
+therefore the other meaning, and "very slow" was the same fact from the
+other side: frames were taking far longer than 16.66ms, so the whole machine
+ran slow.
+
+Not the `-Os` trap either (#49) -- this was flashed `opt=Optimize3`
+explicitly. The port was simply too slow.
+
+### 60. The host harness cannot see flash stalls, and it lied about audio by 3.5x
+
+With serial working (see #63) the on-device heartbeat gave the breakdown the
+host could not:
+
+```
+                     host harness    device
+CPUs                    91us          10231us
+render                 168us           7198us
+audio                   12us           6442us     <-- 7.5% vs 27%
+```
+
+The ratios are not off by a constant. On the host, audio was 4.4% of the
+frame and looked irrelevant; on device it was 27% and the second-biggest
+cost. The reason is structural rather than a mistake in the measurement:
+**the host has no XIP**, so it cannot see the cost of running code out of
+flash, and `generate_one_sample`/`ay_tick` were still in flash -- only the
+ISR copy-out had been marked `__not_in_flash_func`. Six PSG channels ticking
+at 187.5kHz is ~6,250 calls a frame, every one stalling.
+
+**The host harness is the right tool for "what is the machine doing" and the
+wrong tool for "where does the time go".** Use it for logic; use the device's
+own heartbeat for budget. Moving the interpreters, the port decode, the
+render path and the synthesis into `.time_critical` SRAM sections was worth
+more than every algorithmic change that followed.
+
+### 61. "The counter cannot wrap twice, so `while` can be `if`" -- wrong
+
+The AY tone counter rises by exactly 1 per tick and subtracts its period on
+every crossing, so it can never wrap twice and MAME's `while` looked like it
+could be an `if`. It cannot: that is only true **while the period is
+constant**. When the sound CPU writes a SMALLER period -- which is exactly
+what changing a note does -- the counter left over from the old period can be
+far above the new one, and `while` unwinds it fully where `if` subtracts once
+and leaves the channel a phase behind.
+
+Caught by comparing a captured WAV byte-for-byte against one taken before
+the change: identical for 2.6 seconds, then diverging at the moment the
+music started. Without that comparison it would have shipped as "the music
+sounds a bit off".
+
+Also worth recording as a near-miss: the first attempt at restoring it wrote
+`while (++c >= p)`, which increments on every iteration and is a third,
+different function. The increment belongs outside the loop.
+
+### 62. What actually fixed the budget, and the two fixes that measured zero
+
+Measured on device at each step, `work` against a 16.66ms budget:
+
+```
+  22.4ms  ->  starting point (after the render decode caches, #59)
+  18.2ms  ->  port decode dispatched on the high address nibble
+  16.9ms  ->  bg palette base baked into the cache; emit loop specialised
+  16.2ms  ->  AY state hoisted into locals for a whole sample's ticks
+  16.2ms  ->  the two per-sample software-float DIVIDES hoisted out
+  14.1ms  ->  direct-read page table in the CPU core
+```
+
+The two biggest single wins were both about **not paying for indirection**:
+
+- **Port decode order.** The first version tested its address ranges in
+  memory-map order, which put ROM -- the target of every opcode and operand
+  fetch -- behind eight comparisons. A `switch (addr >> 12)` is one indexed
+  branch. Worth 3.2ms.
+- **A direct-read page table in ArcadeCPU_M6502.** The memory callback is an
+  *indirect* call, so it cannot be inlined and costs more than the read it
+  performs; at ~14,500 instructions a frame across two cores that is tens of
+  thousands of calls. An optional `rd_page[256]` table lets pure-memory
+  pages be read directly, with pages that have side effects (I/O, the
+  swapped mirrors, the sound latch whose READ clears the IRQ, partly-mapped
+  pages) left NULL. Worth 2.1ms. Verified by A/B: the full machine-state
+  digest is identical over 1,200 frames with the table on and off.
+
+Also worth knowing: this target builds `-mfloat-abi=softfp` with **no
+`-mfpu`**, so every float operation is software-emulated and a divide is
+~120 cycles. The audio path was computing two constant divides per sample.
+
+**And two changes that measured exactly nothing**, recorded because guessing
+produced them and only measurement could have stopped them:
+
+- Removing a `memset` of 1280 bytes per scanline (307KB/frame). Estimated
+  0.8ms. Actual: zero.
+- Spreading the 240 scanline submissions across all 272 game scanlines
+  instead of only the visible ones, to close a ~1.9ms gap where Core 1 had
+  nothing to drain. A textbook #48 fix, and correct in principle -- kept for
+  that reason -- but `work`, `blocked` and `frame` all moved by less than
+  their noise.
+
+Two wrong predictions out of six attempts is the normal rate. That is the
+argument for measuring after every one rather than batching them.
+
+### 63. The device peak revealed clipping the host capture never saw
+
+`OUTPUT_GAIN` was set against a 40-second host capture that peaked at 64.5%
+of full scale with zero clipped samples -- comfortable headroom, apparently.
+The on-device heartbeat then reported a peak of **37004** against a 32767
+ceiling during play: real clipping, on sound combinations the host capture
+simply never hit.
+
+A capture is a sample of behaviour, not a bound on it. The gain is now set
+from the device's peak with margin.
+
+### 64. Reading serial needs raw termios, or the port returns nothing
+
+Three attempts to read the heartbeat returned zero bytes from a board that
+was running perfectly, which looked exactly like the silent-hang case #43
+warns about, and nearly cost a detour into setting up the SWD probe.
+
+The port was being opened without configuring the tty, so the line
+discipline never delivered anything. This works:
+
+```sh
+stty -f /dev/cu.usbmodem312401 115200 raw -echo
+perl -e 'alarm 20; open(F,"<","/dev/cu.usbmodem312401") or die; $|=1;
+         while(sysread(F,$b,256)){print $b}'
+```
+
+The `stty` line is the part that matters. Note also that **openocd IS
+available** on this machine after all -- it ships inside the arduino-pico
+core at
+`Arduino15/packages/rp2040/tools/pqt-openocd/<version>/bin/openocd`, which
+is why `which openocd` and a shallow filesystem search both missed it. The
+earlier notes claiming there is no openocd binary here were wrong; what is
+true is that USB flashing is faster and no debugging in this file has needed
+the probe.

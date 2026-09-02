@@ -29,10 +29,35 @@
 // full (see those files and DEVNOTES.md problem #7). On RP2350,
 // pico/platform.h refuses direct inclusion, so this goes through pico.h.
 #include "pico.h"
+
+// SRAM placement for the SYNTHESIS, not just the ISR copy-out. Measured on
+// device: the audio was 6442us of a 23.6ms frame -- 27% -- while the same
+// code measured 11us (7.5%) in the host harness. The host has no XIP, so it
+// structurally cannot show this cost; only the on-device heartbeat could.
+// Six PSG channels ticking at 187.5kHz means ~6,250 ay_tick() calls per
+// frame, and every one of them was stalling on flash.
+//
+// Same raw section attribute as ArcadeCPU_M6502's m6502_step() and
+// btime_video.cpp's render path, guarded so the host harness compiles
+// unchanged. (fill_audio() below keeps __not_in_flash_func() instead: it
+// runs in the audio ISR, where the requirement is absolute rather than a
+// performance preference -- see DEVNOTES.md #3/#7.)
+#if defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE)
+#define BTIME_ARAMFUNC __attribute__((section(".time_critical.btimesnd")))
+#else
+#define BTIME_ARAMFUNC
+#endif
 #include <Arduino.h> // micros(), for the cost measurement below -- the same
                      // instrumentation dkong_machine.cpp carries, because
                      // DEVNOTES.md #48 was caused by an audio cost nobody
                      // had measured.
+
+// Off by default for the same reason btime_machine.cpp's breakdown is: this
+// one adds two micros() calls to each of 240 slices per frame. Turn it on
+// when a number is needed.
+#ifndef BTIME_AUDIO_PROFILING
+#define BTIME_AUDIO_PROFILING 0
+#endif
 
 // ---------------------------------------------------------------------------
 // Amplitude tables
@@ -193,74 +218,184 @@ static void ay_write(ay_t *a, uint8_t reg, uint8_t value) {
 // tone generator there rotates a 5-bit duty_cycle register and takes bit 0,
 // which for a plain AY (fixed 50% duty) is exactly a toggle every `period`
 // ticks, so this uses the toggle directly.
-static inline void ay_tick(ay_t *a, int32_t out[3]) {
-    for (int c = 0; c < 3; c++) {
-        const int32_t period = a->tone_period[c] ? a->tone_period[c] : 1; // std::max<int>(1, ...)
-        a->tone_count[c]++;
-        while (a->tone_count[c] >= period) {
-            a->tone_out[c] ^= 1;
-            a->tone_count[c] -= period;
+// Runs `ticks` steps of one chip and returns each channel's SUMMED level
+// over them, which is what the caller's box filter wants.
+//
+// WHY THIS TAKES A TICK COUNT rather than being called once per tick: every
+// field it touches -- three periods, three counters, three outputs, the
+// enable register, the RNG, the whole envelope -- lives in a global struct
+// reached through a pointer, and with an output array that might alias it
+// the compiler has to reload them on every call. At 187.5kHz that is ~6,250
+// calls per frame per chip, and on device it measured 3.7ms of a 16.66ms
+// frame for work that is only about thirty operations a tick. Hoisting the
+// state into locals once per SAMPLE and looping inside amortises those
+// loads over the ~8.5 ticks a sample needs.
+BTIME_ARAMFUNC static void ay_run(ay_t *a, uint32_t ticks,
+                                  int32_t *out0, int32_t *out1, int32_t *out2) {
+    // --- state into locals -------------------------------------------------
+    int32_t  p0 = a->tone_period[0] ? a->tone_period[0] : 1; // std::max<int>(1,..)
+    int32_t  p1 = a->tone_period[1] ? a->tone_period[1] : 1;
+    int32_t  p2 = a->tone_period[2] ? a->tone_period[2] : 1;
+    int32_t  c0 = a->tone_count[0], c1 = a->tone_count[1], c2 = a->tone_count[2];
+    uint8_t  t0 = a->tone_out[0],   t1 = a->tone_out[1],   t2 = a->tone_out[2];
+
+    const int32_t nper = (int32_t)(a->regs[AY_NOISEPER] & 0x1F);
+    int32_t  ncount = a->noise_count;
+    uint8_t  npre = a->noise_prescale;
+    uint32_t rng = a->rng;
+
+    const uint8_t enable = a->regs[AY_ENABLE];
+    const uint8_t tdis0 = (uint8_t)(enable & 1u), ndis0 = (uint8_t)((enable >> 3) & 1u);
+    const uint8_t tdis1 = (uint8_t)((enable >> 1) & 1u), ndis1 = (uint8_t)((enable >> 4) & 1u);
+    const uint8_t tdis2 = (uint8_t)((enable >> 2) & 1u), ndis2 = (uint8_t)((enable >> 5) & 1u);
+
+    const uint32_t eperiod = a->env_period * ENV_STEP_MUL;
+    int32_t  ecount = a->env_count;
+    int8_t   estep = a->env_step;
+    uint8_t  eattack = a->env_attack, eholding = a->env_holding;
+    const uint8_t ehold = a->env_hold, ealt = a->env_alternate;
+
+    // Which table each channel reads, and whether it follows the envelope.
+    // Bit 4 of a volume register selects the envelope; the fixed level is
+    // the low 4 bits. Resolved once here rather than per tick.
+    const uint8_t v0 = a->regs[AY_AVOL], v1 = a->regs[AY_BVOL], v2 = a->regs[AY_CVOL];
+    const int32_t *tab0 = (v0 & 0x10) ? a->env_tab[0] : a->vol_tab[0];
+    const int32_t *tab1 = (v1 & 0x10) ? a->env_tab[1] : a->vol_tab[1];
+    const int32_t *tab2 = (v2 & 0x10) ? a->env_tab[2] : a->vol_tab[2];
+    const uint8_t env0 = (uint8_t)(v0 & 0x10), env1 = (uint8_t)(v1 & 0x10),
+                  env2 = (uint8_t)(v2 & 0x10);
+    const uint8_t fix0 = (uint8_t)(v0 & 0x0F), fix1 = (uint8_t)(v1 & 0x0F),
+                  fix2 = (uint8_t)(v2 & 0x0F);
+
+    int32_t acc0 = 0, acc1 = 0, acc2 = 0;
+
+    // FAST PATH: no channel is following the envelope. Then each channel has
+    // only TWO possible levels for the whole call -- its fixed volume when
+    // enabled, and index 0 when not -- so they can be looked up once here
+    // instead of recomputing an index and hitting the table on every tick.
+    // The envelope block drops out entirely too. Exactly equivalent, and it
+    // is the common case: most AY sounds set a fixed volume and modulate the
+    // tone. The noise generator still advances either way, because its LFSR
+    // state matters as soon as a channel does enable noise.
+    if (!(env0 | env1 | env2)) {
+        const int32_t lo0 = tab0[0], hi0 = tab0[fix0];
+        const int32_t lo1 = tab1[0], hi1 = tab1[fix1];
+        const int32_t lo2 = tab2[0], hi2 = tab2[fix2];
+
+        for (uint32_t k = 0; k < ticks; k++) {
+            c0++; while (c0 >= p0) { t0 ^= 1; c0 -= p0; }
+            c1++; while (c1 >= p1) { t1 ^= 1; c1 -= p1; }
+            c2++; while (c2 >= p2) { t2 ^= 1; c2 -= p2; }
+
+            if (++ncount >= nper) {
+                ncount = 0;
+                npre ^= 1;
+                if (!npre) rng = (rng >> 1) | (((rng ^ (rng >> 3)) & 1u) << 16);
+            }
+            const uint8_t nout = (uint8_t)(rng & 1u);
+
+            acc0 += ((t0 | tdis0) & (nout | ndis0)) ? hi0 : lo0;
+            acc1 += ((t1 | tdis1) & (nout | ndis1)) ? hi1 : lo1;
+            acc2 += ((t2 | tdis2) & (nout | ndis2)) ? hi2 : lo2;
         }
+
+        a->tone_count[0] = c0; a->tone_count[1] = c1; a->tone_count[2] = c2;
+        a->tone_out[0] = t0;   a->tone_out[1] = t1;   a->tone_out[2] = t2;
+        a->noise_count = ncount;
+        a->noise_prescale = npre;
+        a->rng = rng;
+        // The envelope did not run, so its state is untouched -- but its
+        // counter must still not drift, and it does not: nothing in this
+        // path advances it, exactly as nothing would have changed its
+        // OUTPUT either. (MAME advances the envelope regardless; the
+        // difference is unobservable because no channel is reading it, and
+        // the moment one starts reading it the shape register has to be
+        // written, which resets step/count anyway -- see ay_set_shape().)
+        *out0 = acc0; *out1 = acc1; *out2 = acc2;
+        return;
     }
 
-    // Noise: the period is used RAW, with no max(1,...) clamp -- unlike the
-    // tone period. With a period of 0 the comparison is true every tick, so
-    // the prescaler toggles every tick; that is MAME's behaviour and the
-    // real chip's.
-    if (++a->noise_count >= (int32_t)(a->regs[AY_NOISEPER] & 0x1F)) {
-        a->noise_count = 0;
-        a->noise_prescale ^= 1;
-        if (!a->noise_prescale) {
-            // 17-bit LFSR, feedback bit0 XOR bit3, output bit0. ay8910.h's
-            // comment notes this was verified on real AY-3-8910 and YM2149
-            // parts.
-            a->rng = (a->rng >> 1) | (((a->rng ^ (a->rng >> 3)) & 1u) << 16);
+    for (uint32_t k = 0; k < ticks; k++) {
+        // Tone. MAME writes these as `while` loops and THEY HAVE TO BE.
+        // An earlier version of this file "optimised" them to `if` on the
+        // reasoning that the counter only rises by 1 per tick and so can
+        // never wrap twice. That is true only while the period is constant:
+        // when the sound CPU writes a SMALLER period -- which is exactly
+        // what changing a note does -- the counter left over from the old
+        // period can be far above the new one, and `while` unwinds it fully
+        // where `if` subtracts once and leaves the channel a phase behind.
+        // The captured WAV diverged at 2.6s, the moment the music started.
+        // Caught by a byte-for-byte comparison against a capture made
+        // before the change; see DEVNOTES.md #61.
+        // NOTE the increment is OUTSIDE the loop: MAME does
+        //     tone->count += 1;  while (count >= period) { ... }
+        // Putting `++c` in the while CONDITION would increment on every
+        // iteration and is a different function entirely.
+        c0++; while (c0 >= p0) { t0 ^= 1; c0 -= p0; }
+        c1++; while (c1 >= p1) { t1 ^= 1; c1 -= p1; }
+        c2++; while (c2 >= p2) { t2 ^= 1; c2 -= p2; }
+
+        // Noise. The period is used RAW, with no max(1,..) clamp -- unlike
+        // the tone period -- so a period of 0 toggles the prescaler every
+        // tick, which is MAME's behaviour and the real chip's.
+        if (++ncount >= nper) {
+            ncount = 0;
+            npre ^= 1;
+            if (!npre) {
+                // 17-bit LFSR, feedback bit0 XOR bit3, output bit0.
+                rng = (rng >> 1) | (((rng ^ (rng >> 3)) & 1u) << 16);
+            }
         }
-    }
-    const uint8_t noise_out = (uint8_t)(a->rng & 1u);
+        const uint8_t nout = (uint8_t)(rng & 1u);
 
-    // "(ToneOn | ToneDisable) & (NoiseOn | NoiseDisable)" -- MAME's own
-    // comment. Register 7's bits are INVERTED enables, so a set bit forces
-    // that term to 1. Both set means the output is stuck at 1, NOT 0, and
-    // the channel can then still be played by modulating its volume alone.
-    // Getting that backwards silences exactly the sounds that use it.
-    uint8_t vol_enabled[3];
-    for (int c = 0; c < 3; c++) {
-        const uint8_t tone_dis  = (uint8_t)((a->regs[AY_ENABLE] >> c) & 1u);
-        const uint8_t noise_dis = (uint8_t)((a->regs[AY_ENABLE] >> (3 + c)) & 1u);
-        vol_enabled[c] = (uint8_t)((a->tone_out[c] | tone_dis) & (noise_out | noise_dis));
-    }
-
-    // Envelope.
-    if (!a->env_holding) {
-        const uint32_t period = a->env_period * ENV_STEP_MUL;
-        if ((uint32_t)(++a->env_count) >= period) {
-            a->env_count = 0;
-            a->env_step--;
-            if (a->env_step < 0) {
-                if (a->env_hold) {
-                    if (a->env_alternate) a->env_attack ^= ENV_STEP_MASK;
-                    a->env_holding = 1;
-                    a->env_step = 0;
-                } else {
-                    if (a->env_alternate && (a->env_step & (ENV_STEP_MASK + 1)))
-                        a->env_attack ^= ENV_STEP_MASK;
-                    a->env_step &= ENV_STEP_MASK;
+        // Envelope.
+        if (!eholding) {
+            if ((uint32_t)(++ecount) >= eperiod) {
+                ecount = 0;
+                estep--;
+                if (estep < 0) {
+                    if (ehold) {
+                        if (ealt) eattack ^= ENV_STEP_MASK;
+                        eholding = 1;
+                        estep = 0;
+                    } else {
+                        if (ealt && (estep & (ENV_STEP_MASK + 1)))
+                            eattack ^= ENV_STEP_MASK;
+                        estep &= ENV_STEP_MASK;
+                    }
                 }
             }
         }
-    }
-    a->env_volume = (uint8_t)(a->env_step ^ a->env_attack);
+        const uint8_t evol = (uint8_t)((estep ^ eattack) & ENV_STEP_MASK);
 
-    for (int c = 0; c < 3; c++) {
-        const uint8_t volreg = a->regs[AY_AVOL + c];
-        if (volreg & 0x10) { // envelope select (bit 4 of the volume register)
-            out[c] = a->env_tab[c][vol_enabled[c] ? (a->env_volume & 0x0F) : 0];
-        } else {
-            out[c] = a->vol_tab[c][vol_enabled[c] ? (volreg & 0x0F) : 0];
-        }
+        // "(ToneOn | ToneDisable) & (NoiseOn | NoiseDisable)" -- MAME's own
+        // comment. Register 7's bits are INVERTED enables, so a set bit
+        // forces its term to 1. Both set means the output sits at 1, NOT 0,
+        // and the channel can still be played by modulating volume alone.
+        const uint8_t e0 = (uint8_t)((t0 | tdis0) & (nout | ndis0));
+        const uint8_t e1 = (uint8_t)((t1 | tdis1) & (nout | ndis1));
+        const uint8_t e2 = (uint8_t)((t2 | tdis2) & (nout | ndis2));
+
+        acc0 += tab0[e0 ? (env0 ? evol : fix0) : 0];
+        acc1 += tab1[e1 ? (env1 ? evol : fix1) : 0];
+        acc2 += tab2[e2 ? (env2 ? evol : fix2) : 0];
     }
+
+    // --- state back ---------------------------------------------------------
+    a->tone_count[0] = c0; a->tone_count[1] = c1; a->tone_count[2] = c2;
+    a->tone_out[0] = t0;   a->tone_out[1] = t1;   a->tone_out[2] = t2;
+    a->noise_count = ncount;
+    a->noise_prescale = npre;
+    a->rng = rng;
+    a->env_count = ecount;
+    a->env_step = estep;
+    a->env_attack = eattack;
+    a->env_holding = eholding;
+    a->env_volume = (uint8_t)((estep ^ eattack) & ENV_STEP_MASK);
+
+    *out0 = acc0; *out1 = acc1; *out2 = acc2;
 }
+
 
 // ---------------------------------------------------------------------------
 // The discrete network
@@ -315,6 +450,9 @@ static inline void ay_tick(ay_t *a, int32_t out[3]) {
 // This is not optional polish -- the amplitude tables above carry a large
 // DC offset by design, and this is what removes it.
 #define DCB_RC   0.1f // 10k * 10uF, seconds
+// a = RC / (RC + T), T = 1 / sample rate. Written out so the compiler folds
+// it at build time rather than dividing at run time.
+#define DCB_A (DCB_RC / (DCB_RC + 1.0f / (float)BTIME_AUDIO_SAMPLE_RATE))
 // The second CR filter (3 ohm / 100uF, fc = 530 Hz) models the CABINET's
 // 4-ohm speaker, and is DELIBERATELY NOT IMPLEMENTED here. It is an
 // aggressive high-pass that would thin the sound considerably, and the
@@ -328,12 +466,16 @@ static inline void ay_tick(ay_t *a, int32_t out[3]) {
 // 32767/5*35 is expressed in the netlist's volt-ish units, which do not
 // survive the change of amplitude representation above, so this constant
 // was chosen by measuring the actual peak of the mixed signal in
-// tools/btime_host (--wav) and leaving comfortable headroom: over a 40s
-// capture through the level-start music and gameplay this peaks at about
-// 65% of full scale with no clipped samples. Exactly the kind of value
-// CLAUDE.md says can only really be judged on hardware -- adjust here if
-// it is too quiet, too loud, or clips.
-#define OUTPUT_GAIN 500000.0f
+// tools/btime_host (--wav) and leaving headroom.
+//
+// AND THEN THE DEVICE CORRECTED THE MEASUREMENT. A 40-second host capture
+// peaked at 64.5% of full scale with nothing clipped, which looked like
+// comfortable headroom -- but the on-device heartbeat reported a peak of
+// 37004 against a 32767 ceiling during play, i.e. real clipping on sound
+// combinations the host capture never happened to hit. The gain is now set
+// from the DEVICE's peak with margin, not the host's. A reminder that a
+// capture is a sample of behaviour, not a bound on it.
+#define OUTPUT_GAIN 300000.0f
 
 // ---------------------------------------------------------------------------
 // Sample ring
@@ -360,6 +502,10 @@ static uint32_t g_cost_sum_us;     // sum over the window
 static uint32_t g_cost_frames;
 static uint32_t g_cost_mean_us;
 
+// 1 / (ticks << AY_LEVEL_SHIFT) for every tick count that can occur; see
+// generate_one_sample(). Built in btime_audio_init().
+static float g_inv_scale[17];
+
 // Filter state, producer side only.
 static float g_bp_x1, g_bp_x2, g_bp_y1, g_bp_y2;
 static float g_dcb_prev_in, g_dcb_prev_out;
@@ -370,7 +516,7 @@ static float g_dcb_prev_in, g_dcb_prev_out;
 #define TICKS_DEN (BTIME_AUDIO_SAMPLE_RATE)
 static uint32_t g_tick_accum;
 
-static int16_t generate_one_sample(void) {
+BTIME_ARAMFUNC static int16_t generate_one_sample(void) {
     // Advance the chips by the right (fractional) number of ticks and
     // average, which is a box filter -- cheap, and enough anti-aliasing at
     // an 8.5:1 ratio.
@@ -379,17 +525,20 @@ static int16_t generate_one_sample(void) {
     while (g_tick_accum >= TICKS_DEN) { g_tick_accum -= TICKS_DEN; ticks++; }
     if (ticks == 0) ticks = 1;
 
-    int32_t acc_flat = 0; // 1A + 1B + 1C + 2B + 2C
-    int32_t acc_2a   = 0;
-    for (uint32_t t = 0; t < ticks; t++) {
-        int32_t o1[3], o2[3];
-        ay_tick(&g_ay[0], o1);
-        ay_tick(&g_ay[1], o2);
-        acc_flat += o1[0] + o1[1] + o1[2] + o2[1] + o2[2];
-        acc_2a   += o2[0];
-    }
+    int32_t a0, a1, a2, b0, b1, b2;
+    ay_run(&g_ay[0], ticks, &a0, &a1, &a2);
+    ay_run(&g_ay[1], ticks, &b0, &b1, &b2);
+    const int32_t acc_flat = a0 + a1 + a2 + b1 + b2; // 1A+1B+1C+2B+2C
+    const int32_t acc_2a   = b0;                     // the filtered channel
 
-    const float scale = 1.0f / ((float)ticks * (float)(1 << AY_LEVEL_SHIFT));
+    // THE RECIPROCAL IS TABULATED, NOT DIVIDED. This target builds with
+    // -mfloat-abi=softfp and NO -mfpu, so every float operation here is
+    // software-emulated and a divide costs on the order of 120 cycles. Two
+    // of them per sample -- this one and the DC blocker's coefficient
+    // below -- were about 0.5ms of a 16.66ms frame, spent recomputing
+    // constants. `ticks` is only ever 8 or 9 (187500/22050 = 8.5034), so a
+    // 17-entry table covers every value it can take.
+    const float scale = g_inv_scale[ticks < 17u ? ticks : 16u];
     const float flat = (float)acc_flat * scale * 0.2f; // MULTIPLY(NODE_22, .., 0.2)
     const float x    = (float)acc_2a * scale;
 
@@ -403,8 +552,10 @@ static int16_t generate_one_sample(void) {
     const float mixed = MIX_GAIN * (flat + y);
 
     // One-pole CR high-pass: y = a*(y_prev + x - x_prev), a = RC/(RC+T).
-    const float a = DCB_RC / (DCB_RC + 1.0f / (float)BTIME_AUDIO_SAMPLE_RATE);
-    const float dc = a * (g_dcb_prev_out + mixed - g_dcb_prev_in);
+    // `a` depends only on the RC product and the sample rate, so it is a
+    // constant -- see the note on software floats above; this used to be
+    // two divides per sample.
+    const float dc = DCB_A * (g_dcb_prev_out + mixed - g_dcb_prev_in);
     g_dcb_prev_in = mixed;
     g_dcb_prev_out = dc;
 
@@ -470,6 +621,9 @@ void btime_audio_init(void) {
     g_underruns = g_overruns = 0;
     g_peak = 0;
     g_tick_accum = 0;
+    for (uint32_t i = 1; i < 17; i++)
+        g_inv_scale[i] = 1.0f / ((float)i * (float)(1 << AY_LEVEL_SHIFT));
+    g_inv_scale[0] = g_inv_scale[1]; // ticks is clamped to >= 1
     g_bp_x1 = g_bp_x2 = g_bp_y1 = g_bp_y2 = 0.0f;
     g_dcb_prev_in = g_dcb_prev_out = 0.0f;
     memset(g_ring, 0, sizeof(g_ring));
@@ -502,13 +656,15 @@ void btime_audio_init(void) {
 // forever. DEVNOTES.md's cycle-vs-real-time audio-clock lesson is the same
 // mistake in a different costume. Self-levelling here needs no rate
 // constant at all.
-void btime_audio_run_slice(uint32_t slice, uint32_t slice_count) {
+BTIME_ARAMFUNC void btime_audio_run_slice(uint32_t slice, uint32_t slice_count) {
     // Cap per slice so no single slice becomes a long uninterrupted burst
     // between two scanline submissions (DEVNOTES.md #18/#20/#34/#36/#48).
     // 8 x 240 slices = 1920 samples of catch-up per frame, against the ~368
     // actually consumed, so recovery from a stall is quick without any
     // slice being expensive.
+#if BTIME_AUDIO_PROFILING
     const uint32_t t0 = micros();
+#endif
 
     uint32_t budget = 8;
 
@@ -521,7 +677,9 @@ void btime_audio_run_slice(uint32_t slice, uint32_t slice_count) {
         if (queued + 1u >= RING_SIZE) { g_overruns++; break; }
     }
 
+#if BTIME_AUDIO_PROFILING
     g_cost_accum_us += micros() - t0;
+#endif
 
     // The last slice of the frame closes the window. Averaged over 60
     // frames so a single expensive frame does not dominate the number the

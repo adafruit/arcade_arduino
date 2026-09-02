@@ -15,6 +15,28 @@
 #include "arcade_hal_audio.h"
 #include "arcade_hal_storage.h"
 #include "arcade_hal_input.h"
+#include <Arduino.h> // micros(), for the cost breakdown below
+
+// THE COST BREAKDOWN IS OFF BY DEFAULT, and that is not laziness -- it costs
+// about 1,300 micros() calls per frame (three per scanline plus two per
+// submitted one), which measured ~0.8ms of a 16.66ms budget on device. It
+// was indispensable for finding where this port's time went (DEVNOTES.md
+// #59/#60) and it stays in the tree for next time, but leaving it enabled
+// would mean shipping 5% of the frame to measure the frame.
+//
+// Set to 1 and reflash when a number is needed; the sketch prints
+// cpu/render/snd in its heartbeat either way (zeros when disabled).
+#ifndef BTIME_COST_PROFILING
+#define BTIME_COST_PROFILING 0
+#endif
+
+#if BTIME_COST_PROFILING
+#define COST_NOW() micros()
+#define COST_ADD(acc, t0) do { (acc) += micros() - (t0); } while (0)
+#else
+#define COST_NOW() 0u
+#define COST_ADD(acc, t0) do { (void)(t0); } while (0)
+#endif
 
 // Interrupts actually delivered to the sound CPU, for the counters below.
 // A silent machine with zero NMIs and a silent machine with 16,000 NMIs are
@@ -23,6 +45,24 @@ static uint32_t g_sound_nmis;
 static uint32_t g_sound_irqs;
 static uint32_t g_main_irqs;
 static uint32_t g_main_irq_windows;
+
+// Frame cost breakdown -- see btime_debug_take_costs().
+static uint32_t g_cpu_us, g_render_us, g_audio_us;      // this frame
+static uint32_t g_cpu_sum, g_render_sum, g_audio_sum;   // window
+static uint32_t g_cost_frames;
+static uint32_t g_cpu_mean, g_render_mean, g_audio_mean;
+
+static void cost_frame_done(void) {
+    g_cpu_sum += g_cpu_us; g_render_sum += g_render_us; g_audio_sum += g_audio_us;
+    g_cpu_us = g_render_us = g_audio_us = 0;
+    if (++g_cost_frames >= 60u) {
+        g_cpu_mean = g_cpu_sum / g_cost_frames;
+        g_render_mean = g_render_sum / g_cost_frames;
+        g_audio_mean = g_audio_sum / g_cost_frames;
+        g_cpu_sum = g_render_sum = g_audio_sum = 0;
+        g_cost_frames = 0;
+    }
+}
 
 void btime_init(btime_system *system) {
     memset(system, 0, sizeof(*system));
@@ -113,6 +153,7 @@ bool btime_load_assets(btime_system *system, uint16_t *out_error_color) {
 //   - the sound CPU's NMI, from a scanline timer;
 //   - the audio slice boundary.
 static void run_scanline(btime_system *system, uint32_t line) {
+    const uint32_t cost_t0 = COST_NOW();
     // Visible raster lines are 8..247 of 272 (set_raw's vbend/vbstart).
     system->vblank = (line < BTIME_FIRST_VISIBLE_LINE) ||
                      (line >= BTIME_FIRST_VISIBLE_LINE + BTIME_GAME_HEIGHT);
@@ -158,19 +199,30 @@ static void run_scanline(btime_system *system, uint32_t line) {
     // 6502 samples its IRQ line at every instruction boundary. The cost is
     // one bool test per instruction, and the body only runs while a coin is
     // genuinely pending.
+    // TWO LOOPS, chosen once per scanline. The interrupt-checking version
+    // is only needed while a coin is actually pending, and a coin can only
+    // become pending in btime_input_update() between frames -- never inside
+    // this loop. So the common case gets a tight loop with no per-
+    // instruction test at all, and the flag is not reloaded from the system
+    // struct 96 cycles' worth of instructions in a row.
     {
         const uint32_t start = system->cpu.cyc;
-        while ((uint32_t)(system->cpu.cyc - start) < BTIME_MAIN_CYCLES_PER_LINE) {
-            if (system->coin_irq_pending) {
-                if (!system->cpu.idf) {
-                    system->coin_irq_pending = false;
-                    m6502_gen_irq(&system->cpu);
-                    g_main_irqs++;
-                } else {
-                    g_main_irq_windows++; // instructions spent waiting for CLI
+        if (!system->coin_irq_pending) {
+            while ((uint32_t)(system->cpu.cyc - start) < BTIME_MAIN_CYCLES_PER_LINE)
+                m6502_step(&system->cpu);
+        } else {
+            while ((uint32_t)(system->cpu.cyc - start) < BTIME_MAIN_CYCLES_PER_LINE) {
+                if (system->coin_irq_pending) {
+                    if (!system->cpu.idf) {
+                        system->coin_irq_pending = false;
+                        m6502_gen_irq(&system->cpu);
+                        g_main_irqs++;
+                    } else {
+                        g_main_irq_windows++; // instructions spent waiting for CLI
+                    }
                 }
+                m6502_step(&system->cpu);
             }
-            m6502_step(&system->cpu);
         }
     }
 
@@ -204,22 +256,32 @@ static void run_scanline(btime_system *system, uint32_t line) {
     system->audio_nmi_prev = nmi_line;
 
     {
+        // Same split as the main CPU above. The sound CPU's IRQ is a LEVEL
+        // held while the latch holds an unread command, and it can only be
+        // taken at an instruction boundary with I clear -- so it does need
+        // a per-instruction check WHILE PENDING. But it cannot become
+        // pending inside this loop: only the main CPU's write to 0x4003
+        // raises it, and the main CPU has already had its turn for this
+        // scanline. So the idle case gets the tight loop.
         const uint32_t start = system->audiocpu.cyc;
-        while ((uint32_t)(system->audiocpu.cyc - start) < BTIME_SOUND_CYCLES_PER_LINE) {
-            // Per instruction, for the same reason the main CPU's is (see
-            // above): the sound CPU's IRQ is a LEVEL held while the latch
-            // holds an unread command, and it can only be taken at an
-            // instruction boundary with I clear. Only counts as delivered
-            // when the CPU could actually take it -- counting the attempt
-            // would report a busy sound CPU that is in fact ignoring
-            // everything.
-            if (system->sound_irq && !system->audiocpu.idf) {
-                g_sound_irqs++;
-                m6502_gen_irq(&system->audiocpu);
+        if (!system->sound_irq) {
+            while ((uint32_t)(system->audiocpu.cyc - start) < BTIME_SOUND_CYCLES_PER_LINE)
+                m6502_step(&system->audiocpu);
+        } else {
+            while ((uint32_t)(system->audiocpu.cyc - start) < BTIME_SOUND_CYCLES_PER_LINE) {
+                // Only counts as delivered when the CPU could actually take
+                // it -- counting the attempt would report a busy sound CPU
+                // that is in fact ignoring everything.
+                if (system->sound_irq && !system->audiocpu.idf) {
+                    g_sound_irqs++;
+                    m6502_gen_irq(&system->audiocpu);
+                }
+                m6502_step(&system->audiocpu);
             }
-            m6502_step(&system->audiocpu);
         }
     }
+
+    COST_ADD(g_cpu_us, cost_t0);
 }
 
 // Runs the frame's cycles INTERLEAVED with scanline submission, rather than
@@ -244,14 +306,42 @@ static void run_frame_interleaved(btime_system *system) {
     for (uint32_t line = 0; line < BTIME_SCANLINES_PER_FRAME; line++) {
         run_scanline(system, line);
 
-        if (line >= BTIME_FIRST_VISIBLE_LINE &&
-            line < BTIME_FIRST_VISIBLE_LINE + BTIME_GAME_HEIGHT) {
+        // SUBMISSIONS ARE SPREAD OVER ALL 272 GAME SCANLINES, not just the
+        // 240 visible ones -- and that distinction turned out to matter a
+        // great deal.
+        //
+        // The obvious structure is "submit on the visible lines, run the
+        // blanking lines bare", and that is what this did first. But the
+        // 32 blanking lines still execute both CPUs and their audio, which
+        // is about 1.9ms of work with NO scanline handed to Core 1. Core 1
+        // can only coast on the 8-buffer queue (~555us, a hard libdvi
+        // ceiling) plus vertical blanking, so it starved every single
+        // frame. The symptom was a `frame` of 18.3ms while `work` was only
+        // 16.4ms and `blocked` was 1.9ms: Core 0 ran ahead, ran the gap,
+        // and then sat waiting -- with the queue empty in between.
+        //
+        // This is DEVNOTES.md #18/#20/#34/#36/#48 for the SIXTH time, in a
+        // new disguise: not "is there budget" but "is there ever a gap
+        // longer than ~2ms between two submissions". Distributing the 240
+        // submissions evenly across all 272 lines removes the gap entirely.
+        //
+        // The rendered row is `submitted`, so it can lag the emulated beam
+        // line by up to 12% of a frame. That is deliberate and harmless --
+        // the alternative is the starvation above, and every renderer here
+        // already reads live VRAM mid-frame by design.
+        const uint32_t want = ((line + 1u) * HAL_VIDEO_SCANLINES_PER_FRAME)
+                              / BTIME_SCANLINES_PER_FRAME;
+        while (submitted < want && submitted < HAL_VIDEO_SCANLINES_PER_FRAME) {
             const uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
             uint16_t *buf = hal_video_acquire_scanline();
+            const uint32_t r0 = COST_NOW();
             btime_video_render_scanline(system, submitted * step, buf);
+            COST_ADD(g_render_us, r0);
             hal_video_submit_scanline(buf);
 
+            const uint32_t a0 = COST_NOW();
             btime_audio_run_slice(submitted, HAL_VIDEO_SCANLINES_PER_FRAME);
+            COST_ADD(g_audio_us, a0);
             submitted++;
         }
     }
@@ -278,9 +368,13 @@ static void run_frame_interleaved(btime_system *system) {
 static void run_frame_sequential(btime_system *system) {
     for (uint32_t line = 0; line < BTIME_SCANLINES_PER_FRAME; line++) {
         run_scanline(system, line);
+        const uint32_t a0 = COST_NOW();
         btime_audio_run_slice(line, BTIME_SCANLINES_PER_FRAME);
+        COST_ADD(g_audio_us, a0);
     }
+    const uint32_t r0 = COST_NOW();
     btime_draw_frame(system);
+    COST_ADD(g_render_us, r0);
 }
 
 void btime_run_frame(btime_system *system) {
@@ -289,6 +383,7 @@ void btime_run_frame(btime_system *system) {
     } else {
         run_frame_sequential(system);
     }
+    cost_frame_done();
 
     // NOTE the absence of anything here. Every other machine in this
     // project fires a vblank interrupt at this point; this one has none to
@@ -296,6 +391,13 @@ void btime_run_frame(btime_system *system) {
     // 0x4003 bit 7 inside run_scanline(). If this port ever appears to hang
     // on a black screen, that read -- not a missing interrupt -- is the
     // thing to instrument (btime_debug_take_counters()).
+}
+
+void btime_debug_take_costs(uint32_t *out_cpu_us, uint32_t *out_render_us,
+                            uint32_t *out_audio_us) {
+    if (out_cpu_us)    *out_cpu_us    = g_cpu_mean;
+    if (out_render_us) *out_render_us = g_render_mean;
+    if (out_audio_us)  *out_audio_us  = g_audio_mean;
 }
 
 void btime_debug_take_counters(const btime_system *system,

@@ -23,23 +23,40 @@
 //   - BACKGROUND: 16x16 3bpp tiles from gfx2 on pens 8-15, arranged by a
 //     256-entry page of the bg_map ROM, enabled by a port bit.
 //
-// NO DECODE CACHES, WHICH IS A DELIBERATE DEPARTURE from
-// ArcadeMachine_Pacman/DKong. Those games' graphics ROMs pack pixels in
-// awkward interleaved nibbles, so decoding once into a pixel cache is a
-// clear win. Burger Time's are straight bitplanes (three parallel copies of
-// the same shape, one bit per pixel each), so extracting one ROW of one
-// character is three byte reads plus a bit-spread -- cheap enough to do on
-// demand, every frame. What that buys:
+// DECODE CACHES FOR CHARS AND BACKGROUND TILES, SPRITES ON DEMAND. The
+// first version of this file had no caches at all, on the reasoning that
+// Burger Time's graphics are straight bitplanes (unlike Pac-Man's and
+// Donkey Kong's awkward interleaved nibbles), so extracting one row of one
+// character is just three byte reads plus a bit-spread -- cheap enough to
+// do every frame, and worth 80KB of RAM.
 //
-//     char pixel cache  [1024][8][8]  would be  64 KB
-//     sprite cache      [256][16][16] would be  64 KB
-//     this file's bit-spread table    is         2 KB
+// THAT REASONING WAS WRONG, and measurement is what showed it. On the first
+// hardware flash the screen went red (a starved DVI queue) and the music
+// ran slow; the host harness's cost breakdown put the blame precisely:
+//
+//     CPUs    91us   33.6%
+//     render 168us   62.0%      <-- this file
+//     audio   12us    4.4%
+//
+// The renderer alone cost twice Donkey Kong's ENTIRE frame. Three byte
+// reads plus a spread is indeed cheap per pixel, but this machine draws a
+// lot of pixels per row -- 32 char cells plus, when the background layer is
+// on, another two page-copies of sixteen 16-pixel tiles -- and cheap times
+// a quarter of a million is not cheap. See DEVNOTES.md #59.
+//
+// So the caches the old comment called "the obvious lever" are now here:
+//
+//     char_px[1024][8][8]   64 KB   a char row is an 8-byte copy
+//     bg_px[64][16][16]     16 KB   a tile row is a 16-byte copy
+//     spread[256][8]         2 KB   still used to BUILD those, and for sprites
+//
+// Sprites stay on demand deliberately: only 8 exist, so the whole frame's
+// sprite work is 8 x 16 x 16 = 2048 pixels, and caching all 256 possible
+// ones would cost another 64KB to save nothing measurable.
 //
 // The renderer is row-oriented for the same reason the other tate renderers
 // are: one submitted DVI scanline is one raster row, rendered on demand from
 // live VRAM, interleaved with CPU execution (DEVNOTES.md #19/#20/#34/#36).
-// If `work` ever needs the headroom, a char pixel cache is the obvious
-// lever -- but measure first (#35), because this is not the expensive part.
 //
 // COORDINATES ARE RAW 0..255 ON BOTH AXES, not 0..239. MAME's screen bitmap
 // for this driver is the full htotal x vtotal and the visible window is the
@@ -50,6 +67,20 @@
 #include <string.h>
 #include "btime_video.h"
 #include "arcade_hal_video.h"
+
+// SRAM placement for the per-scanline render path. Measured at 36% of the
+// frame in the host harness after the decode caches landed (and 62% before
+// them), so it is the second-hottest thing here after the interpreters --
+// and on device it pays twice, because a row renderer walking cache tables
+// out of flash stalls on XIP misses exactly when the DVI queue can least
+// afford it. Same raw section attribute and reasoning as ArcadeCPU_M6502's
+// m6502_step(), ArcadeCPU_Z80's z80_step() and galaga_ports.cpp; guarded so
+// the host harness compiles unchanged.
+#if defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE)
+#define BTIME_VRAMFUNC __attribute__((section(".time_critical.btimevid")))
+#else
+#define BTIME_VRAMFUNC
+#endif
 
 uint8_t btime_gfx1[BTIME_GFX1_SIZE];
 uint8_t btime_gfx2[BTIME_GFX2_SIZE];
@@ -179,10 +210,56 @@ void btime_video_palette_write(uint8_t index, uint8_t value) {
 // bit of each byte, so pixel x=0 comes from bit 7.
 static uint8_t spread[256][8];
 
+// Decoded pixel caches, [code][row][col] so that one row of one character
+// or tile is CONTIGUOUS -- that is the whole point, since the renderer walks
+// rows. (Deliberately NOT ArcadeMachine_Pacman's [tile][x][y] order, which
+// suits a different access pattern.)
+//
+// char_px holds 3bpp pens 0-7. bg_px holds 8-15: the background's +8
+// palette base is BAKED IN here rather than added per pixel at draw time,
+// which turns a tile row from sixteen add-and-store pairs into a memcpy.
+// That is safe because the two caches are never mixed -- the char layer's
+// transparency test looks at char pens, never at background ones.
+static uint8_t char_px[1024][8][8];
+static uint8_t bg_px[64][16][16];
+
 void btime_video_build_caches(void) {
     for (int b = 0; b < 256; b++)
         for (int j = 0; j < 8; j++)
             spread[b][j] = (uint8_t)((b >> (7 - j)) & 1);
+
+    // Characters: gfx_8x8x3_planar, 8 bytes per plane per char, 1024 chars.
+    for (int code = 0; code < 1024; code++) {
+        for (int row = 0; row < 8; row++) {
+            const uint8_t *base = &btime_gfx1[code * 8 + row];
+            const uint8_t *s0 = spread[base[GFX1_PLANE0]];
+            const uint8_t *s1 = spread[base[GFX1_PLANE1]];
+            const uint8_t *s2 = spread[base[GFX1_PLANE2]];
+            for (int j = 0; j < 8; j++)
+                char_px[code][row][j] = (uint8_t)((s2[j] << 2) | (s1[j] << 1) | s0[j]);
+        }
+    }
+
+    // Background tiles: tile16layout over gfx2, 32 bytes per plane per tile,
+    // 64 tiles. Same left/right byte split as the sprites (see
+    // draw_sprite_row_at()): x 0..7 from byte 16+row, x 8..15 from byte row.
+    for (int code = 0; code < 64; code++) {
+        for (int row = 0; row < 16; row++) {
+            const uint32_t tile = (uint32_t)code * 32u + (uint32_t)row;
+            const uint8_t *lo = &btime_gfx2[tile + 16u];
+            const uint8_t *hi = &btime_gfx2[tile];
+            const uint8_t *l0 = spread[lo[GFX2_PLANE0]];
+            const uint8_t *l1 = spread[lo[GFX2_PLANE1]];
+            const uint8_t *l2 = spread[lo[GFX2_PLANE2]];
+            const uint8_t *h0 = spread[hi[GFX2_PLANE0]];
+            const uint8_t *h1 = spread[hi[GFX2_PLANE1]];
+            const uint8_t *h2 = spread[hi[GFX2_PLANE2]];
+            for (int j = 0; j < 8; j++) {
+                bg_px[code][row][j]     = (uint8_t)(BG_PEN_BASE + ((l2[j] << 2) | (l1[j] << 1) | l0[j]));
+                bg_px[code][row][8 + j] = (uint8_t)(BG_PEN_BASE + ((h2[j] << 2) | (h1[j] << 1) | h0[j]));
+            }
+        }
+    }
 
     // Palette RAM powers up as whatever the game writes; until it does,
     // every pen is the inverted-zero colour (white). Build the initial
@@ -212,7 +289,7 @@ static uint8_t pen_row[BTIME_RASTER];
 //     32 * cx + (31 - (raw_y >> 3))          flipped
 // and the character row drawn there is (raw_y & 7), or 7 - (raw_y & 7) when
 // flipped (transpen is passed flipy = flip_screen()).
-static void draw_chars_row(const btime_system *s, uint32_t raw_y,
+BTIME_VRAMFUNC static void draw_chars_row(const btime_system *s, uint32_t raw_y,
                            bool transparent) {
     const bool flip = s->flip_screen;
     const uint32_t cy  = raw_y >> 3;
@@ -225,17 +302,22 @@ static void draw_chars_row(const btime_system *s, uint32_t raw_y,
         const uint16_t code = (uint16_t)(s->videoram[offs] |
                                         ((s->colorram[offs] & 3u) << 8));
 
-        const uint8_t *base = &btime_gfx1[code * 8u + char_row];
-        const uint8_t *s0 = spread[base[GFX1_PLANE0]];
-        const uint8_t *s1 = spread[base[GFX1_PLANE1]];
-        const uint8_t *s2 = spread[base[GFX1_PLANE2]];
-
+        const uint8_t *src = char_px[code][char_row];
         uint8_t *out = &pen_row[cx * 8u];
-        for (uint32_t j = 0; j < 8; j++) {
-            const uint8_t pen = (uint8_t)((s2[j] << 2) | (s1[j] << 1) | s0[j]);
-            const uint32_t px = flip ? (7u - j) : j;
-            if (transparent && pen == 0) continue;
-            out[px] = pen;
+
+        // The common case by far -- background off, so chars are opaque and
+        // unflipped -- is a straight 8-byte copy.
+        if (!transparent && !flip) {
+            memcpy(out, src, 8);
+        } else if (!flip) {
+            for (uint32_t j = 0; j < 8; j++)
+                if (src[j]) out[j] = src[j];
+        } else {
+            for (uint32_t j = 0; j < 8; j++) {
+                const uint8_t pen = src[j];
+                if (transparent && pen == 0) continue;
+                out[7u - j] = pen;
+            }
         }
     }
 }
@@ -265,7 +347,7 @@ static void draw_chars_row(const btime_system *s, uint32_t raw_y,
 // to reproduce the hardware's wraparound. With x = 240 - value, a value
 // above 239 gives a negative coordinate, which is exactly when the wrap
 // copy becomes the visible one.
-static void draw_sprite_row_at(uint16_t code, int x, int sub_row,
+BTIME_VRAMFUNC static void draw_sprite_row_at(uint16_t code, int x, int sub_row,
                                bool flipx) {
     // Sprite row extraction, from tile16layout: 16x16, 3 planes at
     // RGN_FRAC{2,1,0}/3, xoffs { STEP8(16*8,1), STEP8(0,1) },
@@ -298,7 +380,7 @@ static void draw_sprite_row_at(uint16_t code, int x, int sub_row,
     }
 }
 
-static void draw_sprites_row(const btime_system *s, uint32_t raw_y) {
+BTIME_VRAMFUNC static void draw_sprites_row(const btime_system *s, uint32_t raw_y) {
     const bool flip = s->flip_screen;
 
     for (int i = 0; i < 8; i++) {
@@ -360,7 +442,7 @@ static void draw_sprites_row(const btime_system *s, uint32_t raw_y) {
 // Row-oriented: y depends only on (offs % 16), so exactly 16 of a page's
 // 256 tiles touch any given row -- iterate the 16 columns rather than all
 // 256 cells and test.
-static void draw_background_row(const btime_system *s, uint32_t raw_y) {
+BTIME_VRAMFUNC static void draw_background_row(const btime_system *s, uint32_t raw_y) {
     const bool flip = s->flip_screen;
 
     uint8_t tmap[4];
@@ -391,35 +473,40 @@ static void draw_background_row(const btime_system *s, uint32_t raw_y) {
             int x = 240 - (int)(16u * col) - scroll - 1;
             if (flip) x = 240 - x;
 
-            const uint16_t code = btime_bg_map[tileoffset + offs];
-            const uint32_t tile = code * 32u + tile_row;
-            const uint8_t *lo = &btime_gfx2[tile + 16u]; // x 0..7
-            const uint8_t *hi = &btime_gfx2[tile];       // x 8..15
+            const uint8_t code = btime_bg_map[tileoffset + offs] & 0x3F;
+            const uint8_t *src = bg_px[code][tile_row];
 
-            const uint8_t *l0 = spread[lo[GFX2_PLANE0]];
-            const uint8_t *l1 = spread[lo[GFX2_PLANE1]];
-            const uint8_t *l2 = spread[lo[GFX2_PLANE2]];
-            const uint8_t *h0 = spread[hi[GFX2_PLANE0]];
-            const uint8_t *h1 = spread[hi[GFX2_PLANE1]];
-            const uint8_t *h2 = spread[hi[GFX2_PLANE2]];
-
-            for (uint32_t j = 0; j < 16; j++) {
-                uint8_t pixel;
-                if (j < 8) pixel = (uint8_t)((l2[j] << 2) | (l1[j] << 1) | l0[j]);
-                else {
-                    const uint32_t k = j - 8u;
-                    pixel = (uint8_t)((h2[k] << 2) | (h1[k] << 1) | h0[k]);
+            // Clip the 16-pixel span ONCE rather than bounds-checking every
+            // pixel: most tiles are fully on-raster, and the two at the
+            // edges are the only ones that need trimming.
+            if (!flip) {
+                int j0 = 0, j1 = 16;
+                if (x < 0) j0 = -x;
+                if (x + 16 > BTIME_RASTER) j1 = BTIME_RASTER - x;
+                // THE GUARD IS LOAD-BEARING. A tile can be entirely off the
+                // raster (the page loop deliberately walks one copy past
+                // each edge for wraparound), and then j1 < j0. The previous
+                // per-pixel loop simply did not execute; a memcpy of
+                // (j1 - j0) underflows size_t and segfaults instantly --
+                // which is exactly what it did, on the first run after this
+                // was optimised into a copy.
+                if (j1 > j0)
+                    // Opaque, and the pen base is already baked into the
+                    // cache, so this is a plain copy.
+                    memcpy(&pen_row[x + j0], &src[j0], (size_t)(j1 - j0));
+            } else {
+                for (uint32_t j = 0; j < 16; j++) {
+                    const int px = x + (int)(15u - j);
+                    if (px < 0 || px >= BTIME_RASTER) continue;
+                    pen_row[px] = src[j];
                 }
-                const int px = x + (int)(flip ? (15u - j) : j);
-                if (px < 0 || px >= BTIME_RASTER) continue;
-                pen_row[px] = (uint8_t)(BG_PEN_BASE + pixel); // opaque
             }
         }
     }
 }
 
 // One raster row, in the hardware's own draw order.
-static void render_native_row(const btime_system *s, uint32_t raw_y) {
+BTIME_VRAMFUNC static void render_native_row(const btime_system *s, uint32_t raw_y) {
     if (s->bnj_scroll0 & 0x10) {
         // The background is opaque and covers the row, so no clear is
         // needed -- but only when it is actually enabled.
@@ -444,28 +531,63 @@ static uint8_t frame_pen[BTIME_GAME_HEIGHT][BTIME_GAME_WIDTH];
 // Writes one tate scanline: `row` is the visible raster row (0..239) and
 // `reverse` mirrors the output along the buffer, which is what separates
 // 90 CCW from 90 CW.
-static void emit_tate_row(uint16_t *buf, bool reverse) {
+// Writes ALL 320 visible framebuffer columns, pillarbox included, so that
+// btime_video_render_scanline() does not have to pre-clear the buffer.
+// That clear was not free: memset()ing HAL_VIDEO_WIDTH (640 uint16 = 1280
+// bytes) on every one of 240 scanlines is 307KB of stores per frame, most
+// of it immediately overwritten, and only the first 320 columns are ever
+// displayed anyway (libdvi's 16bpp path encodes h_active_pixels/2 source
+// pixels across the line -- see tools/README.md).
+#define VISIBLE_COLS 320u
+
+BTIME_VRAMFUNC static void emit_tate_row(uint16_t *buf, bool reverse) {
     const uint8_t *vis = &pen_row[BTIME_FIRST_VISIBLE_LINE]; // raw x 8..247
 
+    // The `reverse` test is hoisted OUT of these loops rather than
+    // evaluated per pixel, and the pen values are used unmasked: every
+    // writer into pen_row produces 0-7 (chars, sprites) or 8-15 (the
+    // background cache, base baked in), so the values are already in range
+    // and an `& 0x0F` per pixel would be 320 wasted operations per scanline.
     if (g_aspect_stretch) {
         // Spread 240 raster columns over all 320 framebuffer columns; see
         // this file's geometry comment. col * 3 / 4 is exact for 320 -> 240.
-        for (uint32_t col = 0; col < 320u; col++) {
-            const uint32_t nx = (col * 3u) >> 2;
-            const uint32_t src = reverse ? (BTIME_GAME_WIDTH - 1u - nx) : nx;
-            buf[col] = pal565[vis[src] & 0x0Fu];
+        if (!reverse) {
+            for (uint32_t col = 0; col < VISIBLE_COLS; col++)
+                buf[col] = pal565[vis[(col * 3u) >> 2]];
+        } else {
+            for (uint32_t col = 0; col < VISIBLE_COLS; col++)
+                buf[col] = pal565[vis[BTIME_GAME_WIDTH - 1u - ((col * 3u) >> 2)]];
         }
     } else {
-        for (uint32_t col = 0; col < BTIME_GAME_WIDTH; col++) {
-            const uint32_t src = reverse ? (BTIME_GAME_WIDTH - 1u - col) : col;
-            buf[TATE_BX + col] = pal565[vis[src] & 0x0Fu];
+        for (uint32_t col = 0; col < TATE_BX; col++) buf[col] = 0; // left bar
+        uint16_t *out = buf + TATE_BX;
+        if (!reverse) {
+            // Two pixels per 32-bit store. TATE_BX is 40 and the buffer
+            // is 16-bit, so `out` is 4-byte aligned and this is safe; it
+            // halves the store count into the DVI scanline buffer, which
+            // matters more than it looks because Core 1's DVI DMA is
+            // hammering the same SRAM. Unrolled by 4 pixels (240 divides
+            // exactly) to cut loop overhead as well.
+            uint32_t *out32 = (uint32_t *)out;
+            for (uint32_t i = 0; i < BTIME_GAME_WIDTH / 4u; i++) {
+                const uint32_t c = i * 4u;
+                out32[i * 2u + 0] = (uint32_t)pal565[vis[c + 0]] |
+                                    ((uint32_t)pal565[vis[c + 1]] << 16);
+                out32[i * 2u + 1] = (uint32_t)pal565[vis[c + 2]] |
+                                    ((uint32_t)pal565[vis[c + 3]] << 16);
+            }
+        } else {
+            const uint8_t *rev = vis + BTIME_GAME_WIDTH - 1u;
+            for (uint32_t col = 0; col < BTIME_GAME_WIDTH; col++)
+                out[col] = pal565[rev[-(int)col]];
         }
+        for (uint32_t col = TATE_BX + BTIME_GAME_WIDTH; col < VISIBLE_COLS; col++)
+            buf[col] = 0; // right bar
     }
 }
 
-void btime_video_render_scanline(const btime_system *s, uint32_t dvi_y,
+BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t dvi_y,
                                  uint16_t *buf) {
-    memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
     const bool mir = s->mirror_x;
 
     switch (s->rotation) {
@@ -479,11 +601,12 @@ void btime_video_render_scanline(const btime_system *s, uint32_t dvi_y,
         // result is a mirror image rather than a rotation. Same shape as
         // invaders_video.cpp's case 0, which is the real-hardware-verified
         // original.
+        memset(buf, 0, VISIBLE_COLS * sizeof(uint16_t)); // pillarbox
         const uint32_t dy = (dvi_y * (uint32_t)BTIME_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
         const uint32_t col = (uint32_t)(BTIME_GAME_WIDTH - 1) - dy;
         for (uint32_t i = 0; i < (uint32_t)BTIME_GAME_HEIGHT; i++) {
             const uint32_t dx = mir ? (uint32_t)(BTIME_GAME_HEIGHT - 1) - i : i;
-            buf[LAND_BX + i] = pal565[frame_pen[dx][col] & 0x0Fu];
+            buf[LAND_BX + i] = pal565[frame_pen[dx][col]];
         }
         break;
     }
@@ -493,7 +616,10 @@ void btime_video_render_scanline(const btime_system *s, uint32_t dvi_y,
         // 240 rows tall against 240 submitted scanlines, so this is 1:1
         // with no border and no clipping -- the only game here where that
         // is true.
-        if (dvi_y >= HAL_VIDEO_HEIGHT) return;
+        if (dvi_y >= HAL_VIDEO_HEIGHT) {
+            memset(buf, 0, VISIBLE_COLS * sizeof(uint16_t));
+            return;
+        }
         uint32_t row = dvi_y >> 1;
         if (mir) row = (uint32_t)(BTIME_GAME_HEIGHT - 1) - row;
         render_native_row(s, BTIME_FIRST_VISIBLE_LINE + row);
@@ -505,10 +631,11 @@ void btime_video_render_scanline(const btime_system *s, uint32_t dvi_y,
         // 180 deg: case 0 with both axes reversed relative to it, so `col`
         // is deliberately the un-reversed raw value and `dx`'s ternary is
         // the mirror of case 0's -- matching invaders_video.cpp's case 2.
+        memset(buf, 0, VISIBLE_COLS * sizeof(uint16_t)); // pillarbox
         const uint32_t col = (dvi_y * (uint32_t)BTIME_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
         for (uint32_t i = 0; i < (uint32_t)BTIME_GAME_HEIGHT; i++) {
             const uint32_t dx = mir ? i : (uint32_t)(BTIME_GAME_HEIGHT - 1) - i;
-            buf[LAND_BX + i] = pal565[frame_pen[dx][col] & 0x0Fu];
+            buf[LAND_BX + i] = pal565[frame_pen[dx][col]];
         }
         break;
     }
@@ -516,7 +643,10 @@ void btime_video_render_scanline(const btime_system *s, uint32_t dvi_y,
     case 3: {
         // 90 deg CW: the other tate, reversing both the scanline order and
         // the within-scanline order relative to case 1.
-        if (dvi_y >= HAL_VIDEO_HEIGHT) return;
+        if (dvi_y >= HAL_VIDEO_HEIGHT) {
+            memset(buf, 0, VISIBLE_COLS * sizeof(uint16_t));
+            return;
+        }
         const uint32_t r = dvi_y >> 1;
         const uint32_t row = mir ? r : (uint32_t)(BTIME_GAME_HEIGHT - 1) - r;
         render_native_row(s, BTIME_FIRST_VISIBLE_LINE + row);

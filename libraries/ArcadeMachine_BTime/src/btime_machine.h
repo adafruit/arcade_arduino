@@ -229,6 +229,16 @@ typedef struct {
 void btime_debug_take_counters(const btime_system *system,
                                btime_counters *out);
 
+// Where the frame's time actually goes, as a mean over the last 60 frames:
+// the two CPUs, the per-scanline rendering, and the audio synthesis. Exists
+// because DEVNOTES.md #35 is the record of three hardware cycles spent on
+// unmeasured optimisation candidates -- this port is over budget, and the
+// first thing to know is which third of it to look at. Costs a handful of
+// micros() reads per scanline; harmless on device, and the numbers only
+// have to be good enough to rank the three.
+void btime_debug_take_costs(uint32_t *out_cpu_us, uint32_t *out_render_us,
+                            uint32_t *out_audio_us);
+
 #ifdef __cplusplus
 }
 #endif

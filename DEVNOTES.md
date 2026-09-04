@@ -3508,8 +3508,16 @@ renderer.
 **The unexplained fact**, for whoever picks this up: `render_max` scales
 from 105-130us to 310us as sprites go 29 -> 64, while the worst scanline's
 sprite PIXEL count stays low. Something in the sprite path costs far more
-per drawn cell than the pixels account for. The next step is per-layer
-timing ON DEVICE -- star/sprite/tilemap accumulators like
+per drawn cell than the pixels account for.
+
+> **RESOLVED IN #84, WHICH RETRACTS THE FRAMING ABOVE.** The 310us is not a
+> scanline's work at all -- it is a ~300us stall, once a second, attributed
+> to whichever layer was timing. A typical scanline renders in 14.6us of a
+> 69us line period, and the whole renderer is 23% of the frame. The sprite
+> path was never the problem, and neither was the video path. Read #84
+> before spending any time on the paragraphs above.
+
+The next step is per-layer timing ON DEVICE -- star/sprite/tilemap accumulators like
 `dkong_debug_take_render()` in #78 -- not another guess. **Five performance
 hypotheses were wrong in this session** (#78 twice, #82's write direction
 and bank conflicts, and this one); the two that landed both came from
@@ -4010,3 +4018,76 @@ Derivations, the per-game aspect tables and the fix plan are in
   pairs). **This invalidated every stored byte-compare baseline.** The
   harness still cannot see red, but that part is deliberate and documented
   in `hal_host.cpp` -- starvation is device-only, which is what #75 measured.
+
+### 84. Galaga is CPU-bound, not render-bound -- and `render_max` was measuring a stall
+
+#83 ended by saying the next step was per-layer timing on device rather than
+another hypothesis. It was, and it retracts the framing of both #82 and #83.
+
+Three `micros()` accumulators around the starfield, sprite and tilemap
+sections of `render_native_row()`, behind `-DGALAGA_LAYER_TRACE=1`, keeping
+the frame totals AND the breakdown of the single worst scanline
+(`galaga_debug_take_layers()`). Scripted worst case, rotation 3, first level,
+formation on screen, player firing:
+
+| | per frame | share of the 15.3ms frame |
+|---|---|---|
+| starfield | 345us | 2% |
+| sprites | 1047us | 7% |
+| tilemap | 2119us | 14% |
+| **all rendering** | **3511us** | **23%** |
+| **everything else** (3x Z80 + audio) | **11753us** | **77%** |
+
+**The renderer is under a quarter of Galaga's frame.** Averaged over the 240
+scanlines it is 14.6us against a 69us DVI line period -- it is not close to
+the line rate and never was. The CPU slice between scanline submissions is
+49us. Together, 63.6us of the 69us budget: **5.4us of margin per scanline**,
+which is why ordinary jitter starves the queue.
+
+The tilemap is twice the sprites, so even the layer ranking was backwards
+from the assumption in #82/#83 -- and the tilemap's cost is fixed at 36
+columns a line regardless of how many aliens are on screen.
+
+**And `render_max` 310us was never a scanline's work.** The worst-scanline
+breakdowns:
+
+```
+worst scanline 308us = 2+9+297      (tilemap)
+worst scanline 308us = 1+2+305      (tilemap)
+worst scanline 307us = 290+8+9      (STARFIELD)
+```
+
+The starfield costs **345us for the whole frame**. A single line at 290us
+would be 84% of the layer's entire frame time in one scanline, out of a layer
+that draws a handful of stars. That is impossible as work. It is a ~300us
+stall of Core 0 landing inside whichever layer happened to be timing, and it
+lands in the tilemap most often precisely because the tilemap is the layer
+that is running most of the time (60% of the average scanline; observed 3 of
+4 samples). Both `render_max` and `worst scanline` are maxima over a 60-frame
+window, so this is roughly a once-per-second event -- not a representative
+scanline, and far too rare to explain `starve` 3641 per window (61 a frame).
+
+**So five hypotheses in #83 were not merely wrong, they were aimed at the
+wrong 77% of the frame.** Every one of them tried to make the renderer
+faster. Even deleting the renderer outright would leave 11.8ms of CPU and a
+frame that is 71% full.
+
+Two lessons, both of which cost real time here:
+
+- **A max over a window is an outlier, not a cost.** `render_max` invited a
+  whole investigation into a once-per-second stall. Totals divided by count
+  would have said 14.6us on day one. Report both, and never start optimising
+  from a max alone.
+- **Attribute before optimising, and attribute to a layer, not a function.**
+  The per-layer split took one flash to produce and immediately said the
+  sprites -- the thing that visibly scales with the aliens on screen, and
+  therefore the intuitive culprit -- are 7% of the frame.
+
+What this means for the level-1 red: it is a CPU-budget problem. The levers
+are the Z80 interpreter and the 51XX/54XX/05XX helpers, or evening out the
+per-scanline CPU slice so the 5.4us margin is not spent unevenly. The video
+path is done; leave it alone.
+
+The stall itself is still unidentified (~300us, ~once a second, not the audio
+ISR -- that measures 87 calls a window at 92us avg, 95us worst). It is too
+rare to matter for starvation, so it is recorded here and not chased.

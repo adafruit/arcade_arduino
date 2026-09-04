@@ -221,6 +221,19 @@ void loop() {
             Serial.print(nbrun);
             if (nbrun >= 8) Serial.print(" *** STARVED");
         }
+        {   // per-layer render split -- see galaga_video.h / DEVNOTES #83
+            uint32_t st=0, sp=0, ti=0, wt=0, ws=0, wp=0, wl=0;
+            galaga_debug_take_layers(&st, &sp, &ti, &wt, &ws, &wp, &wl);
+            Serial.print("us, layers star/spr/tile ");
+            Serial.print(st/60); Serial.print("/");
+            Serial.print(sp/60); Serial.print("/");
+            Serial.print(ti/60);
+            Serial.print("us_pf, worst scanline ");
+            Serial.print(wt); Serial.print("us = ");
+            Serial.print(ws); Serial.print("+");
+            Serial.print(wp); Serial.print("+");
+            Serial.print(wl);
+        }
         Serial.print("us, rot ");
         Serial.print((int)g_system.rotation);
         Serial.print(" stretch ");

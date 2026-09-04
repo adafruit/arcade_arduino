@@ -508,6 +508,51 @@ GALAGA_VID_RAMFUNC void galaga_video_begin_frame(const galaga_system *sys) {
     }
 }
 
+// PER-LAYER TIMING, opt-in and zero-cost when off:
+//   --build-property compiler.cpp.extra_flags=-DGALAGA_LAYER_TRACE=1
+//
+// This exists because five performance hypotheses about this renderer were
+// wrong in a row (DEVNOTES #83). `render_max` says a scanline costs 310us
+// and says nothing about which of the three layers spent it. Both the frame
+// TOTALS and the breakdown of the single worst scanline are kept, because
+// the totals say where the frame goes and the worst scanline is what
+// actually starves the DVI queue (#35).
+//
+// Read the numbers knowing the instrument perturbs them: six micros() calls
+// per scanline is ~0.2ms a frame, and DEVNOTES #78 records counters far
+// cheaper than this moving `starve` on their own.
+#if defined(GALAGA_LAYER_TRACE) && (defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE))
+#include <Arduino.h> // micros()
+#define LT_NOW() micros()
+#define LT_ADD(acc, t0) do { (acc) += micros() - (t0); } while (0)
+static uint32_t g_lt_star, g_lt_spr, g_lt_tile;          // frame totals
+static uint32_t g_lt_worst, g_lt_w_star, g_lt_w_spr, g_lt_w_tile; // worst scanline
+#define LT_SCANLINE(st, sp, ti) do {                                      \
+    const uint32_t tot = (st) + (sp) + (ti);                              \
+    g_lt_star += (st); g_lt_spr += (sp); g_lt_tile += (ti);               \
+    if (tot > g_lt_worst) { g_lt_worst = tot; g_lt_w_star = (st);         \
+                            g_lt_w_spr = (sp); g_lt_w_tile = (ti); }      \
+} while (0)
+#else
+#define LT_NOW() 0u
+#define LT_ADD(acc, t0) do { (void)(t0); } while (0)
+#define LT_SCANLINE(st, sp, ti) do { } while (0)
+#endif
+
+void galaga_debug_take_layers(uint32_t *star_us, uint32_t *spr_us, uint32_t *tile_us,
+                              uint32_t *worst, uint32_t *w_star, uint32_t *w_spr,
+                              uint32_t *w_tile) {
+#if defined(GALAGA_LAYER_TRACE) && (defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE))
+    *star_us = g_lt_star; *spr_us = g_lt_spr; *tile_us = g_lt_tile;
+    *worst = g_lt_worst; *w_star = g_lt_w_star; *w_spr = g_lt_w_spr; *w_tile = g_lt_w_tile;
+    g_lt_star = g_lt_spr = g_lt_tile = 0;
+    g_lt_worst = g_lt_w_star = g_lt_w_spr = g_lt_w_tile = 0;
+#else
+    *star_us = *spr_us = *tile_us = 0;
+    *worst = *w_star = *w_spr = *w_tile = 0;
+#endif
+}
+
 // `reverse_x` writes the row right-to-left. It is a purely GEOMETRIC
 // transform for rotation 3 and is deliberately kept separate from
 // `flip_screen`, which is emulated game state and is NOT interchangeable
@@ -519,6 +564,9 @@ GALAGA_VID_RAMFUNC static void render_native_row(const galaga_system *sys, uint3
     bool flip = sys->flip_screen;
     bool rev  = flip ^ reverse_x;
     uint32_t eff_y = flip ? (uint32_t)(GALAGA_GAME_HEIGHT - 1) - native_y : native_y;
+
+    const uint32_t lt0 = LT_NOW();
+    uint32_t lt_star = 0, lt_spr = 0, lt_tile = 0;
 
     // Background: black, then the starfield. Drawn FIRST so sprites and the
     // tilemap paint over it, matching screen_update_galaga()'s order
@@ -532,6 +580,9 @@ GALAGA_VID_RAMFUNC static void render_native_row(const galaga_system *sys, uint3
             out[sx] = star_row_c[eff_y][i];
         }
     }
+
+    LT_ADD(lt_star, lt0);
+    const uint32_t lt1 = LT_NOW();
 
     // Sprites -- decoded once per frame, see galaga_video_begin_frame().
     for (int si = 0; si < g_sprite_count; si++) {
@@ -576,6 +627,9 @@ GALAGA_VID_RAMFUNC static void render_native_row(const galaga_system *sys, uint3
     // flip_screen (selects the hardware's second, pre-x-flipped
     // character set instead of software-flipping); color: videoram[idx +
     // 0x400] & 0x3F. Verified against get_tile_info().
+    LT_ADD(lt_spr, lt1);
+    const uint32_t lt2 = LT_NOW();
+
     uint32_t row = eff_y >> 3, py = eff_y & 7u;
     for (uint32_t col = 0; col < 36; col++) {
         uint16_t idx = scan_rows(col, row);
@@ -599,6 +653,9 @@ GALAGA_VID_RAMFUNC static void render_native_row(const galaga_system *sys, uint3
             }
         }
     }
+
+    LT_ADD(lt_tile, lt2);
+    LT_SCANLINE(lt_star, lt_spr, lt_tile);
 }
 
 // The transpose of render_native_row(): one native COLUMN of starfield,

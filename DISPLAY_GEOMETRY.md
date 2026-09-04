@@ -21,12 +21,23 @@ Status, newest first — the plan is section 7, the remaining work section 8:
 ratio on by default, 60fps, zero starvation, confirmed on the physical
 display (DEVNOTES #79/#80).
 
-**Galaga runs all four rotations**, three of them clean and landscape-180
-still starving ~6 times a frame in one dense attract phase -- same work as
-landscape-0, which is clean, but its expensive raster columns land late in
-the frame after the vblank slack is spent (DEVNOTES #82). Its long-axis
-merge is off: worth only +7-13% of lit pixels here against Pac-Man's +41%,
-and it caused far worse starvation than it cured.
+**Galaga runs all four rotations and its remaining red is not a video
+problem.** Per-layer timing on device (DEVNOTES #84) settles it: on the first
+level with the formation up and the player firing, the whole renderer is
+3.5ms of a 15.3ms frame -- **23%** -- split starfield 345us / sprites 1047us
+/ tilemap 2119us. The other 11.8ms is three Z80s plus audio. Per scanline
+that is 14.6us of rendering and 49us of CPU against a 69us DVI line period:
+**5.4us of margin**, which ordinary jitter spends.
+
+The `render_max` 310us that drove the earlier investigation was never a
+scanline's work -- it is a ~300us Core 0 stall, about once a second,
+attributed to whichever layer was timing when it hit (one sample charges
+290us to the starfield, a layer that costs 345us for the entire frame).
+
+So Galaga's geometry work is **done**, and its frame budget belongs to the
+CPU chapter, not this one. Its long-axis merge stays off: worth only +7-13%
+of lit pixels here against Pac-Man's +41%, and it cost more starvation than
+it cured.
 
 **Burger Time runs all four rotations at 60fps but keeps its aspect error.**
 It needs the correction most of any game (33.3%, a square raster) and cannot
@@ -633,18 +644,24 @@ Note the mismatch: the games that need it least are two of the three that
 can least afford it. **Enabling it per-game rather than globally is a
 legitimate outcome** if the emit rewrite does not land.
 
-Cost is only known for DKong. Galaga is the other tight game (~14.5ms peak
-after phase 1) and would likely also need the rewrite; the remaining five
-have room.
+Cost is only known for DKong. Galaga is the other tight game, but #84 shows
+why that is: its renderer is only 23% of its frame, so an emit rewrite buys
+it far less than the CPU work would. The remaining five have room.
 
 ### Measure in gameplay, not in attract
 
 Galaga's attract loop peaks at 22-29 sprites; its first level opens with 45,
-and that is where it red-lines -- `render_max` 105-130us against 218-311us,
-`starve` <=5 a window against 123-3027 (DEVNOTES #82). **Every frame-budget
-number in this document taken from attract mode is a lower bound**, Pac-Man,
-Ms. Pac-Man and Burger Time included. Those three still need a pass with a
-coin in; Burger Time is the most likely to move, having the least headroom.
+and that is where it red-lines -- `starve` <=5 a window against 123-3027
+(DEVNOTES #82). **Every frame-budget number in this document taken from
+attract mode is a lower bound**, Pac-Man, Ms. Pac-Man and Burger Time
+included. Those three still need a pass with a coin in; Burger Time is the
+most likely to move, having the least headroom.
+
+And measure a **total over a known count, not a maximum**. `render_max` is a
+max over a 60-frame window, so it reports the worst single event a second --
+which in Galaga's case was a stall, not work, and sent five optimisation
+attempts at the wrong 77% of the frame (DEVNOTES #83/#84). Totals divided by
+count would have said 14.6us immediately.
 
 ### Verifying it
 

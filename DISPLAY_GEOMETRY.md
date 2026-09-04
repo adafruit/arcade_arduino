@@ -13,11 +13,11 @@ Status, newest first — the plan is section 7, the remaining work section 8:
 | 1 — one coordinate space (320x240 canvas) | **done**, verified byte-identical |
 | 2 — shared geometry module + aspect correction | **done**, correction OFF by default |
 | 2b — making the correction affordable | **partly**; DKong still ~1.0ms short in tate |
-| 3 — column primitive, kills the landscape red | **Pac-Man + Ms. Pac-Man done** (+ merge downsampling); 5 games to go |
+| 3 — column primitive, kills the landscape red | **Pac-Man, Ms. Pac-Man, Burger Time done**; 4 games to go |
 | 4 — collapse the rotation cases | not started |
 | 5 — cleanups | not started |
 
-**Pac-Man and Ms. Pac-Man are complete**: all four rotations, correct aspect
+**Pac-Man, Ms. Pac-Man and Burger Time are complete**: all four rotations, correct aspect
 ratio on by default, 60fps, zero starvation, confirmed on the physical
 display (DEVNOTES #79/#80).
 

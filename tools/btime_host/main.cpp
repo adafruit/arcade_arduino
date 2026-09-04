@@ -297,7 +297,7 @@ int main(int argc, char **argv) {
     long counters_every = 0;
     long digest_every = 0;
     int rotation = -1;
-    bool stretch = false;
+    int stretch = -1; // -1 = leave the machine's own default alone
     long sprites_every = 0;
     bool want_sprites = false;
     press coin, start1, up, down, left, right, pepper;
@@ -319,7 +319,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--counters-every") && i + 1 < argc) counters_every = atol(argv[++i]);
         else if (!strcmp(argv[i], "--digest-every") && i + 1 < argc) digest_every = atol(argv[++i]);
         else if (!strcmp(argv[i], "--rotation") && i + 1 < argc) rotation = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--stretch")) stretch = true;
+        else if (!strcmp(argv[i], "--stretch")) stretch = 1;
+        else if (!strcmp(argv[i], "--no-stretch")) stretch = 0;
         else if (!strcmp(argv[i], "--coin-at") && i + 1 < argc) coin.at = atol(argv[++i]);
         else if (!strcmp(argv[i], "--start-at") && i + 1 < argc) start1.at = atol(argv[++i]);
         else if (!strcmp(argv[i], "--up-at") && i + 1 < argc) up.at = atol(argv[++i]);
@@ -347,7 +348,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--sprites-every") && i + 1 < argc) sprites_every = atol(argv[++i]);
         else {
             fprintf(stderr,
-                "usage: %s [--frames N] [--rom DIR] [--rotation 0..3] [--stretch]\n"
+                "usage: %s [--frames N] [--rom DIR] [--rotation 0..3]\n"
+                "       [--stretch | --no-stretch]   (the machine now defaults it ON)\n"
                 "          [--ppm FILE] [--ppm-at N] [--state] [--counters]\n"
                 "          [--counters-every N] [--digest-every N]\n"
                 "          [--sprites] [--sprites-every N]\n"
@@ -365,7 +367,7 @@ int main(int argc, char **argv) {
 
     btime_init(&g_system);
     if (rotation >= 0) g_system.rotation = (uint8_t)(rotation & 3);
-    btime_video_set_aspect_stretch(stretch);
+    if (stretch >= 0) btime_video_set_aspect_stretch(stretch != 0);
 
     uint16_t err = 0;
     if (!btime_load_assets(&g_system, &err)) {

@@ -78,6 +78,15 @@ void btime_init(btime_system *system) {
     // first (GAME_WIDTH), then SHORT (GAME_HEIGHT).
     av_geom_init(BTIME_GAME_WIDTH, BTIME_GAME_HEIGHT);
 
+    // Aspect-ratio correction on, per-game and measured (see
+    // pacman_machine.cpp for the same call). This game needs it MOST of any
+    // in the project: its raster is square (240x240), so at 1:1 the picture
+    // is 33.3% too wide for its height in BOTH orientations, against
+    // Pac-Man's 3.7% in tate. It is also among the cheapest games here, so
+    // it can afford it -- which is a happy inversion of Donkey Kong, which
+    // needs the correction badly and cannot afford it (#78).
+    av_geom_set_stretch(true);
+
 
     // ROTATION 1 (90 deg CCW), predicted from MAME and still to be
     // confirmed against the framebuffer invariant.
@@ -373,24 +382,12 @@ static void run_frame_interleaved(btime_system *system) {
 // Slicing off the scanline loop here rather than generating a whole frame's
 // audio in one call afterwards also keeps the #48 rule intact for free: no
 // single slice is a long uninterrupted burst.
-static void run_frame_sequential(btime_system *system) {
-    for (uint32_t line = 0; line < BTIME_SCANLINES_PER_FRAME; line++) {
-        run_scanline(system, line);
-        const uint32_t a0 = COST_NOW();
-        btime_audio_run_slice(line, BTIME_SCANLINES_PER_FRAME);
-        COST_ADD(g_audio_us, a0);
-    }
-    const uint32_t r0 = COST_NOW();
-    btime_draw_frame(system);
-    COST_ADD(g_render_us, r0);
-}
-
 void btime_run_frame(btime_system *system) {
-    if (system->rotation == 1 || system->rotation == 3) {
-        run_frame_interleaved(system);
-    } else {
-        run_frame_sequential(system);
-    }
+    // Every rotation, one path. btime_video.cpp's render_native_column()
+    // removed the reason landscape/180 ever needed a whole-frame burst
+    // (DEVNOTES #79), and with it the frame_pen cache and the separate
+    // sequential loop that fed it.
+    run_frame_interleaved(system);
     cost_frame_done();
 
     // NOTE the absence of anything here. Every other machine in this

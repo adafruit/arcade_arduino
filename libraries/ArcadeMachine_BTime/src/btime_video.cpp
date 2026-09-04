@@ -516,15 +516,165 @@ BTIME_VRAMFUNC static void render_native_row(const btime_system *s, uint32_t raw
     draw_sprites_row(s, raw_y);
 }
 
+// --- column renderer -----------------------------------------------------
+//
+// The transpose of render_native_row(): given a raster COLUMN, produce the
+// pens down it. Yoko needs this because there a physical scanline IS a
+// raster column, and a row-only renderer cannot emit one until every row
+// exists -- which is what forced the frame_pen cache and the whole-frame
+// burst that starved the DVI queue (DEVNOTES #18/#79).
+//
+// Each layer keeps the structure of its row twin and swaps writing for
+// testing: the same pages, cells and sprites are walked, but instead of
+// writing a span, each asks "does this span cover raw_x" and then walks the
+// OTHER axis. Burger Time has no per-scanline sprite arbitration (all 8 are
+// drawn on every line), which is what makes a straight transposition
+// possible at all.
+static uint8_t pen_col[BTIME_RASTER];
+
+// draw_chars_row()'s transpose. There the destination is cx*8 + j
+// (unflipped) or cx*8 + 7 - j (flipped), so inverting for a fixed raw_x
+// gives one cell column and one pixel column, then all 32 cell rows.
+BTIME_VRAMFUNC static void draw_chars_col(const btime_system *s, uint32_t raw_x,
+                                          bool transparent) {
+    const bool flip = s->flip_screen;
+    const uint32_t cx = raw_x >> 3;
+    const uint32_t jj = raw_x & 7u;
+    const uint32_t j  = flip ? (7u - jj) : jj;
+
+    for (uint32_t cy = 0; cy < 32; cy++) {
+        const uint16_t offs = flip ? (uint16_t)(32u * cx + (31u - cy))
+                                   : (uint16_t)(32u * (31u - cx) + cy);
+        const uint16_t code = (uint16_t)(s->videoram[offs] |
+                                        ((s->colorram[offs] & 3u) << 8));
+        for (uint32_t sub = 0; sub < 8; sub++) {
+            const uint32_t char_row = flip ? (7u - sub) : sub;
+            const uint8_t pen = char_px[code][char_row][j];
+            if (transparent && pen == 0) continue;
+            pen_col[cy * 8u + sub] = pen;
+        }
+    }
+}
+
+// draw_background_row()'s transpose. Same five pages and sixteen tile
+// columns, but each is TESTED for covering raw_x rather than blitted; the
+// one that does gives the pixel column `j`, and then all 16 row bands of
+// 16 sub-rows are walked. Pages are processed in the same order so a later
+// one still overwrites an earlier -- this layer is opaque.
+BTIME_VRAMFUNC static void draw_background_col(const btime_system *s, uint32_t raw_x) {
+    const bool flip = s->flip_screen;
+
+    uint8_t tmap[4];
+    {
+        uint8_t start = flip ? 0u : 1u;
+        for (int i = 0; i < 4; i++) {
+            tmap[i] = (uint8_t)(start | (s->bnj_scroll0 & 0x04));
+            start = (uint8_t)((start + 1) & 0x03);
+        }
+    }
+
+    int scroll = -(int)((s->bnj_scroll0 & 0x03u) << 8);
+    for (int i = 0; i < 5; i++, scroll += 256) {
+        if (scroll > 256) break;
+        if (scroll < -256) continue;
+        const uint32_t tileoffset = (uint32_t)tmap[i & 3] * 0x100u;
+
+        for (uint32_t col = 0; col < 16; col++) {
+            int x = 240 - (int)(16u * col) - scroll - 1;
+            if (flip) x = 240 - x;
+
+            const int d = (int)raw_x - x;          // position within the tile
+            if (d < 0 || d >= 16) continue;        // this tile misses the column
+            const uint32_t j = flip ? (uint32_t)(15 - d) : (uint32_t)d;
+
+            for (uint32_t row16 = 0; row16 < 16; row16++) {
+                const uint32_t m    = flip ? (15u - row16) : row16;
+                const uint32_t offs = col * 16u + m;
+                const uint8_t code  = btime_bg_map[tileoffset + offs] & 0x3F;
+                for (uint32_t sub = 0; sub < 16; sub++) {
+                    const uint32_t tile_row = flip ? (15u - sub) : sub;
+                    pen_col[row16 * 16u + sub] = bg_px[code][tile_row][j];
+                }
+            }
+        }
+    }
+}
+
+// One pixel of a sprite, by (row, column) -- the per-pixel form of
+// draw_sprite_row_at()'s bit-spread. Same plane layout and same
+// left/right-half byte split.
+BTIME_VRAMFUNC static inline uint8_t sprite_pixel(uint16_t code, int sub_row, uint32_t j) {
+    const uint32_t tile = code * 32u + (uint32_t)sub_row;
+    const uint8_t *b = (j < 8u) ? &btime_gfx1[tile + 16u] : &btime_gfx1[tile];
+    const uint32_t k = (j < 8u) ? j : j - 8u;
+    return (uint8_t)((spread[b[GFX1_PLANE2]][k] << 2) |
+                     (spread[b[GFX1_PLANE1]][k] << 1) |
+                      spread[b[GFX1_PLANE0]][k]);
+}
+
+// draw_sprites_row()'s transpose: the x overlap is tested once per sprite
+// instead of per row, then all 16 rows of the matching column are written.
+// Both wraparound passes are kept, in the same order.
+BTIME_VRAMFUNC static void draw_sprites_col(const btime_system *s, uint32_t raw_x) {
+    const bool flip = s->flip_screen;
+
+    for (int i = 0; i < 8; i++) {
+        const uint16_t offs = (uint16_t)(i * 4 * 0x20);
+        const uint8_t attr = s->videoram[offs];
+        if (!(attr & 0x01)) continue;
+
+        int x = 240 - s->videoram[offs + 3 * 0x20];
+        int y = 240 - s->videoram[offs + 2 * 0x20];
+        bool flipx = (attr & 0x04) != 0;
+        bool flipy = (attr & 0x02) != 0;
+
+        if (flip) {
+            x = 240 - x;
+            y = 240 - y;
+            flipx = !flipx;
+            flipy = !flipy;
+        }
+        y = y - 1;
+
+        const int d = (int)raw_x - x;
+        if (d < 0 || d >= 16) continue;            // sprite misses this column
+        const uint32_t j = flipx ? (uint32_t)(15 - d) : (uint32_t)d;
+
+        const uint16_t code = s->videoram[offs + 0x20];
+
+        for (int pass = 0; pass < 2; pass++) {
+            const int sy = (pass == 0) ? y : y + (flip ? -256 : 256);
+            for (int rel = 0; rel < 16; rel++) {
+                const int ry = sy + rel;
+                if (ry < 0 || ry >= BTIME_RASTER) continue;
+                const int sub_row = flipy ? (15 - rel) : rel;
+                const uint8_t pen = sprite_pixel(code, sub_row, j);
+                if (pen == 0) continue;            // transpen 0
+                pen_col[ry] = pen;
+            }
+        }
+    }
+}
+
+// One raster column, in the hardware's own draw order -- the same order
+// render_native_row() uses.
+BTIME_VRAMFUNC static void render_native_column(const btime_system *s, uint32_t raw_x) {
+    if (s->bnj_scroll0 & 0x10) {
+        draw_background_col(s, raw_x);
+        draw_chars_col(s, raw_x, true);   // transparency = true
+    } else {
+        draw_chars_col(s, raw_x, false);  // opaque
+    }
+    draw_sprites_col(s, raw_x);
+}
+
 // --- output --------------------------------------------------------------
 
-// Landscape/180 need the whole frame before any physical scanline can be
-// emitted (each of those scanlines is a raster COLUMN), so those two modes
-// keep the fully-sequential path. Stored as 8-bit pens rather than RGB565:
-// 57.6KB instead of 115KB, and the palette lookup is per output pixel
-// either way. Same known, deprioritised limitation ArcadeMachine_Pacman has
-// in those orientations (DEVNOTES.md #19).
-static uint8_t frame_pen[BTIME_GAME_HEIGHT][BTIME_GAME_WIDTH];
+// THE frame_pen CACHE THAT USED TO LIVE HERE IS GONE. It held the whole
+// frame as 8-bit pens (57.6KB) purely so landscape/180 could emit a raster
+// column, and building it was a whole-frame burst before the first
+// hal_video_acquire_scanline() -- DEVNOTES #18, and #75 for the
+// measurement. render_native_column() above removed the reason for it.
 
 // Writes one tate scanline: `row` is the visible raster row (0..239) and
 // `reverse` mirrors the output along the buffer, which is what separates
@@ -537,6 +687,15 @@ static uint8_t frame_pen[BTIME_GAME_HEIGHT][BTIME_GAME_WIDTH];
 // overwritten and half of it into columns the display never reads. This
 // file stopping at 320 by hand is what the rest of the project now gets
 // for free from the corrected HAL geometry (DISPLAY_GEOMETRY.md phase 1).
+
+// Converts the visible part of pen_col into RGB for the emit helpers, which
+// work in RGB565. 240 lookups a scanline, the same per-output-pixel palette
+// cost the row path pays.
+BTIME_VRAMFUNC static void col_to_rgb(uint16_t *out) {
+    const uint8_t *vis = &pen_col[BTIME_FIRST_VISIBLE_LINE];
+    for (uint32_t i = 0; i < (uint32_t)BTIME_GAME_HEIGHT; i++)
+        out[i] = pal565[vis[i]];
+}
 
 BTIME_VRAMFUNC static void emit_tate_row(uint16_t *buf, bool reverse) {
     const uint8_t *vis = &pen_row[BTIME_FIRST_VISIBLE_LINE]; // raw x 8..247
@@ -592,25 +751,28 @@ BTIME_VRAMFUNC static void emit_tate_row(uint16_t *buf, bool reverse) {
 BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t dvi_y,
                                  uint16_t *buf) {
     const bool mir = s->mirror_x;
+    static uint16_t colbuf[BTIME_GAME_HEIGHT]; // yoko's on-demand column
 
     switch (s->rotation) {
 
     case 0: {
-        // Landscape. av_yoko.row maps the canvas row onto the raster's LONG
-        // axis; av_yoko.col maps canvas columns onto the SHORT axis, which
-        // in yoko must NARROW to 180 canvas columns. The `(W-1) - dy`
-        // reversal is NOT cosmetic: a 90-degree rotation must reverse
-        // exactly one axis relative to tate (case 1, which does not reverse
-        // its equivalent), or the result is a mirror image rather than a
-        // rotation (DEVNOTES #21).
+        // Landscape: this scanline IS a raster column. av_yoko.row picks
+        // which one -- 1:1 here, since this game's long axis is 240 and so
+        // are the canvas rows, the only game in the project where that
+        // holds -- and av_yoko.col maps canvas columns onto the short axis.
+        //
+        // The `(W-1) - dy` reversal is NOT cosmetic: a 90-degree rotation
+        // must reverse exactly one axis relative to tate (case 1, which
+        // does not), or the result is a mirror image (DEVNOTES #21).
         memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t)); // pillarbox
-        const uint32_t dy  = av_yoko.row[dvi_y];
-        const uint32_t col = (uint32_t)(BTIME_GAME_WIDTH - 1) - dy;
-        for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
-            const uint32_t i  = av_yoko.col[x];
-            const uint32_t dx = mir ? (uint32_t)(BTIME_GAME_HEIGHT - 1) - i : i;
-            buf[x] = pal565[frame_pen[dx][col]];
-        }
+        render_native_column(s, BTIME_FIRST_VISIBLE_LINE +
+                                (uint32_t)(BTIME_GAME_WIDTH - 1) - av_yoko.row[dvi_y]);
+        col_to_rgb(colbuf);
+        // MERGE rather than sample: yoko narrows 240 raster columns onto
+        // 180 canvas columns, and dropping the other 60 deletes whole
+        // 1-pixel features rather than thinning them (DEVNOTES #80).
+        if (mir) av_emit_row_merge_rev(buf, colbuf, &av_yoko);
+        else     av_emit_row_merge(buf, colbuf, &av_yoko);
         break;
     }
 
@@ -630,16 +792,14 @@ BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t 
     }
 
     case 2: {
-        // 180 deg: case 0 with both axes reversed relative to it, so `col`
-        // is deliberately the un-reversed raw value and `dx`'s ternary is
-        // the mirror of case 0's.
+        // 180 deg: case 0 with BOTH axes reversed relative to it, so the
+        // column index is deliberately the *un*-reversed raw value and the
+        // emit direction flips.
         memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t)); // pillarbox
-        const uint32_t col = av_yoko.row[dvi_y];
-        for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
-            const uint32_t i  = av_yoko.col[x];
-            const uint32_t dx = mir ? i : (uint32_t)(BTIME_GAME_HEIGHT - 1) - i;
-            buf[x] = pal565[frame_pen[dx][col]];
-        }
+        render_native_column(s, BTIME_FIRST_VISIBLE_LINE + av_yoko.row[dvi_y]);
+        col_to_rgb(colbuf);
+        if (mir) av_emit_row_merge(buf, colbuf, &av_yoko);
+        else     av_emit_row_merge_rev(buf, colbuf, &av_yoko);
         break;
     }
 
@@ -658,24 +818,6 @@ BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t 
     }
 
     default: break;
-    }
-}
-
-void btime_draw_frame(btime_system *system) {
-    // Only landscape/180 need the frame buffer; tate renders on demand
-    // inside btime_run_frame()'s scanline loop.
-    if (system->rotation == 0 || system->rotation == 2) {
-        for (uint32_t row = 0; row < (uint32_t)BTIME_GAME_HEIGHT; row++) {
-            render_native_row(system, BTIME_FIRST_VISIBLE_LINE + row);
-            memcpy(frame_pen[row], &pen_row[BTIME_FIRST_VISIBLE_LINE],
-                   BTIME_GAME_WIDTH);
-        }
-    }
-
-    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
-        uint16_t *buf = hal_video_acquire_scanline();
-        btime_video_render_scanline(system, i, buf);
-        hal_video_submit_scanline(buf);
     }
 }
 

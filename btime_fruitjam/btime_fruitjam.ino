@@ -21,6 +21,7 @@
 // Core 0: game emulation, input polling, board-to-game input mapping.
 // Core 1: hal_video_run() -- drives the DVI signal; never returns.
 #include <arcade_hal_video.h>
+#include <arcade_video_geom.h>
 #include <arcade_hal_input.h>
 #include <btime_machine.h>
 #include <btime_video.h>
@@ -52,6 +53,20 @@ void setup() {
     // setup only. Does not start the physical DVI signal, does not touch
     // storage.
     btime_init(&g_system);
+
+    // Boot straight into a chosen rotation, for measuring one orientation
+    // without a hand on the rotate button:
+    //   arduino-cli compile --build-property compiler.cpp.extra_flags=-DTEST_ROTATION=0
+    // 0 = landscape, 1 = 90 CCW tate (this game's default), 2 = 180,
+    // 3 = 90 CW tate.
+#ifdef TEST_ROTATION
+    g_system.rotation = (uint8_t)(TEST_ROTATION);
+#endif
+    // btime_init() turns the aspect correction on; -DTEST_STRETCH=0 forces
+    // it off for an A/B against the historical 1:1 layout.
+#ifdef TEST_STRETCH
+    av_geom_set_stretch(TEST_STRETCH != 0);
+#endif
     Serial.println("[btime] boot: btime_init done");
 
     // Storage/ROM loading -- blocking, can be slow (SD card retries).
@@ -195,7 +210,11 @@ void loop() {
         Serial.print(blocked_us);
         Serial.print("us), work_max ");
         Serial.print(work_max);
-        Serial.print("us, starve ");
+        Serial.print("us, rot ");
+        Serial.print((int)g_system.rotation);
+        Serial.print(", stretch ");
+        Serial.print((int)av_geom_get_stretch());
+        Serial.print(", starve ");
         Serial.print(starve_total);
         Serial.print("us | vblank ");
         Serial.print(c.vblank_reads);

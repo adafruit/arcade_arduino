@@ -442,20 +442,88 @@ and the diff is a pure translation. DEVNOTES #77.
 > identity shift, as `galaga_video.cpp` already did) restored it to 14809us.
 > A lookup table is not free just because it removes arithmetic.
 >
-> To ship the correction on: memoise duplicated rows, and replace the
-> per-pixel indirection with a source-driven emit (one load, two stores, a
-> precomputed repeat count, no dependent second load). Whether that suffices
-> for DKong is open — it is at 14.8ms of 16.66ms before any correction.
+**Phase 2b — making the correction affordable. PARTLY DONE; DKong still
+does not fit.** DEVNOTES #78 has the full account. Both planned
+optimisations landed and neither was the win expected, so the frame was
+instrumented instead (`-DDKONG_COST_TRACE=1`, `dkong_debug_take_render()`).
+
+Measured on DKong in tate with sound, per frame:
+
+| | rows rendered | `render_native_row` | **emit** | `work_max` | `starve`/60 |
+|---|---|---|---|---|---|
+| correction off | 224/224 | 4848-4984us | **687us** | 14751us | **0** |
+| correction ON | 224/240 | 4287-4952us | **2660us** | 16877-17010us | 5795-9717 |
+
+**The entire cost of the correction is the emit pass** — 687us at 1:1
+against 2660us resampled, on a 16660us budget. Everything else is noise:
+
+- Row memoisation works (224 renders for 240 canvas rows, visible in the
+  `rows` column) and is worth ~0.15ms. Kept, but it was never the problem.
+- The source-driven emit alone changed nothing measurable. **`rep[]` is
+  still a load**, so the loop is two loads and two stores against the old
+  two loads and one store — the dependency was removed, but on this core a
+  dependent SRAM load was not what cost.
+- What did help: **hoisting `m->src_n`, `m->rep` and `m->x1` into locals
+  before the loop**, 3.75ms -> 2.66ms (-29%). `dst` is `uint16_t *` and the
+  map holds `uint16_t`, so the compiler had to assume a store through `dst`
+  could alias the map and reloaded those fields every iteration.
+
+Still ~1.0ms short of fitting. **The remaining lever is to delete the second
+pass entirely**, not to speed it up: have `render_native_row()` write
+through the column map straight into the scanline buffer, the way
+`galaga_video.cpp`'s 1:1 fast path already writes straight into `buf`. That
+removes the 687us copy from the DEFAULT path too, so it is worth doing
+regardless of the correction. It is invasive — sprites overlay pixels and a
+1->2 expansion has to widen those writes as well — which is why it was not
+attempted here.
+
+> **A measurement gotcha worth keeping.** The instrument perturbed the thing
+> it measured. Two unconditional counter increments per scanline — costing
+> nothing detectable in `work` — took the unstretched build from `starve`
+> 0/60 to ~1000/60. Both the timers and the counters are now behind
+> `DKONG_COST_TRACE`. `starve` tracks intra-frame DISTRIBUTION, not totals
+> (#35); anything added to a path that runs 240 times a frame can move it
+> while leaving every other number alone.
 
 **Phase 3 — `render_native_column()`, which deletes the red at its source.**
 Landscape and 180 then interleave exactly like tate; `frame_cache` and
-`run_frame_sequential()` both go away, freeing 57-129KB. Much cheaper than
-the double-buffering redesign #20 floats, which is off the table anyway at
-129KB per buffer. Galaga needs one extra piece — an x-bucketed star list —
-but it already precomputes hit positions rather than walking the LFSR per
-pixel, so that is a re-bucketing, not new emulation. Do Pac-Man first (it
-has a host harness and the smallest cached renderer), confirm on hardware,
-then port the pattern.
+`run_frame_sequential()` both go away. Much cheaper than the
+double-buffering redesign #20 floats, which is off the table anyway at 129KB
+per buffer — and note the caches sit in BSS, so today they cost their full
+size in EVERY orientation including tate, where they are never read:
+
+| game | frees | globals now | after |
+|---|---|---|---|
+| Pac-Man | 129KB | 252KB | 123KB |
+| Ms. Pac-Man | 129KB | 334KB | 205KB |
+| Galaga | 129KB | 299KB | 170KB |
+| Donkey Kong | 115KB | 287KB | 172KB |
+| Burger Time | 58KB | 266KB | 208KB |
+
+**The per-game difficulty is not uniform, and one fact decides it:** whether
+sprite selection is order-dependent per raster line.
+
+| game | difficulty | why |
+|---|---|---|
+| Pac-Man, Ms. Pac-Man | easy | a column is one tile column x 28 rows; all 8 sprites drawn unconditionally, so it is an x-overlap test instead of a y-overlap test |
+| Burger Time | easy | same shape, 8 sprites, 8-bit pen buffer |
+| Galaga | moderate | same as Pac-Man, plus the 05XX starfield needs an x-bucketed hit list. It already precomputes hit POSITIONS rather than walking the LFSR per pixel, so that is a re-bucketing, not new emulation |
+| **Donkey Kong** | **hard** | `dkong_video.cpp`'s `num_sprt < 16` — the real hardware's 64x9 line buffer, emulated faithfully. Selection is per raster line AND order-dependent (first 16 matching win) |
+
+**The Donkey Kong problem, stated so it is not rediscovered.** A column
+crosses all 224 raster lines, so rendering it needs to know which sprites
+won each line's arbitration. Recomputing that inside a column loop is 224
+selections x 240 columns against today's 224 — 240x the work. It needs a
+precomputed line->sprite table (224 lines x 16 entries, ~3.5KB). But
+building that table is itself a whole-frame burst, which is precisely what
+Phase 3 exists to remove. The workable shape is to build it INCREMENTALLY
+DURING THE PREVIOUS FRAME, one line's arbitration per scanline slot, giving
+landscape one frame of sprite latency. That is acceptable for a non-default
+orientation but it is a design decision, not a mechanical port. Treat DKong
+as its own piece of work, last.
+
+Order: Pac-Man first (it has a harness and the smallest cached renderer),
+confirm on hardware, then Ms. Pac-Man / Burger Time / Galaga, then DKong.
 
 > **Tradeoff worth naming:** column-order CPU interleaving shears the image
 > instead of tearing it, because a native column is sampled across the whole
@@ -475,3 +543,49 @@ fast path" — with one code path there is nothing to special-case.
 **Phase 5 — cleanups.** Shrink the scanline buffers 640 -> 320 (5KB). Wire
 `hal_video_take_starve_count()` into every sketch's stats line (done for
 `lrescue_fruitjam` and `dkong_fruitjam` during the section 4 measurement).
+
+---
+
+## 8. What is left, and how it gets verified
+
+Two gaps remain, and they are independent — neither blocks the other.
+
+| | state |
+|---|---|
+| **All orientations without red** | broken on the 5 tile+sprite games. Phase 3. |
+| **Correct aspect ratio** | built and correct, OFF by default because DKong cannot afford it. Phase 2b's remaining lever. |
+
+Space Invaders and Lunar Rescue are already clean in all four rotations
+(bitmap VRAM, no compositing step, nothing to burst) — and they have ample
+headroom, so they are the two games that could have the correction switched
+on today.
+
+**Which games actually need the correction**, worst first: Burger Time
+(+33.3% too wide, and among the cheapest games), Invaders / Lunar Rescue /
+DKong (+16.7%), Pac-Man / Ms. Pac-Man / Galaga (+3.7%, close to invisible).
+Note the mismatch: the games that need it least are two of the three that
+can least afford it. **Enabling it per-game rather than globally is a
+legitimate outcome** if the emit rewrite does not land.
+
+Cost is only known for DKong. Galaga is the other tight game (~14.5ms peak
+after phase 1) and would likely also need the rewrite; the remaining five
+have room.
+
+### Verifying it
+
+Most of this needs no hardware, which is the useful part:
+
+- **Geometry, orientation, mirroring** — `tools/geom_test/` for the map
+  arithmetic, and PPM byte-compares for the renderers. No board involved.
+- **Red and frame budget** — the starve counter over serial, per game per
+  rotation, via `-DTEST_ROTATION=n` and `-DTEST_STRETCH=1`. Objective.
+- **Needs eyes, once per game** — that the picture is upright on the
+  physically rotated monitor and the proportions look right.
+
+**The practical bottleneck is the SD card.** Each game needs its own
+`/rom/` contents, and the two 8080bw games discover ROMs by LISTING the
+directory and sorting reverse-alphabetically — so a combined card would
+break them (extra files become extra ROM banks). Hardware verification is
+therefore serialised behind a card swap per game. Per-game subdirectories
+would fix it; out of scope here, but it is the reason a full 7-game hardware
+pass is a chore rather than a command.

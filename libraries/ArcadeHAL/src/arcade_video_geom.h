@@ -95,6 +95,21 @@ typedef struct {
     // peaks at 14946us of a 16660us budget, so the shortcut is load-bearing
     // at that game's default.
     uint8_t  col_1to1;
+
+    // The SAME column mapping, inverted: rep[s] is how many canvas columns
+    // raster sample `s` covers, and src_n is how many samples `col` draws
+    // from. Sum(rep[0..src_n-1]) == x1 - x0.
+    //
+    // This exists because `buf[x] = row[col[x]]` -- the obvious way to use
+    // `col` -- measured badly. It is a dependent load pair (fetch the index,
+    // then fetch the pixel) plus a store, 320 times a scanline, 240 times a
+    // frame, on the SRAM the DVI DMA is already hammering. Walking the
+    // SOURCE instead turns that into one load and two stores with nothing
+    // dependent, which is what av_emit_row() below does. See DEVNOTES #78:
+    // routing the unstretched path through `col` cost Donkey Kong 1.6ms a
+    // frame without changing a pixel.
+    uint16_t src_n;
+    uint8_t  rep[AV_CANVAS_W];
 } av_map_t;
 
 // Tate (rotations 1 and 3): col indexes the LONG axis, row the SHORT axis.
@@ -118,6 +133,69 @@ void av_geom_init(uint32_t long_px, uint32_t short_px);
 // one-game version of this.
 void av_geom_set_stretch(bool on);
 bool av_geom_get_stretch(void);
+
+// Writes one raster row onto the canvas through `m`'s column mapping.
+// `dst` is the whole scanline buffer (indexed by absolute canvas x); `src`
+// is `m->src_n` raster samples. Equivalent to
+//
+//     for (x = m->x0; x < m->x1; x++) dst[x] = src[m->col[x]];
+//
+// but source-driven, so the inner loop is one load, two stores and an add
+// -- no dependent second load and no branch. See av_map_t::rep.
+//
+// The second store is deliberate and is what removes the branch: when a
+// sample covers only one column it writes one pixel too far, and the next
+// iteration overwrites it. The final iteration's overspill lands past the
+// picture, which the two trailing stores below clear. Callers may therefore
+// clear the borders either before or after this; the picture's own columns
+// are always written.
+static inline void av_emit_row(uint16_t *dst, const uint16_t *src,
+                               const av_map_t *m) {
+    // Hoist every field into a local FIRST. `dst` is uint16_t* and *m holds
+    // uint16_t, so the compiler must assume a store through `dst` can alias
+    // the map and reload m->src_n / m->rep on every iteration. Measured on
+    // hardware: leaving them in place made this loop 5.4x a plain linear
+    // copy (DEVNOTES #78).
+    const uint8_t *rep = m->rep;
+    const uint32_t n   = m->src_n;
+    const uint32_t x1  = m->x1;
+    uint32_t x = m->x0;
+    for (uint32_t s = 0; s < n; s++) {
+        const uint16_t v = src[s];
+        dst[x]     = v;
+        dst[x + 1] = v;
+        x += rep[s];
+    }
+    dst[x1]      = 0; // overspill, always inside the buffer's slack
+    dst[x1 + 1u] = 0;
+}
+
+// av_emit_row() with the raster reversed -- the within-scanline half of a
+// 180-degree turn. Equivalent to
+//
+//     for (x = m->x0; x < m->x1; x++) dst[x] = src[m->src_n - 1 - m->col[x]];
+//
+// NOTE `rep` is walked FORWARDS while `src` is walked backwards. Walking
+// both backwards is the obvious guess and is wrong unless rep[] happens to
+// be a palindrome, which it is not: canvas column x still takes its width
+// from rep[col[x]], and only the pixel VALUE mirrors. Caught by
+// tools/geom_test.
+static inline void av_emit_row_rev(uint16_t *dst, const uint16_t *src,
+                                   const av_map_t *m) {
+    const uint8_t *rep = m->rep;      // hoisted -- see av_emit_row()
+    const uint32_t n   = m->src_n;
+    const uint32_t x1  = m->x1;
+    const uint32_t last = n - 1u;
+    uint32_t x = m->x0;
+    for (uint32_t s = 0; s < n; s++) {
+        const uint16_t v = src[last - s];
+        dst[x]     = v;
+        dst[x + 1] = v;
+        x += rep[s];
+    }
+    dst[x1]      = 0;
+    dst[x1 + 1u] = 0;
+}
 
 #ifdef __cplusplus
 }

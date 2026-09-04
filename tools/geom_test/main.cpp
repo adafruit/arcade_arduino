@@ -53,6 +53,40 @@ static void report(const char *tag, const av_map_t &m, uint32_t src_col, uint32_
     CHECK(m.x1 <= 320); CHECK(m.y1 <= 240);
 }
 
+// The whole point of rep[]: av_emit_row() must produce EXACTLY what the
+// straightforward `dst[x] = src[col[x]]` produces, forwards and reversed.
+// If it does not, turning the aspect correction on stops being a pure A/B
+// and every byte-compare baseline becomes meaningless.
+static void check_emit(const char *tag, const av_map_t &m) {
+    static uint16_t src[512], got[1024], want[1024];
+    for (uint32_t i = 0; i < 512; i++) src[i] = (uint16_t)(i * 7u + 1u); // distinct
+    uint32_t sum = 0;
+    for (uint32_t s = 0; s < m.src_n; s++) sum += m.rep[s];
+    if (sum != (uint32_t)(m.x1 - m.x0)) {
+        printf("  FAIL: %s sum(rep)=%u but width=%u\n", tag, sum, m.x1 - m.x0);
+        fails++;
+        return;
+    }
+
+    for (int rev = 0; rev < 2; rev++) {
+        for (uint32_t i = 0; i < 1024; i++) { got[i] = 0; want[i] = 0; }
+        for (uint32_t x = m.x0; x < m.x1; x++)
+            want[x] = rev ? src[m.src_n - 1u - m.col[x]] : src[m.col[x]];
+        if (rev) av_emit_row_rev(got, src, &m); else av_emit_row(got, src, &m);
+        for (uint32_t x = m.x0; x < m.x1; x++) {
+            if (got[x] != want[x]) {
+                printf("  FAIL: %s%s x=%u got %u want %u\n",
+                       tag, rev ? " (rev)" : "", x, got[x], want[x]);
+                fails++;
+                return;
+            }
+        }
+        // and nothing painted outside the picture
+        for (uint32_t x = 0; x < m.x0; x++) if (got[x]) { printf("  FAIL: %s left bleed\n", tag); fails++; return; }
+        for (uint32_t x = m.x1; x < 1000; x++) if (got[x]) { printf("  FAIL: %s right bleed at %u\n", tag, x); fails++; return; }
+    }
+}
+
 int main() {
     struct { const char *n; uint32_t L, S; } games[] = {
         {"Invaders/LRescue/DKong", 256, 224},
@@ -66,6 +100,8 @@ int main() {
             printf("%s  raster %ux%u  stretch=%s\n", g.n, g.L, g.S, st ? "ON " : "off");
             report("tate", av_tate, g.L, g.S);
             report("yoko", av_yoko, g.S, g.L);
+            check_emit("tate", av_tate);
+            check_emit("yoko", av_yoko);
             if (st) {
                 // aspect-correct destinations, identical for every game
                 CHECK(av_tate.x1 - av_tate.x0 == 320);

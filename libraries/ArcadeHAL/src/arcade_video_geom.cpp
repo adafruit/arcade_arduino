@@ -46,6 +46,17 @@ static bool build_1to1(uint16_t *t, uint16_t *d0, uint16_t *d1,
     return true;
 }
 
+// Derives rep[]/src_n from the col[] table that was just built, rather than
+// computing it independently. Deliberate: two formulas for one mapping is
+// exactly how a renderer and its border constant drift apart (DEVNOTES #77),
+// and av_emit_row() and the `buf[x] = row[col[x]]` fallback have to agree
+// pixel for pixel or the aspect toggle stops being a pure A/B.
+static void build_rep(av_map_t *m, uint32_t src_px) {
+    for (uint32_t s = 0; s < src_px && s < AV_CANVAS_W; s++) m->rep[s] = 0;
+    for (uint32_t x = m->x0; x < m->x1; x++) m->rep[m->col[x]]++;
+    m->src_n = (uint16_t)(src_px < AV_CANVAS_W ? src_px : AV_CANVAS_W);
+}
+
 static void rebuild(void) {
     if (!s_long_px || !s_short_px) return;
 
@@ -62,6 +73,9 @@ static void rebuild(void) {
         const uint32_t w  = AV_YOKO_W < cw ? AV_YOKO_W : cw;
         av_yoko.col_1to1 = build(av_yoko.col, &av_yoko.x0, &av_yoko.x1, (cw - w) / 2u, w, s_short_px);
         build(av_yoko.row, &av_yoko.y0, &av_yoko.y1, 0u, ch, s_long_px);
+
+        build_rep(&av_tate, s_long_px);
+        build_rep(&av_yoko, s_short_px);
     } else {
         // Historical layout: 1:1 with pillar/letterboxing, EXCEPT yoko's
         // row axis, which already resampled LONG onto all 240 canvas rows
@@ -74,6 +88,9 @@ static void rebuild(void) {
 
         av_yoko.col_1to1 = build_1to1(av_yoko.col, &av_yoko.x0, &av_yoko.x1, cw, s_short_px);
         build(av_yoko.row, &av_yoko.y0, &av_yoko.y1, 0u, ch, s_long_px);
+
+        build_rep(&av_tate, s_long_px);
+        build_rep(&av_yoko, s_short_px);
     }
 }
 

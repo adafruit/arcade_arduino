@@ -603,16 +603,23 @@ GALAGA_VID_RAMFUNC void galaga_video_render_scanline(const galaga_system *sys, u
         // MEASURE ON HARDWARE before shipping the stretch on as this
         // machine's default.
         static uint16_t scratch[GALAGA_GAME_WIDTH];
-        render_native_row(sys, dx, scratch, false);
+
+        // Skip the render when this canvas row repeats the previous one --
+        // the 224->240 upsample makes 16 of 240 rows duplicates, and they
+        // are adjacent. See av_map_t::rep and DEVNOTES #78.
+        static uint32_t last_dx = 0xFFFFFFFFu;
+        if (dvi_y == av_tate.y0) last_dx = 0xFFFFFFFFu; // new frame
+        if (dx != last_dx) { render_native_row(sys, dx, scratch, false); last_dx = dx; }
+
         memset(buf, 0, av_tate.x0 * sizeof(uint16_t));
         memset(buf + av_tate.x1, 0, (HAL_VIDEO_WIDTH - av_tate.x1) * sizeof(uint16_t));
-        if (sys->rotation == 1) {
-            for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
-                buf[x] = scratch[av_tate.col[x]];
-        } else {
-            for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
-                buf[x] = scratch[(uint32_t)(GALAGA_GAME_WIDTH - 1u) - av_tate.col[x]];
-        }
+        // Source-driven emit rather than `buf[x] = scratch[col[x]]`: one
+        // load and two stores per raster sample, nothing dependent. The
+        // reversal for rotation 3 is done here rather than inside
+        // render_native_row(), so the memoised row above is orientation-
+        // independent and both rotations share it.
+        if (sys->rotation == 1) av_emit_row(buf, scratch, &av_tate);
+        else                    av_emit_row_rev(buf, scratch, &av_tate);
         return;
     }
 

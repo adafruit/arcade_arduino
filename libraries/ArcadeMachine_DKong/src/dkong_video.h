@@ -57,6 +57,14 @@ void dkong_draw_frame(dkong_system *system);
 // submitting it.
 void dkong_video_render_scanline(const dkong_system *system, uint32_t dvi_y, uint16_t *buf);
 
+// Per-frame render cost split, reset on read. `rows_us`/`rows` cover
+// render_native_row(); `emit_us` covers turning that row into canvas pixels;
+// `lines` is how many scanlines did any work. `rows` < `lines` means the
+// duplicate-row memoisation is firing (see arcade_video_geom.h). Device-only
+// numbers -- the host harness returns zeros for the timings.
+void dkong_debug_take_render(uint32_t *rows_us, uint32_t *emit_us,
+                             uint32_t *rows, uint32_t *lines);
+
 // Boot-time asset-load error screen: floods every scanline with a solid
 // colour, bypassing game VRAM entirely.
 void dkong_draw_error_frame(uint16_t color);

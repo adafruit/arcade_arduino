@@ -356,6 +356,42 @@ static void render_native_row(const dkong_system *sys, uint32_t native_y, uint16
 // DEVNOTES.md problems #18/#19/#20.
 static uint16_t frame_cache[DKONG_GAME_HEIGHT][DKONG_GAME_WIDTH];
 
+// Frame-cost instrument. This game is the project's tightest budget and,
+// unlike Burger Time (#59), had no way to see WHERE its frame goes -- which
+// left the aspect correction's cost a matter of argument rather than
+// measurement, and sent the first attempt to optimise it at the wrong loop
+// (#78). Same shape as btime_machine.cpp's COST_NOW/COST_ADD, guarded so
+// the host harness compiles unchanged.
+// OPT-IN, because the instrument perturbs what it measures. Four micros()
+// calls per scanline is only ~0.15ms a frame, but `starve` is sensitive to
+// intra-frame unevenness rather than to totals (#35): switching this on took
+// Donkey Kong's unstretched build from starve 0/60 to 2393-4014/60 while
+// `work` barely moved. Build with
+//   --build-property compiler.cpp.extra_flags=-DDKONG_COST_TRACE=1
+// when you want the split, and read the numbers knowing they cost something.
+#if defined(DKONG_COST_TRACE) && (defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE))
+#include <Arduino.h> // micros()
+#define DK_COST_NOW() micros()
+#define DK_COST_ADD(acc, t0) do { (acc) += micros() - (t0); } while (0)
+#define DK_COUNT(c) do { (c)++; } while (0)
+#else
+#define DK_COST_NOW() 0u
+#define DK_COST_ADD(acc, t0) do { (void)(t0); } while (0)
+#define DK_COUNT(c) do { } while (0)
+#endif
+
+static uint32_t g_rows_us  = 0; // time inside render_native_row()
+static uint32_t g_emit_us  = 0; // time turning that row into canvas pixels
+static uint32_t g_rows_n   = 0; // render_native_row() calls (memoisation check)
+static uint32_t g_lines_n  = 0; // scanlines that did any work at all
+
+void dkong_debug_take_render(uint32_t *rows_us, uint32_t *emit_us,
+                             uint32_t *rows, uint32_t *lines) {
+    *rows_us = g_rows_us; *emit_us = g_emit_us;
+    *rows = g_rows_n;     *lines = g_lines_n;
+    g_rows_us = g_emit_us = g_rows_n = g_lines_n = 0;
+}
+
 void dkong_video_render_scanline(const dkong_system *sys, uint32_t dvi_y, uint16_t *buf) {
     memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
     bool mir = sys->mirror_x;
@@ -398,7 +434,27 @@ void dkong_video_render_scanline(const dkong_system *sys, uint32_t dvi_y, uint16
         if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) return;
         uint32_t dx = av_tate.row[dvi_y];
         if (mir) dx = (uint32_t)(DKONG_GAME_HEIGHT - 1) - dx;
-        render_native_row(sys, dx, row);
+        // Skip the render when this canvas row repeats the previous one.
+        // The aspect correction upsamples 224 raster rows onto 240 canvas
+        // rows, so 16 of them are duplicates, and duplicates are adjacent --
+        // 16 of 240 render_native_row() calls, ~7% of the renderer. Costs
+        // one compare per scanline when the map is 1:1 and nothing repeats.
+        //
+        // The duplicate then shows raster state from an instant earlier in
+        // the frame's CPU execution than a re-render would. That is the same
+        // kind of intra-frame staleness the interleaved renderer already has
+        // by design, at 1/240th of a frame.
+        static uint32_t last_dx = 0xFFFFFFFFu;
+        if (dvi_y == av_tate.y0) last_dx = 0xFFFFFFFFu; // new frame
+        DK_COUNT(g_lines_n);
+        if (dx != last_dx) {
+            const uint32_t t0 = DK_COST_NOW();
+            render_native_row(sys, dx, row);
+            DK_COST_ADD(g_rows_us, t0);
+            DK_COUNT(g_rows_n);
+            last_dx = dx;
+        }
+        const uint32_t te = DK_COST_NOW();
         // The 1:1 branch is a MEASURED requirement, not tidiness: going
         // through av_tate.col[] unconditionally cost this family +1.6ms a
         // frame and put Donkey Kong's work_max past the budget. See
@@ -407,9 +463,9 @@ void dkong_video_render_scanline(const dkong_system *sys, uint32_t dvi_y, uint16
             uint16_t *out = buf + av_tate.x0;
             for (uint32_t c = 0; c < (uint32_t)DKONG_GAME_WIDTH; c++) out[c] = row[c];
         } else {
-            for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
-                buf[x] = row[av_tate.col[x]];
+            av_emit_row(buf, row, &av_tate);
         }
+        DK_COST_ADD(g_emit_us, te);
         break;
     }
 
@@ -441,14 +497,25 @@ void dkong_video_render_scanline(const dkong_system *sys, uint32_t dvi_y, uint16
         if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) return;
         const uint32_t d  = av_tate.row[dvi_y];
         const uint32_t dx = mir ? d : (uint32_t)(DKONG_GAME_HEIGHT - 1) - d;
-        render_native_row(sys, dx, row);
+        // Skip the render when this canvas row repeats the previous one.
+        // The aspect correction upsamples 224 raster rows onto 240 canvas
+        // rows, so 16 of them are duplicates, and duplicates are adjacent --
+        // 16 of 240 render_native_row() calls, ~7% of the renderer. Costs
+        // one compare per scanline when the map is 1:1 and nothing repeats.
+        //
+        // The duplicate then shows raster state from an instant earlier in
+        // the frame's CPU execution than a re-render would. That is the same
+        // kind of intra-frame staleness the interleaved renderer already has
+        // by design, at 1/240th of a frame.
+        static uint32_t last_dx = 0xFFFFFFFFu;
+        if (dvi_y == av_tate.y0) last_dx = 0xFFFFFFFFu; // new frame
+        if (dx != last_dx) { render_native_row(sys, dx, row); last_dx = dx; }
         if (av_tate.col_1to1) {
             uint16_t *out = buf + av_tate.x0;
             for (uint32_t c = 0; c < (uint32_t)DKONG_GAME_WIDTH; c++)
                 out[c] = row[(uint32_t)(DKONG_GAME_WIDTH - 1u) - c];
         } else {
-            for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
-                buf[x] = row[(uint32_t)(DKONG_GAME_WIDTH - 1u) - av_tate.col[x]];
+            av_emit_row_rev(buf, row, &av_tate);
         }
         break;
     }

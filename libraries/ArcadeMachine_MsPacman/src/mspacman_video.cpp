@@ -294,7 +294,19 @@ void mspacman_video_render_scanline(const mspacman_system *sys, uint32_t dvi_y, 
         if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) return;
         uint32_t dx = av_tate.row[dvi_y];
         if (mir) dx = (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - dx;
-        render_native_row(sys, dx, row);
+        // Skip the render when this canvas row repeats the previous one.
+        // The aspect correction upsamples 224 raster rows onto 240 canvas
+        // rows, so 16 of them are duplicates, and duplicates are adjacent --
+        // 16 of 240 render_native_row() calls, ~7% of the renderer. Costs
+        // one compare per scanline when the map is 1:1 and nothing repeats.
+        //
+        // The duplicate then shows raster state from an instant earlier in
+        // the frame's CPU execution than a re-render would. That is the same
+        // kind of intra-frame staleness the interleaved renderer already has
+        // by design, at 1/240th of a frame.
+        static uint32_t last_dx = 0xFFFFFFFFu;
+        if (dvi_y == av_tate.y0) last_dx = 0xFFFFFFFFu; // new frame
+        if (dx != last_dx) { render_native_row(sys, dx, row); last_dx = dx; }
         // The 1:1 branch is a MEASURED requirement, not tidiness: going
         // through av_tate.col[] unconditionally cost this family +1.6ms a
         // frame and put Donkey Kong's work_max past the budget. See
@@ -303,8 +315,7 @@ void mspacman_video_render_scanline(const mspacman_system *sys, uint32_t dvi_y, 
             uint16_t *out = buf + av_tate.x0;
             for (uint32_t c = 0; c < (uint32_t)MSPACMAN_GAME_WIDTH; c++) out[c] = row[c];
         } else {
-            for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
-                buf[x] = row[av_tate.col[x]];
+            av_emit_row(buf, row, &av_tate);
         }
         break;
     }
@@ -337,14 +348,25 @@ void mspacman_video_render_scanline(const mspacman_system *sys, uint32_t dvi_y, 
         if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) return;
         const uint32_t d  = av_tate.row[dvi_y];
         const uint32_t dx = mir ? d : (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - d;
-        render_native_row(sys, dx, row);
+        // Skip the render when this canvas row repeats the previous one.
+        // The aspect correction upsamples 224 raster rows onto 240 canvas
+        // rows, so 16 of them are duplicates, and duplicates are adjacent --
+        // 16 of 240 render_native_row() calls, ~7% of the renderer. Costs
+        // one compare per scanline when the map is 1:1 and nothing repeats.
+        //
+        // The duplicate then shows raster state from an instant earlier in
+        // the frame's CPU execution than a re-render would. That is the same
+        // kind of intra-frame staleness the interleaved renderer already has
+        // by design, at 1/240th of a frame.
+        static uint32_t last_dx = 0xFFFFFFFFu;
+        if (dvi_y == av_tate.y0) last_dx = 0xFFFFFFFFu; // new frame
+        if (dx != last_dx) { render_native_row(sys, dx, row); last_dx = dx; }
         if (av_tate.col_1to1) {
             uint16_t *out = buf + av_tate.x0;
             for (uint32_t c = 0; c < (uint32_t)MSPACMAN_GAME_WIDTH; c++)
                 out[c] = row[(uint32_t)(MSPACMAN_GAME_WIDTH - 1u) - c];
         } else {
-            for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
-                buf[x] = row[(uint32_t)(MSPACMAN_GAME_WIDTH - 1u) - av_tate.col[x]];
+            av_emit_row_rev(buf, row, &av_tate);
         }
         break;
     }

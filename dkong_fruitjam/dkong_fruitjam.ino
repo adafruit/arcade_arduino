@@ -183,7 +183,20 @@ void loop() {
         Serial.print((int)g_system.rotation);
         Serial.print(", starve ");
         Serial.print(hal_video_take_starve_count());
-        Serial.println("/60");
+        // Where the render half of `work` actually goes -- see
+        // dkong_video.h. `rows` below `lines` means the duplicate-row
+        // memoisation is firing.
+        uint32_t r_us, e_us, rows, lines;
+        dkong_debug_take_render(&r_us, &e_us, &rows, &lines);
+        Serial.print("/60, rows ");
+        Serial.print(rows);
+        Serial.print("/");
+        Serial.print(lines);
+        Serial.print(" (");
+        Serial.print(r_us / 60u);
+        Serial.print("us/f), emit ");
+        Serial.print(e_us / 60u);
+        Serial.println("us/f");
     }
 }
 

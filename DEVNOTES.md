@@ -3351,38 +3351,60 @@ rotation, and the project's tightest frame budget):
 Over budget, ~150 starvation events per frame, and no longer 60fps. **The
 correction is geometrically right and currently unaffordable on this game.**
 
-**Where the cost is.** Two places, and the smaller one was the predicted one:
+**Where the cost is -- MEASURED, after two wrong guesses.** The first two
+attempts both targeted things that turned out not to matter, so the frame
+was instrumented instead (`-DDKONG_COST_TRACE=1`, `dkong_debug_take_render()`
+-- this game had no cost breakdown, unlike Burger Time in #59, which is why
+the guessing happened at all). Per frame, tate, with sound:
 
-1. The 224->240 upsample makes 16 of the 240 canvas rows repeat a raster
-   row, so `render_native_row()` runs 240 times instead of 224 (+7%). This
-   was predicted and is memoisable -- consecutive duplicates are adjacent,
-   so a "same row as last call" guard would remove it. NOT yet done.
-2. The bigger one, which was NOT predicted: the per-pixel column map turns a
-   linear `out[c] = row[c]` copy into a double-indirect
-   `buf[x] = row[col[x]]` over 320 pixels instead of 256. That is a
-   dependent load pair plus a store, 76,800 times a frame, on the same SRAM
-   the DVI DMA is hammering.
+| | rows rendered | `render_native_row` | **emit** | `work_max` | `starve`/60 |
+|---|---|---|---|---|---|
+| correction off | 224/224 | 4848-4984us | **687us** | 14751us | **0** |
+| correction ON | 224/240 | 4287-4952us | **2660us** | 16877-17010us | 5795-9717 |
 
-**Point 2 bit the DEFAULT path first, and that is the lesson.** The initial
-conversion routed *both* modes through the table, on the reasoning that a
-table lookup has "no division and no branch in any inner loop". True, and
-still 1.6ms a frame slower: `work_max` went 15481us -> 17126us with the
-stretch OFF, i.e. past the budget while changing not one pixel. Restoring a
-`col_1to1` fast path -- the linear copy, taken whenever the map is an
-identity shift -- brought it back to 14809us. **A lookup table is not free
-just because it removes arithmetic; on this part an indirection in the
-innermost loop can cost more than the arithmetic it replaced.**
-`galaga_video.cpp` already knew this (#33) and its fast path was kept from
-the start; the other renderers had to learn it again by measurement.
+**The whole cost is the emit pass**: 687us at 1:1 against 2660us resampled.
+`render_native_row()` is unchanged between the two.
 
-**Next, if the correction is to ship on by default:** memoise the duplicated
-rows, and replace the per-pixel indirection with a source-driven emit (walk
-the 256 source pixels, write each once or twice from a precomputed
-repeat-count table) so the inner loop is one load and two stores with no
-dependent second load. Whether that is enough for Donkey Kong specifically
-is an open question -- it sits at 14.8ms of 16.66ms before any correction at
-all, so it may need the renderer itself to get cheaper. Every other game has
-more room.
+What did NOT help, and why:
+
+1. **Row memoisation.** It works -- the `rows` column shows 224 renders for
+   240 canvas rows -- and it is worth ~0.15ms. It was the predicted cost and
+   it was never the problem.
+2. **The source-driven emit on its own.** `rep[]` is still a load, so the
+   loop is two loads and two stores against the old two loads and one store.
+   The dependent second load was removed and nothing measurable changed:
+   **on this core a dependent SRAM load was not what cost.**
+
+What did help: **hoisting `m->src_n`, `m->rep` and `m->x1` into locals
+before the loop** -- 3.75ms -> 2.66ms, -29%. `dst` is `uint16_t *` and the
+map holds `uint16_t`, so the compiler had to assume a store through `dst`
+could alias the map, and reloaded those fields on every iteration. **A
+`const` struct pointer plus a same-type output pointer is enough to defeat
+hoisting in a hot loop.**
+
+**The instrument perturbed the measurement, and that is worth its own note.**
+Two unconditional counter increments per scanline -- no detectable effect on
+`work` -- took the unstretched build from `starve` 0/60 to ~1000/60. Both
+the timers and the counters are now behind `DKONG_COST_TRACE`. `starve`
+tracks intra-frame DISTRIBUTION rather than totals (#35), so anything added
+to a path that runs 240 times a frame can move it while every other number
+stays put. Removing them again left `work_max` at 14751us, slightly better
+than the 14809us this started from.
+
+**Next, and it is a different shape from what was tried:** delete the second
+pass rather than speed it up. Have `render_native_row()` write through the
+column map straight into the scanline buffer, as `galaga_video.cpp`'s 1:1
+fast path already writes straight into `buf`. That removes the 687us copy
+from the DEFAULT path too, so it pays off with the correction off as well.
+It is invasive -- sprites overlay pixels, and a 1->2 expansion has to widen
+those writes -- which is why it was not attempted here.
+
+Still ~1.0ms short as it stands. Whether even that is enough for Donkey Kong
+is open: it sits at 14.75ms of 16.66ms before any correction at all. Every
+other game has more room, and enabling the correction per-game rather than
+globally is a legitimate outcome -- note that the three games needing it
+LEAST (Pac-Man, Ms. Pac-Man, Galaga at +3.7%) include two of the tightest
+budgets, while Burger Time needs it most (+33.3%) and is among the cheapest.
 
 A full audit of the display path -- what the canvas actually is, whether
 either orientation matches the original cabinet's aspect ratio, and why

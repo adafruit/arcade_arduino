@@ -4751,7 +4751,7 @@ looking, when a second, independent fix from the same phase had also passed
 it by. When a game is skipped for one reason, check what else was bundled
 with the thing it was skipped from.
 
-### 97. Yoko's residual squashing is arithmetic, and smoothing it costs 5.4ms
+### 97. Yoko's residual squashing is arithmetic -- and smoothing it was tried, measured, and REJECTED
 
 After the merge of #96 the yoko score lines were legible but visibly
 squashed. That part is not a bug and cannot be fixed where it appears:
@@ -4791,3 +4791,15 @@ default, and would need the accumulator pass folded into the emit (the way
 
 **Worth stating plainly: this is a taste call on 1-bit pixel art, not a
 correctness fix.** The geometry is identical either way.
+
+**REJECTED ON THE DISPLAY, and the code is deleted.** Shown side by side
+against the crisp version on real hardware, the verdict was immediate: the
+dimmed row reads as blur, and crisp-but-squashed is preferred to
+soft-and-proportional on this artwork. So the flag is gone rather than left
+off-by-default -- a rejected rendering path that nobody will ever enable is
+just a second way for the two to diverge, the same reason
+`run_frame_sequential()` was deleted in #92 rather than kept.
+
+Recorded here so it is not re-attempted: the smoothing works, it costs
+5.4ms, and it is not wanted. If the squashing is ever to be genuinely fixed
+it needs the taller canvas above, not filtering.

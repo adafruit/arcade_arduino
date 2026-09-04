@@ -28,29 +28,6 @@
 // VRAM layout: column-major, dx=0..223 left->right, dy=0..255 top(score)->bottom(player).
 //   byte = memory[0x2400 + dx*32 + (255-dy)/8],  bit = (255-dy)%8
 
-// SMOOTHED yoko downsample, opt-in: -DINVADERS_SMOOTH=1
-//
-// What this does and does NOT fix. Yoko maps 256 raster rows onto 240 canvas
-// rows, so 16 canvas rows -- every 15th, exactly -- must carry two raster
-// rows. That is arithmetic, not a bug: 256 does not fit in 240. An 8-row
-// glyph loses a row whenever one of those 16 merge points lands inside it,
-// which is 53% of the time, and that is the squashing visible on the score
-// lines. **Nothing here restores the lost row.**
-//
-// What it changes is how the loss READS. The plain merge is a hard OR, so a
-// doubled row is fully lit and the glyph simply becomes 7 rows of solid
-// white -- it looks like a dropped scanline. Weighting each canvas pixel by
-// how much of it the lit source actually covers turns the same geometry into
-// what a scaler (or a CRT) would show: the compressed row is dimmer rather
-// than missing, and the eye reads it as smooth scaling.
-//
-// It is a taste call on 1-bit pixel art, not a correctness fix, which is why
-// it is a build flag rather than the default.
-#if defined(INVADERS_SMOOTH)
-static const uint16_t grey5[5] = { 0x0000u, 0x4208u, 0x8410u, 0xBDF7u, 0xFFFFu };
-static uint8_t g_cov[AV_CANVAS_W], g_tot[AV_CANVAS_W];
-#endif
-
 static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *sys) {
     memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
     const uint8_t *vram = sys->state.memory + 0x2400;
@@ -91,24 +68,11 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
             uint32_t lit = 0;
             for (uint32_t k = 0; k < nrow; k++) {
                 const uint32_t c = 255u - (r0 + k);
-                lit += (uint32_t)(vr[c >> 3u] >> (c & 7u)) & 1u;
+                lit |= (uint32_t)(vr[c >> 3u] >> (c & 7u)) & 1u;
             }
-#if defined(INVADERS_SMOOTH)
-            g_cov[x] = (uint8_t)(g_cov[x] + lit);
-            g_tot[x] = (uint8_t)(g_tot[x] + nrow);
-#else
             if (lit) buf[x] = COLOR_WHITE;
-#endif
             x += rep[sx];
         }
-#if defined(INVADERS_SMOOTH)
-        for (uint32_t px = av_yoko.x0; px < av_yoko.x1; px++) {
-            const uint32_t t = g_tot[px];
-            if (t && g_cov[px])
-                buf[px] = grey5[(g_cov[px] * 4u + t / 2u) / t];
-            g_cov[px] = 0; g_tot[px] = 0;
-        }
-#endif
         break;
     }
 
@@ -143,24 +107,11 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
             uint32_t lit = 0;
             for (uint32_t k = 0; k < nrow; k++) {
                 const uint32_t c = r0 + k;
-                lit += (uint32_t)(vr[c >> 3u] >> (c & 7u)) & 1u;
+                lit |= (uint32_t)(vr[c >> 3u] >> (c & 7u)) & 1u;
             }
-#if defined(INVADERS_SMOOTH)
-            g_cov[x] = (uint8_t)(g_cov[x] + lit);
-            g_tot[x] = (uint8_t)(g_tot[x] + nrow);
-#else
             if (lit) buf[x] = COLOR_WHITE;
-#endif
             x += rep[sx];
         }
-#if defined(INVADERS_SMOOTH)
-        for (uint32_t px = av_yoko.x0; px < av_yoko.x1; px++) {
-            const uint32_t t = g_tot[px];
-            if (t && g_cov[px])
-                buf[px] = grey5[(g_cov[px] * 4u + t / 2u) / t];
-            g_cov[px] = 0; g_tot[px] = 0;
-        }
-#endif
         break;
     }
 

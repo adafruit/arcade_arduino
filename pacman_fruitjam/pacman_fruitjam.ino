@@ -94,6 +94,29 @@ void loop() {
     bool rotate = hal_input_read(HAL_BTN_ROTATE);
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
 
+    // Scripted play, opt-in:
+    //   --build-property compiler.cpp.extra_flags=-DTEST_AUTOSTART=1
+    // Attract mode understates the frame budget 2-3x -- every measurement
+    // this project took from attract is a lower bound (DEVNOTES #82,
+    // DISPLAY_GEOMETRY.md "Measure in gameplay, not in attract"). This puts
+    // a coin in and walks Pac-Man around so the numbers are gameplay
+    // numbers. The cycle repeats so a game over re-enters.
+#ifdef TEST_AUTOSTART
+    {
+        static uint32_t autof = 0;
+        autof++;
+        const uint32_t f = autof % 6000u;
+        if (f > 600u && f < 660u)  coin   = true;
+        if (f > 780u && f < 840u)  start1 = true;
+        if (f > 1000u) {
+            // Rotate through the four directions so the maze actually gets
+            // traversed and ghosts leave the house and chase.
+            const uint32_t d = (f / 90u) & 3u;
+            left  = (d == 0); up = (d == 1); right = (d == 2); down = (d == 3);
+        }
+    }
+#endif
+
     pacman_input_update(&g_system, coin, start1, start2, up, down, left, right, rotate, mirror);
 
     // Frame-budget heartbeat, matching the other sketches. `frame` alone
@@ -105,14 +128,20 @@ void loop() {
     // This game gained the heartbeat when landscape/180 stopped using a
     // whole-frame burst (DISPLAY_GEOMETRY.md phase 3): "is the red gone" is
     // a number, not an impression, and it has to be checked per rotation.
+    // Totals beside every maximum -- a bare max is not a cost, and mixing a
+    // window max with a single-frame sample is what hid Galaga's real
+    // problem through five failed optimisations (DEVNOTES #84/#85).
     static uint32_t frame_count = 0;
-    static uint32_t work_max = 0;
+    static uint32_t work_max = 0, work_sum = 0, work_n = 0;
+    static uint32_t blk_sum = 0, blk_max = 0;
     uint32_t t0 = micros();
     pacman_run_frame(&g_system);
     uint32_t frame_us   = micros() - t0;
     uint32_t blocked_us = hal_video_take_blocked_us();
     uint32_t work_us    = (frame_us > blocked_us) ? (frame_us - blocked_us) : 0;
     if (work_us > work_max) work_max = work_us;
+    if (blocked_us > blk_max) blk_max = blocked_us;
+    work_sum += work_us; blk_sum += blocked_us; work_n++;
 
     if ((++frame_count % 60u) == 0) {
         Serial.print("[pacman] frame ");
@@ -123,15 +152,28 @@ void loop() {
         Serial.print(work_us);
         Serial.print("us, blocked ");
         Serial.print(blocked_us);
-        Serial.print("us), work_max ");
+        Serial.print("us), work_MEAN ");
+        Serial.print(work_n ? work_sum / work_n : 0);
+        Serial.print("us, work_max ");
         Serial.print(work_max);
+        Serial.print("us, blk_MEAN ");
+        Serial.print(work_n ? blk_sum / work_n : 0);
+        Serial.print("us, blk_MAX ");
+        Serial.print(blk_max);
         Serial.print("us, rot ");
         Serial.print((int)g_system.rotation);
         Serial.print(", stretch ");
         Serial.print((int)av_geom_get_stretch());
         Serial.print(", starve ");
         Serial.print(hal_video_take_starve_count());
-        Serial.println("/60");
+        // Runway actually left at the worst moment -- meaningful at any
+        // queue depth, unlike a starve threshold. See DEVNOTES #85.
+        Serial.print(", minq ");
+        Serial.print(hal_video_take_min_valid_level());
+        Serial.print("/");
+        Serial.print(hal_video_scanbuf_count());
+        Serial.println(" /60");
+        work_sum = blk_sum = work_n = 0; work_max = 0; blk_max = 0;
     }
 }
 

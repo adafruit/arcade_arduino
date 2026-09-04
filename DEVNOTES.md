@@ -4173,3 +4173,37 @@ window max) sat beside `blocked` (one frame) beside no mean at all. Print a
 total and a count next to every maximum. The whole investigation from #82
 onward -- five failed optimisations, two abandoned rewrites -- would have
 started in the right place with one extra number.
+
+### 86. Pac-Man re-verified after the queue change, and measured in gameplay for the first time
+
+The #85 runway change (`N_SCANBUF` 8 -> 32, colour queues re-initialised)
+touches `ArcadeBoard_FruitJam`, so it touches every game. Pac-Man checked
+first, and checked the way the standing note in DISPLAY_GEOMETRY.md asks for
+-- **with a coin in**, not in attract. `-DTEST_AUTOSTART=1` on the sketch
+drops a credit and walks Pac-Man through the maze so the ghosts leave the
+house and chase. All four rotations, aspect correction on, ~4 minutes each:
+
+| rot | | work mean | work max | starve | worst runway |
+|---|---|---|---|---|---|
+| 0 | landscape, mirrored | 10,168us | 10,370us | 0 | 27/32 |
+| 1 | tate, mirrored | 10,942us | 11,234us | 0 | 27/32 |
+| 2 | landscape, upright | 10,150us | 10,281us | 0 | 27/32 |
+| 3 | tate, upright | 11,969us | 12,214us | 0 | 28/32 |
+
+Zero starvation everywhere, and the queue never dropped below 27 of 32 --
+more than five times the runway the whole pipeline used to have. Against a
+15,238us active-video window Pac-Man has 3-5ms of headroom in gameplay.
+
+Two things worth keeping:
+
+- **Gameplay costs about 1ms more than attract here**, not the 2-3x the
+  Galaga note warned about. The warning still stands -- it is game-specific,
+  and Galaga is the one with a formation of 45-64 sprites -- but Pac-Man's
+  sprite count barely moves between attract and play, so its attract numbers
+  were nearly honest. Ms. Pac-Man should behave the same; Burger Time is
+  still the one with the least headroom and the most to lose.
+- **The mirrored twins are not free.** rot 3 costs 980us more than rot 1, and
+  rot 0 costs 89us more than rot 2. The reversed emit paths do slightly
+  different work, which is the same asymmetry that hid two unoptimised
+  mirrored twins in Burger Time (#81). Small here, and harmless with this
+  much runway, but it is why every rotation gets measured rather than one.

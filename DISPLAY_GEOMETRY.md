@@ -13,12 +13,19 @@ Status, newest first — the plan is section 7, the remaining work section 8:
 | 1 — one coordinate space (320x240 canvas) | **done**, verified byte-identical |
 | 2 — shared geometry module + aspect correction | **done**, correction OFF by default |
 | 2b — making the correction affordable | **partly**; DKong still ~1.0ms short in tate |
-| 3 — column primitive, kills the landscape red | **Pac-Man done** (+ merge downsampling); 6 games to go |
+| 3 — column primitive, kills the landscape red | **Pac-Man + Ms. Pac-Man done** (+ merge downsampling); 5 games to go |
 | 4 — collapse the rotation cases | not started |
 | 5 — cleanups | not started |
 
-**Pac-Man is complete**: all four rotations, correct aspect ratio on by
-default, 60fps, zero starvation (DEVNOTES #79/#80).
+**Pac-Man and Ms. Pac-Man are complete**: all four rotations, correct aspect
+ratio on by default, 60fps, zero starvation, confirmed on the physical
+display (DEVNOTES #79/#80).
+
+**Landscape is now the CHEAP orientation** on both -- 9.5ms against 8.9ms on
+Pac-Man, 10.5ms against 12.8ms on Ms. Pac-Man -- because a column slice
+walks 224 pixels where a row slice walks 288, and yoko's aspect correction
+narrows rather than upsamples. That is the exact inversion of where this
+started, when landscape was the orientation that burst and went red.
 
 **Yoko discards a third of the raster no matter what** (section 5), so HOW it
 is discarded is a visible decision: nearest-neighbour deletes whole 1-pixel
@@ -565,6 +572,11 @@ as its own piece of work, last.
 
 Order: Pac-Man first (it has a harness and the smallest cached renderer),
 confirm on hardware, then Ms. Pac-Man / Burger Time / Galaga, then DKong.
+**Pac-Man and Ms. Pac-Man are done.** The two were near-identical -- a diff
+of their `render_native_row()` bodies is four lines, all names -- so the
+second took one pass with no surprises. Burger Time and Galaga are separate
+renderers and will not port by substitution, but neither has per-line sprite
+arbitration, so both are transpositions rather than redesigns.
 
 > **Tradeoff worth naming:** column-order CPU interleaving shears the image
 > instead of tearing it, because a native column is sampled across the whole

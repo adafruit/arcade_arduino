@@ -2275,10 +2275,36 @@ of budget (see #36 for the numbers), and **confirmed playing correctly on
 the physical display** — no tearing, consistent with Pac-Man and Lunar
 Rescue after the same change.
 
-`mspacman_fruitjam` (the full Ms. Pac-Man game) in **portrait (rotation 3)**,
-with the real `mspacman_assets/rom/` set -- the aux board's encrypted bank,
-its 40 patches and its address-triggered bank switching all working on real
-hardware, at 63% RAM.
+`mspacman_fruitjam` (the full Ms. Pac-Man game), with the real
+`mspacman_assets/rom/` set -- the aux board's encrypted bank, its 40 patches
+and its address-triggered bank switching all working on real hardware.
+
+**ALL FOUR ROTATIONS CONFIRMED, at the correct aspect ratio** (#79/#80), the
+second game in the project complete in every orientation. Observed on the
+physical display and measured alongside, aspect correction on throughout:
+
+| rotation | `work` | `work_max` | `starve`/60 |
+|---|---|---|---|
+| 0 landscape (inverted) | 10.70-10.74ms | 12410us | **0** |
+| 1 tate CCW | 11.65-11.71ms | 13270us | **0** |
+| 2 landscape (upright) | 10.54-10.60ms | 12337us | **0** |
+| 3 tate CW (default) | 12.65-12.80ms | 14343us | **0** |
+
+`frame` pinned at 16650-16666us throughout. RAM fell from 63% to **39%**
+(334,984 -> 207,336 bytes) when the 129KB `frame_cache` went.
+
+Two things the numbers say. **This game is meaningfully heavier than
+Pac-Man** -- 12.8ms against 8.9ms in the same default rotation, which is the
+banked/encrypted ROM decode and not the video work; it leaves ~2.3ms of
+headroom rather than Pac-Man's ~6ms, so this is the one to measure first if
+anything is ever added to its frame. And **landscape is now the CHEAP
+orientation** (10.5ms against 12.8ms), because a column slice walks 224
+pixels where a row slice walks 288 and yoko's aspect correction narrows
+rather than upsamples. That is the exact inversion of where this started:
+landscape used to be the orientation that burst and went red.
+
+As with Pac-Man, **rotation 2 is the upright landscape and 0 is
+upside-down** (#33).
 
 **This port reached working hardware with zero hardware debug cycles** --
 the first one in the project to do so. Everything was found and fixed in

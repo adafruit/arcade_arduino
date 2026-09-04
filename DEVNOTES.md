@@ -4750,3 +4750,44 @@ spare and the merge spends about 1.5ms of it.
 looking, when a second, independent fix from the same phase had also passed
 it by. When a game is skipped for one reason, check what else was bundled
 with the thing it was skipped from.
+
+### 97. Yoko's residual squashing is arithmetic, and smoothing it costs 5.4ms
+
+After the merge of #96 the yoko score lines were legible but visibly
+squashed. That part is not a bug and cannot be fixed where it appears:
+
+```
+yoko long axis: 256 raster rows -> 240 canvas rows
+  16 of 240 canvas rows carry TWO raster rows -- every 15th, exactly
+  an 8-row glyph loses a row whenever a merge point lands inside it: 53%
+yoko short axis, corrected: 224 -> 180, 44 of 180 columns doubled (24%)
+```
+
+256 does not fit in 240. **The only real fix is a taller canvas**, i.e.
+`dvi_vertical_repeat = 1` and a 320x480 canvas, where yoko's long axis
+becomes a 256 -> 480 UPSAMPLE and loses nothing. That is what the reference
+`invaders_pico` ran (DISPLAY_GEOMETRY.md section 3), and forcing it through
+this fork's low-level API produced a solid red screen on real hardware --
+see hal_video_fruitjam.cpp. It would also double the scanlines Core 0
+produces per frame and would rework every geometry constant, so it is a
+project-sized change, not a fix.
+
+What CAN change is how the loss reads. The plain merge is a hard OR, so a
+doubled row is fully lit and a glyph becomes 7 rows of solid white -- it
+looks like a dropped scanline. Weighting each canvas pixel by how much of it
+the lit source covers turns the same geometry into what a scaler or a CRT
+shows: the compressed row is dimmer rather than missing.
+
+Added as `-DINVADERS_SMOOTH=1`, opt-in, and **measured before recommending
+it**: landscape corrected in gameplay went from `work_MEAN` 7,541us to
+**12,925us**. 5.4ms for a cosmetic change, because every scanline now clears
+and re-scans its 180-224 canvas columns for the weighting pass.
+
+It fits on this game and only this game -- Invaders is the cheapest in the
+project with ~9ms spare (#95); the same 5.4ms would put Burger Time and
+Donkey Kong straight over the frame budget. So it stays a flag, off by
+default, and would need the accumulator pass folded into the emit (the way
+#89 folded the palette lookup in) before it could be offered anywhere else.
+
+**Worth stating plainly: this is a taste call on 1-bit pixel art, not a
+correctness fix.** The geometry is identical either way.

@@ -83,7 +83,7 @@ which is the intent.
 | UP / DOWN / LEFT / RIGHT | 4-way joystick |
 | ROTATE | Cycle screen rotation (0°/90° CCW "tate"/180°/270° CW) |
 | MIRROR | Toggle horizontal mirror (for Pepper's-Ghost half-silvered-mirror cabinets) |
-| STRETCH (Button 1) | Toggle aspect-ratio correction. Which setting looks right depends on your MONITOR, not the game: a 16:9 panel already stretches a rotated picture on its own, while a panel forced to 4:3 — or a real 4:3 panel — does not. Try both and keep the one that looks correct. |
+| STRETCH (Button 1) | Toggle aspect-ratio correction — **on by default on this game**, because its raster is already close to 4:3 so the correction is nearly free and nearly invisible (+3.7%). Press to turn it off. Which setting looks right depends on your MONITOR, not the game: a 16:9 panel already stretches a rotated picture on its own, while a panel forced to 4:3 — or a real 4:3 panel — does not. Try both and keep the one that looks correct. |
 
 Identical to `pacman_fruitjam`'s: a Ms. Pac-Man cabinet is the same 4-way
 joystick with no action button, so `HAL_BTN_SHOOT` is unused.

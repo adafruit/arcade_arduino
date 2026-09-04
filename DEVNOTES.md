@@ -4875,9 +4875,14 @@ buffers (#89).
 So the standing summary in #98 -- "affordable everywhere except Burger Time's
 yoko and Donkey Kong's yoko" -- was **wrong about Donkey Kong**, and only
 half right about Burger Time, which does run, just with the least margin in
-the project. Corrected: the aspect correction is affordable in every game and
-every rotation. What differs is how much runway is left, and the only place
-that is genuinely tight is Burger Time's rotation 2.
+the project.
+
+> **AND THIS ENTRY'S OWN CORRECTION WAS THEN OVERCORRECTED.** It concluded
+> "the aspect correction is affordable in every game and every rotation".
+> #101 found one place it is not: Galaga's yoko, which had never been
+> measured because a rendering bug (#100) was making it look cheap by
+> skipping work. Accurate statement: affordable everywhere EXCEPT Galaga's
+> landscape, which is pinned to 1:1.
 
 The wide-store merge that would fix that remains unbuilt and is now the one
 piece of known-worthwhile optimisation left in the display work. It is

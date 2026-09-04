@@ -5,12 +5,16 @@ SPDX-License-Identifier: MIT
 
 # Display geometry: aspect ratio, rotation, and the landscape red screen
 
-**ALL SEVEN GAMES ARE CLEAN IN ALL FOUR ROTATIONS, and the aspect
-correction is affordable in every game and every rotation** — verified on
+**ALL SEVEN GAMES ARE CLEAN IN ALL FOUR ROTATIONS**, and the aspect
+correction is affordable everywhere except Galaga's landscape — verified on
 physical hardware, in gameplay rather than attract, game by game
-(DEVNOTES #79–#99). What differs between them is how much pipeline runway is
-left; the only genuinely tight combination is Burger Time's rotation 2 with
-the correction on, at 13 of 32 buffers.
+(DEVNOTES #79–#101).
+
+What differs between the games is how much pipeline runway is left. The two
+thin spots are Galaga's tate with the correction on (4 of 32 buffers) and
+Burger Time's rotation 2 (13 of 32); both hold 60fps with zero starvation.
+Galaga's landscape is the one place the correction is switched off, because
+there it costs +2,576us and exceeds the whole frame — see section 8.
 
 Status, newest first — the plan is section 7, the remaining work section 8:
 
@@ -18,8 +22,8 @@ Status, newest first — the plan is section 7, the remaining work section 8:
 |---|---|
 | 0 — honest host dumps | **done** |
 | 1 — one coordinate space (320x240 canvas) | **done**, verified byte-identical |
-| 2 — shared geometry module + aspect correction | **done**, correction OFF by default |
-| 2b — making the correction affordable | **done.** The wide-store upsampling emit (DEVNOTES #89) took the tate correction from ~1,712us to 66us on Burger Time and 262us on DKong. Yoko still uses the scalar merge and costs ~0.7–1.4us/frame more, which every game affords (#99) |
+| 2 — shared geometry module + aspect correction | **done.** Correction defaults OFF, except Pac-Man and Ms. Pac-Man which ship with it ON (their raster is already close to 4:3, so it is nearly free). Runtime toggle on Button 1 (#90) |
+| 2b — making the correction affordable | **done for tate.** The wide-store upsampling emit (DEVNOTES #89) took the tate correction from ~1,712us to 66us on Burger Time and 262us on DKong. **Yoko still uses the scalar merge** and costs ~0.7–2.6ms a frame, which every game affords except Galaga (#99, #101) |
 | 3 — column primitive, kills the landscape red | **DONE, all seven.** Pac-Man, Ms. Pac-Man, Burger Time, Galaga, Donkey Kong were converted. Space Invaders and Lunar Rescue needed no conversion — their VRAM is already a framebuffer, so there was no whole-frame burst (DEVNOTES #95) — but both DID need the #80 merge, which had been bundled with the conversion they were skipped from (DEVNOTES #96/#98) |
 | 4 — collapse the rotation cases | not started, and now optional — the four cases are verified per game on hardware |
 | 5 — cleanups | partly: `N_SCANBUF` raised 8→32 (#85) and DKong's 114KB frame cache deleted (#92). The 640→320 scanline-buffer shrink is still open and would halve the 40KB the deeper queue costs |
@@ -644,30 +648,43 @@ fast path" — with one code path there is nothing to special-case.
 
 ---
 
-## 8. What is left, and how it gets verified
+## 8. What is left
 
-Two gaps remain, and they are independent — neither blocks the other.
+Both of the original gaps are closed. Everything below is optional.
 
 | | state |
 |---|---|
-| **All orientations without red** | broken on the 5 tile+sprite games. Phase 3. |
-| **Correct aspect ratio** | built and correct, OFF by default because DKong cannot afford it. Phase 2b's remaining lever. |
+| **All orientations without red** | **done.** All seven games, all four rotations, verified in gameplay on hardware. |
+| **Correct aspect ratio** | **done and affordable**, with one documented exception: Galaga's yoko (DEVNOTES #101). |
 
-Space Invaders and Lunar Rescue are already clean in all four rotations
-(bitmap VRAM, no compositing step, nothing to burst) — and they have ample
-headroom, so they are the two games that could have the correction switched
-on today.
+**The one exception.** Galaga cannot afford the correction in landscape:
++2,576us takes it past the whole 16,667us frame, because it is the most
+expensive machine here and yoko-corrected also loses its `col_1to1`
+shortcut. Its yoko is pinned to the historical 1:1 layout and Button 1 does
+nothing in rotations 0 and 2. Every other game applies the correction in
+every rotation.
 
-**Which games actually need the correction**, worst first: Burger Time
-(+33.3% too wide, and among the cheapest games), Invaders / Lunar Rescue /
-DKong (+16.7%), Pac-Man / Ms. Pac-Man / Galaga (+3.7%, close to invisible).
-Note the mismatch: the games that need it least are two of the three that
-can least afford it. **Enabling it per-game rather than globally is a
-legitimate outcome** if the emit rewrite does not land.
+**Optional work, in the order it would pay off:**
 
-Cost is only known for DKong. Galaga is the other tight game, but #84 shows
-why that is: its renderer is only 23% of its frame, so an emit rewrite buys
-it far less than the CPU work would. The remaining five have room.
+1. **A wide-store MERGE.** #89's wide-store emit only covers upsampling;
+   yoko downsamples and still uses the scalar `av_emit_row_merge()`, which
+   stores conditionally and so cannot pack two pixels per word. Worth
+   ~0.6-1.4ms in yoko on every game. It is what would let Galaga's landscape
+   correction back on, and would give Burger Time's rotation 2 more than its
+   current 13 of 32 buffers.
+2. **Persisting the three display settings** across a power cycle. Design and
+   costs are worked out in DEVNOTES #91; nothing is built.
+3. **Shrinking the scanline buffers 640 -> 320.** Would halve the 40KB the
+   32-buffer queue costs (#85). Phase 5.
+4. **Collapsing the four rotation cases** per renderer. Phase 4, and now
+   least valuable of the four: every case is verified on hardware per game,
+   so this is tidiness rather than correctness.
+
+**None of it is load-bearing.** A `dvi_vertical_repeat = 1` / 320x480 canvas
+is the only change that would fix something the current design genuinely
+cannot (yoko's 256 -> 240 row squash, DEVNOTES #97), and it is project-sized:
+it doubles the scanlines Core 0 produces, reworks every geometry constant,
+and previously produced a solid red screen on this PicoDVI fork.
 
 ### Where every game ended up
 
@@ -682,8 +699,8 @@ level seen, of 32.
 | Pac-Man | 11,969us | 0 | 27/32 | correction on by default |
 | Ms. Pac-Man | 12,899us | 0 | 26/32 | correction on by default; ~900us over Pac-Man for the daughterboard |
 | Donkey Kong | 13,454us | 0 | 20/32 | |
-| Galaga | ~13,800us | 0 | 21/32 | 3 Z80s; 77% of its frame is CPU (#84) |
-| Burger Time | 15,364us | 0 | **13/32** | tightest in the project |
+| Galaga | 16,309us | 0 | **4/32** | 3 Z80s; 77% of its frame is CPU (#84). Tate only — its yoko is pinned to 1:1 (#101). Thinnest margin in the project |
+| Burger Time | 15,364us | 0 | 13/32 | needs the correction most (33.3%, a square raster) |
 
 ### Donkey Kong: done, all four rotations
 

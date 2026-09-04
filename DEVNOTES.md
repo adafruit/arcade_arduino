@@ -4803,3 +4803,42 @@ just a second way for the two to diverge, the same reason
 Recorded here so it is not re-attempted: the smoothing works, it costs
 5.4ms, and it is not wanted. If the squashing is ever to be genuinely fixed
 it needs the taller canvas above, not filtering.
+
+### 98. Lunar Rescue: the same yoko merge, with colour
+
+Last game. Same 8080bw VRAM layout as Space Invaders, same
+destination-driven nearest-neighbour yoko loop, therefore the same pixel
+DELETION (#96) -- found by reading the code rather than by looking at a
+screen, because #96 had just established the pattern.
+
+Two differences, both from this game having colour where Invaders is 1-bit:
+
+- The colour comes from `block_color(dx, chi)` and `chi` derives from the
+  raster row, so **each merged row carries its own colour**. The merge has to
+  fetch the colour for whichever row actually won, not for the row the old
+  loop happened to pick.
+- **Ties go to the FIRST lit sample, not the last.** That keeps the pixel the
+  old nearest-neighbour loop would have chosen whenever it was lit, so the
+  merge only ever ADDS back what was being dropped instead of also
+  reshuffling colours. `buf` is cleared at the top of `render_scanline()`, so
+  "already written" is just non-zero.
+
+Measured on hardware, all four rotations, aspect correction ON (there is no
+`lrescue_host`, so this one is hardware-only):
+
+| rot | | work mean | work max | starve | runway |
+|---|---|---|---|---|---|
+| 0 | landscape | 8,176us | 9,058us | 0 | 16/32 |
+| 1 | tate | 6,039us | 6,774us | 0 | 17/32 |
+| 2 | landscape, mirrored | 8,066us | 8,764us | 0 | 17/32 |
+| 3 | tate, mirrored | 6,306us | 7,023us | 0 | 17/32 |
+
+Landscape costs ~2ms more than tate, which is the merge doing real work on
+the downsampled axes; tate upsamples both and skips it entirely. Runway sits
+at 16-17 of 32 rather than Invaders' 28 -- this game carries more CPU and
+audio per frame -- but `starve` is 0 everywhere and half the queue is in hand.
+
+**With this, all seven games are clean in all four rotations**, and the
+aspect correction is affordable everywhere except Burger Time's yoko and
+Donkey Kong's yoko, which still route through the scalar merge that #89's
+wide-store emit did not reach.

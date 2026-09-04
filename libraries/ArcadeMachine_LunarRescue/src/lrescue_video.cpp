@@ -78,14 +78,40 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
         // av_yoko.col maps canvas columns onto the SHORT axis, which in yoko
         // must NARROW to 180 canvas columns rather than sit at 1:1. See
         // arcade_video_geom.h.
-        const uint32_t col = 255u - av_yoko.row[dvi_y];
-        const uint32_t chi = col >> 3u;
-        const uint32_t bit = col & 7u;
-        for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
-            const uint32_t i  = av_yoko.col[x];
-            const uint32_t dx = mir ? (uint32_t)(LRESCUE_GAME_HEIGHT - 1) - i : i;
-            if ((vram[dx * 32u + chi] >> bit) & 1u)
-                buf[x] = block_color(sys, dx, chi);
+        // MERGED, both axes -- same fix and same reason as Space Invaders
+        // (DEVNOTES #96), which shares this VRAM layout. Yoko downsamples
+        // the long axis 256 -> 240 canvas rows in BOTH aspect modes, and the
+        // short axis 224 -> 180 when the correction is on. The
+        // destination-driven loop this replaces read ONE source sample per
+        // canvas pixel and never looked at the rest, which on 1-pixel line
+        // art deletes features rather than thinning them -- on Invaders it
+        // made the score line unreadable.
+        //
+        // Two differences from Invaders, both because this game has colour:
+        //
+        //  - The colour comes from block_color(dx, chi) and `chi` is derived
+        //    from the raster row, so each merged row carries its OWN colour.
+        //  - Ties go to the FIRST lit sample, not the last. That keeps the
+        //    pixel the old nearest-neighbour loop would have chosen whenever
+        //    it was lit, so the merge only ever ADDS what was being dropped
+        //    instead of also reshuffling colours. `buf` is cleared at the top
+        //    of this function, so "already written" is simply non-zero.
+        const uint32_t r0   = av_yoko.row[dvi_y];
+        const uint32_t nrow = av_yoko.rowrep[dvi_y] ? av_yoko.rowrep[dvi_y] : 1u;
+        const uint32_t n    = av_yoko.src_n;
+        const uint8_t *rep  = av_yoko.rep;
+        uint32_t x = av_yoko.x0;
+        for (uint32_t sx = 0; sx < n; sx++) {
+            const uint32_t dx = mir ? (uint32_t)(LRESCUE_GAME_HEIGHT - 1) - sx : sx;
+            for (uint32_t k = 0; k < nrow; k++) {
+                const uint32_t c = 255u - (r0 + k);
+                const uint32_t ci = c >> 3u;
+                if (((vram[dx * 32u + ci] >> (c & 7u)) & 1u) && !buf[x]) {
+                    buf[x] = block_color(sys, dx, ci);
+                    break;
+                }
+            }
+            x += rep[sx];
         }
         break;
     }
@@ -130,14 +156,25 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
 
     case 2: {
         // 180 deg (landscape upside-down): dx reversed, dy un-reversed.
-        const uint32_t col = av_yoko.row[dvi_y];
-        const uint32_t chi = col >> 3u;
-        const uint32_t bit = col & 7u;
-        for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
-            const uint32_t i  = av_yoko.col[x];
-            const uint32_t dx = mir ? i : (uint32_t)(LRESCUE_GAME_HEIGHT - 1) - i;
-            if ((vram[dx * 32u + chi] >> bit) & 1u)
-                buf[x] = block_color(sys, dx, chi);
+        // Merged exactly as case 0 -- see the comment there. Only `col`'s
+        // reversal and dx's ternary differ, which is what makes this a 180
+        // rather than a mirror of it (DEVNOTES #21).
+        const uint32_t r0   = av_yoko.row[dvi_y];
+        const uint32_t nrow = av_yoko.rowrep[dvi_y] ? av_yoko.rowrep[dvi_y] : 1u;
+        const uint32_t n    = av_yoko.src_n;
+        const uint8_t *rep  = av_yoko.rep;
+        uint32_t x = av_yoko.x0;
+        for (uint32_t sx = 0; sx < n; sx++) {
+            const uint32_t dx = mir ? sx : (uint32_t)(LRESCUE_GAME_HEIGHT - 1) - sx;
+            for (uint32_t k = 0; k < nrow; k++) {
+                const uint32_t c = r0 + k;
+                const uint32_t ci = c >> 3u;
+                if (((vram[dx * 32u + ci] >> (c & 7u)) & 1u) && !buf[x]) {
+                    buf[x] = block_color(sys, dx, ci);
+                    break;
+                }
+            }
+            x += rep[sx];
         }
         break;
     }

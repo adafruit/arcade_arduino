@@ -14,6 +14,7 @@
 // Core 0: game emulation, input polling, board-to-game input mapping.
 // Core 1: hal_video_run() -- drives the DVI signal; never returns.
 #include <arcade_hal_video.h>
+#include <arcade_video_geom.h>
 #include <arcade_hal_input.h>
 #include <pacman_machine.h>
 #include <pacman_video.h>
@@ -26,6 +27,14 @@ static bool            g_assets_ok   = false;
 static uint16_t        g_error_color = 0;
 
 void setup() {
+    // Serial for the frame-budget heartbeat in loop(). Before Core 1 starts
+    // the DVI pump is the one safe place to block briefly, giving a
+    // connecting serial monitor time to attach. This sketch carried no
+    // serial at all until landscape/180 needed verifying per rotation.
+    Serial.begin(115200);
+    delay(1500);
+    Serial.println("[pacman] boot: serial up");
+
     // PicoDVI's 640x480 mode requires the system clock to equal the TMDS
     // bit clock (252 MHz) -- must happen before any other peripheral init.
     set_sys_clock_khz(252000, true);
@@ -34,6 +43,20 @@ void setup() {
     // setup only -- does not start the physical DVI signal, does not touch
     // storage).
     pacman_init(&g_system);
+
+    // Boot straight into a chosen rotation, for measuring one orientation
+    // without a hand on the rotate button:
+    //   arduino-cli compile --build-property compiler.cpp.extra_flags=-DTEST_ROTATION=0
+    // 0 = landscape, 1 = 90 CCW tate, 2 = 180, 3 = 90 CW tate (this game's
+    // default -- see pacman_init()).
+#ifdef TEST_ROTATION
+    g_system.rotation = (uint8_t)(TEST_ROTATION);
+#endif
+    // Aspect-ratio correction (arcade_video_geom.h), same build-flag shape:
+    //   --build-property compiler.cpp.extra_flags=-DTEST_STRETCH=1
+#ifdef TEST_STRETCH
+    av_geom_set_stretch(TEST_STRETCH != 0);
+#endif
 
     // Storage/ROM/PROM loading -- blocking, can be slow (SD card retries).
     // Deliberately finishes before Core 1 is allowed to start the DVI pump
@@ -72,7 +95,44 @@ void loop() {
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
 
     pacman_input_update(&g_system, coin, start1, start2, up, down, left, right, rotate, mirror);
+
+    // Frame-budget heartbeat, matching the other sketches. `frame` alone
+    // means nothing because hal_video_acquire_scanline() BLOCKS until Core 1
+    // frees a buffer -- the loop measures max(work, DVI frame period) and
+    // pins at ~16.7ms as soon as the work fits. `work` is the real Core 0
+    // cost, and `starve` is the only thing that sees the red (DEVNOTES #35).
+    //
+    // This game gained the heartbeat when landscape/180 stopped using a
+    // whole-frame burst (DISPLAY_GEOMETRY.md phase 3): "is the red gone" is
+    // a number, not an impression, and it has to be checked per rotation.
+    static uint32_t frame_count = 0;
+    static uint32_t work_max = 0;
+    uint32_t t0 = micros();
     pacman_run_frame(&g_system);
+    uint32_t frame_us   = micros() - t0;
+    uint32_t blocked_us = hal_video_take_blocked_us();
+    uint32_t work_us    = (frame_us > blocked_us) ? (frame_us - blocked_us) : 0;
+    if (work_us > work_max) work_max = work_us;
+
+    if ((++frame_count % 60u) == 0) {
+        Serial.print("[pacman] frame ");
+        Serial.print(frame_count);
+        Serial.print(", frame ");
+        Serial.print(frame_us);
+        Serial.print("us (work ");
+        Serial.print(work_us);
+        Serial.print("us, blocked ");
+        Serial.print(blocked_us);
+        Serial.print("us), work_max ");
+        Serial.print(work_max);
+        Serial.print("us, rot ");
+        Serial.print((int)g_system.rotation);
+        Serial.print(", stretch ");
+        Serial.print((int)av_geom_get_stretch());
+        Serial.print(", starve ");
+        Serial.print(hal_video_take_starve_count());
+        Serial.println("/60");
+    }
 }
 
 void setup1() {

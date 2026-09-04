@@ -45,3 +45,10 @@ tools/m6502_test/programs/
 # Claude Code worktrees -- transient checkouts with their own build output.
 # Narrow on purpose: a future tracked .claude/settings.json stays visible.
 .claude/worktrees/
+
+# Built firmware for testing / GitHub release assets. The binaries are
+# build output and belong on a release, not in the tree; the directory's
+# own README and build script are tracked.
+dist/*
+!dist/README.md
+!dist/build_all.sh

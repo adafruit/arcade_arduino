@@ -5,6 +5,13 @@ SPDX-License-Identifier: MIT
 
 # Display geometry: aspect ratio, rotation, and the landscape red screen
 
+**ALL SEVEN GAMES ARE CLEAN IN ALL FOUR ROTATIONS, and the aspect
+correction is affordable in every game and every rotation** — verified on
+physical hardware, in gameplay rather than attract, game by game
+(DEVNOTES #79–#99). What differs between them is how much pipeline runway is
+left; the only genuinely tight combination is Burger Time's rotation 2 with
+the correction on, at 13 of 32 buffers.
+
 Status, newest first — the plan is section 7, the remaining work section 8:
 
 | phase | state |
@@ -12,10 +19,10 @@ Status, newest first — the plan is section 7, the remaining work section 8:
 | 0 — honest host dumps | **done** |
 | 1 — one coordinate space (320x240 canvas) | **done**, verified byte-identical |
 | 2 — shared geometry module + aspect correction | **done**, correction OFF by default |
-| 2b — making the correction affordable | **partly**; DKong ~1.0ms and Burger Time ~1.6ms short in tate |
+| 2b — making the correction affordable | **done.** The wide-store upsampling emit (DEVNOTES #89) took the tate correction from ~1,712us to 66us on Burger Time and 262us on DKong. Yoko still uses the scalar merge and costs ~0.7–1.4us/frame more, which every game affords (#99) |
 | 3 — column primitive, kills the landscape red | **DONE, all seven.** Pac-Man, Ms. Pac-Man, Burger Time, Galaga, Donkey Kong were converted. Space Invaders and Lunar Rescue needed no conversion — their VRAM is already a framebuffer, so there was no whole-frame burst (DEVNOTES #95) — but both DID need the #80 merge, which had been bundled with the conversion they were skipped from (DEVNOTES #96/#98) |
-| 4 — collapse the rotation cases | not started |
-| 5 — cleanups | not started |
+| 4 — collapse the rotation cases | not started, and now optional — the four cases are verified per game on hardware |
+| 5 — cleanups | partly: `N_SCANBUF` raised 8→32 (#85) and DKong's 114KB frame cache deleted (#92). The 640→320 scanline-buffer shrink is still open and would halve the 40KB the deeper queue costs |
 
 **Pac-Man and Ms. Pac-Man are complete**: all four rotations, correct aspect
 ratio on by default, 60fps, zero starvation, confirmed on the physical
@@ -661,6 +668,22 @@ legitimate outcome** if the emit rewrite does not land.
 Cost is only known for DKong. Galaga is the other tight game, but #84 shows
 why that is: its renderer is only 23% of its frame, so an emit rewrite buys
 it far less than the CPU work would. The remaining five have room.
+
+### Where every game ended up
+
+Gameplay measurements on hardware, worst rotation, aspect correction ON.
+Budget is the 15,238us active-video window; runway is the lowest scanline-queue
+level seen, of 32.
+
+| game | worst work | starve | runway | notes |
+|---|---|---|---|---|
+| Space Invaders | 6,744us | 0 | 28/32 | cheapest in the project |
+| Lunar Rescue | 8,176us | 0 | 16/32 | |
+| Pac-Man | 11,969us | 0 | 27/32 | correction on by default |
+| Ms. Pac-Man | 12,899us | 0 | 26/32 | correction on by default; ~900us over Pac-Man for the daughterboard |
+| Donkey Kong | 13,454us | 0 | 20/32 | |
+| Galaga | ~13,800us | 0 | 21/32 | 3 Z80s; 77% of its frame is CPU (#84) |
+| Burger Time | 15,364us | 0 | **13/32** | tightest in the project |
 
 ### Donkey Kong: done, all four rotations
 

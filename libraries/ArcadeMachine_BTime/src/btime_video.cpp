@@ -221,6 +221,24 @@ static uint8_t spread[256][8];
 static uint8_t char_px[1024][8][8];
 static uint8_t bg_px[64][16][16];
 
+// COLUMN-MAJOR TWINS of the two caches above: [code][col][row] rather than
+// [code][row][col]. 64KB + 16KB, and they exist for one measured reason.
+//
+// This game's row renderer was optimised into memcpy()s -- a char row is an
+// 8-byte copy, a background tile row a 16-byte copy -- and that is what took
+// it from red to a flat 60fps (DEVNOTES #59). Transposing it for yoko turned
+// every one of those copies into per-pixel indexed reads down a stride, and
+// measured on hardware that cost the renderer 4950us -> 9762us a frame,
+// against ~1.1ms of headroom. With these, a column read is the same 8- or
+// 16-byte copy a row read is, and the two orientations cost the same.
+//
+// Worth stating plainly because the intuition is wrong: on this part SRAM
+// is single-cycle and uniform, so the stride itself is not what hurt. What
+// hurt was replacing a handful of word-wide copies with 256 separate
+// byte loads, each with its own three-level index arithmetic.
+static uint8_t char_px_T[1024][8][8];   // [code][col][row]
+static uint8_t bg_px_T[64][16][16];     // [code][col][row]
+
 void btime_video_build_caches(void) {
     for (int b = 0; b < 256; b++)
         for (int j = 0; j < 8; j++)
@@ -233,8 +251,11 @@ void btime_video_build_caches(void) {
             const uint8_t *s0 = spread[base[GFX1_PLANE0]];
             const uint8_t *s1 = spread[base[GFX1_PLANE1]];
             const uint8_t *s2 = spread[base[GFX1_PLANE2]];
-            for (int j = 0; j < 8; j++)
-                char_px[code][row][j] = (uint8_t)((s2[j] << 2) | (s1[j] << 1) | s0[j]);
+            for (int j = 0; j < 8; j++) {
+                const uint8_t pen = (uint8_t)((s2[j] << 2) | (s1[j] << 1) | s0[j]);
+                char_px[code][row][j]   = pen;
+                char_px_T[code][j][row] = pen;
+            }
         }
     }
 
@@ -253,8 +274,12 @@ void btime_video_build_caches(void) {
             const uint8_t *h1 = spread[hi[GFX2_PLANE1]];
             const uint8_t *h2 = spread[hi[GFX2_PLANE2]];
             for (int j = 0; j < 8; j++) {
-                bg_px[code][row][j]     = (uint8_t)(BG_PEN_BASE + ((l2[j] << 2) | (l1[j] << 1) | l0[j]));
-                bg_px[code][row][8 + j] = (uint8_t)(BG_PEN_BASE + ((h2[j] << 2) | (h1[j] << 1) | h0[j]));
+                const uint8_t lp = (uint8_t)(BG_PEN_BASE + ((l2[j] << 2) | (l1[j] << 1) | l0[j]));
+                const uint8_t hp = (uint8_t)(BG_PEN_BASE + ((h2[j] << 2) | (h1[j] << 1) | h0[j]));
+                bg_px[code][row][j]         = lp;
+                bg_px[code][row][8 + j]     = hp;
+                bg_px_T[code][j][row]       = lp;
+                bg_px_T[code][8 + j][row]   = hp;
             }
         }
     }
@@ -547,11 +572,24 @@ BTIME_VRAMFUNC static void draw_chars_col(const btime_system *s, uint32_t raw_x,
                                    : (uint16_t)(32u * (31u - cx) + cy);
         const uint16_t code = (uint16_t)(s->videoram[offs] |
                                         ((s->colorram[offs] & 3u) << 8));
-        for (uint32_t sub = 0; sub < 8; sub++) {
-            const uint32_t char_row = flip ? (7u - sub) : sub;
-            const uint8_t pen = char_px[code][char_row][j];
-            if (transparent && pen == 0) continue;
-            pen_col[cy * 8u + sub] = pen;
+
+        // char_px_T is column-major, so the 8 pens down this cell are
+        // CONTIGUOUS -- the same 8-byte copy draw_chars_row() makes, which
+        // is the whole reason that cache exists.
+        const uint8_t *src = char_px_T[code][j];
+        uint8_t *out = &pen_col[cy * 8u];
+
+        if (!transparent && !flip) {
+            memcpy(out, src, 8);
+        } else if (!flip) {
+            for (uint32_t k = 0; k < 8; k++)
+                if (src[k]) out[k] = src[k];
+        } else {
+            for (uint32_t k = 0; k < 8; k++) {
+                const uint8_t pen = src[7u - k];
+                if (transparent && pen == 0) continue;
+                out[k] = pen;
+            }
         }
     }
 }
@@ -591,9 +629,16 @@ BTIME_VRAMFUNC static void draw_background_col(const btime_system *s, uint32_t r
                 const uint32_t m    = flip ? (15u - row16) : row16;
                 const uint32_t offs = col * 16u + m;
                 const uint8_t code  = btime_bg_map[tileoffset + offs] & 0x3F;
-                for (uint32_t sub = 0; sub < 16; sub++) {
-                    const uint32_t tile_row = flip ? (15u - sub) : sub;
-                    pen_col[row16 * 16u + sub] = bg_px[code][tile_row][j];
+
+                // Column-major, so this is the 16-byte copy
+                // draw_background_row() makes. Opaque, pen base baked in.
+                const uint8_t *src = bg_px_T[code][j];
+                uint8_t *out = &pen_col[row16 * 16u];
+                if (!flip) {
+                    memcpy(out, src, 16);
+                } else {
+                    for (uint32_t sub = 0; sub < 16; sub++)
+                        out[sub] = src[15u - sub];
                 }
             }
         }
@@ -688,13 +733,39 @@ BTIME_VRAMFUNC static void render_native_column(const btime_system *s, uint32_t 
 // file stopping at 320 by hand is what the rest of the project now gets
 // for free from the corrected HAL geometry (DISPLAY_GEOMETRY.md phase 1).
 
-// Converts the visible part of pen_col into RGB for the emit helpers, which
-// work in RGB565. 240 lookups a scanline, the same per-output-pixel palette
-// cost the row path pays.
-BTIME_VRAMFUNC static void col_to_rgb(uint16_t *out) {
+// Emits one yoko scanline straight out of pen_col: palette lookup, canvas
+// mapping and border clear in a single pass.
+//
+// The obvious composition -- convert pen_col to RGB, then call
+// av_emit_row_merge() -- costs an extra full pass over the column plus a
+// 320-pixel clear of the whole scanline, and this game has ~1.1ms of
+// headroom to spend (DEVNOTES #81). Only the borders need clearing here
+// because every canvas column inside [x0,x1) is written unconditionally by
+// the rep >= 1 case.
+//
+// The rep == 0 case is the merge: that raster sample was collapsed away by
+// the aspect correction's 240 -> 180 narrowing, and a non-background pen
+// must not be lost to it (DEVNOTES #80). `pen` is the game's own
+// transparency, which is what makes this test meaningful rather than a
+// comparison against black.
+BTIME_VRAMFUNC static void emit_yoko_col(uint16_t *buf, bool reverse) {
     const uint8_t *vis = &pen_col[BTIME_FIRST_VISIBLE_LINE];
-    for (uint32_t i = 0; i < (uint32_t)BTIME_GAME_HEIGHT; i++)
-        out[i] = pal565[vis[i]];
+    const uint8_t *rep = av_yoko.rep;
+    const uint32_t n    = av_yoko.src_n;
+    const uint32_t x0   = av_yoko.x0;
+    const uint32_t x1   = av_yoko.x1;
+    const uint32_t last = n - 1u;
+
+    uint32_t x = x0;
+    for (uint32_t s = 0; s < n; s++) {
+        const uint8_t pen = reverse ? vis[last - s] : vis[s];
+        const uint32_t r = rep[s];
+        if (r) { buf[x] = pal565[pen]; x += r; }
+        else if (pen) { buf[x] = pal565[pen]; }
+    }
+
+    for (uint32_t i = 0;  i < x0;              i++) buf[i] = 0;
+    for (uint32_t i = x1; i < HAL_VIDEO_WIDTH; i++) buf[i] = 0;
 }
 
 BTIME_VRAMFUNC static void emit_tate_row(uint16_t *buf, bool reverse) {
@@ -706,18 +777,39 @@ BTIME_VRAMFUNC static void emit_tate_row(uint16_t *buf, bool reverse) {
     // background cache, base baked in), so the values are already in range
     // and an `& 0x0F` per pixel would be 320 wasted operations per scanline.
     if (!av_tate.col_1to1) {
-        // Aspect-corrected: av_tate.col spreads the raster's 240 columns
-        // over all 320 canvas columns. This game had the project's only
-        // working version of this correction, as a private `col * 3 / 4`;
-        // the shared table gives the identical mapping (320->240 is exactly
-        // x3/4) and now every game gets it. See arcade_video_geom.h.
+        // Aspect-corrected: the raster's 240 columns spread over all 320
+        // canvas columns. SOURCE-driven, not destination-driven -- walking
+        // the 320 outputs and indexing back through av_tate.col[] is a
+        // dependent load pair per pixel and measured 2.3ms a frame more
+        // than the 1:1 path, which this game cannot afford (DEVNOTES #81).
+        // Here each of the 240 raster samples is read once and written to
+        // its one or two canvas columns.
+        //
+        // The second store is what removes the branch: a sample covering
+        // one column writes one pixel too far and the next iteration
+        // overwrites it. The final overspill lands at x1, which the border
+        // clear below mops up.
+        const uint8_t *rep  = av_tate.rep;
+        const uint32_t n    = av_tate.src_n;
+        const uint32_t last = n - 1u;
+        uint32_t x = av_tate.x0;
+
         if (!reverse) {
-            for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
-                buf[x] = pal565[vis[av_tate.col[x]]];
+            for (uint32_t s = 0; s < n; s++) {
+                const uint16_t v = pal565[vis[s]];
+                buf[x] = v; buf[x + 1] = v;
+                x += rep[s];
+            }
         } else {
-            for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
-                buf[x] = pal565[vis[BTIME_GAME_WIDTH - 1u - av_tate.col[x]]];
+            for (uint32_t s = 0; s < n; s++) {
+                const uint16_t v = pal565[vis[last - s]];
+                buf[x] = v; buf[x + 1] = v;
+                x += rep[s];
+            }
         }
+
+        for (uint32_t i = 0; i < av_tate.x0; i++) buf[i] = 0;
+        for (uint32_t i = av_tate.x1; i < HAL_VIDEO_WIDTH; i++) buf[i] = 0;
         return;
     }
 
@@ -751,7 +843,6 @@ BTIME_VRAMFUNC static void emit_tate_row(uint16_t *buf, bool reverse) {
 BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t dvi_y,
                                  uint16_t *buf) {
     const bool mir = s->mirror_x;
-    static uint16_t colbuf[BTIME_GAME_HEIGHT]; // yoko's on-demand column
 
     switch (s->rotation) {
 
@@ -764,15 +855,9 @@ BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t 
         // The `(W-1) - dy` reversal is NOT cosmetic: a 90-degree rotation
         // must reverse exactly one axis relative to tate (case 1, which
         // does not), or the result is a mirror image (DEVNOTES #21).
-        memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t)); // pillarbox
         render_native_column(s, BTIME_FIRST_VISIBLE_LINE +
                                 (uint32_t)(BTIME_GAME_WIDTH - 1) - av_yoko.row[dvi_y]);
-        col_to_rgb(colbuf);
-        // MERGE rather than sample: yoko narrows 240 raster columns onto
-        // 180 canvas columns, and dropping the other 60 deletes whole
-        // 1-pixel features rather than thinning them (DEVNOTES #80).
-        if (mir) av_emit_row_merge_rev(buf, colbuf, &av_yoko);
-        else     av_emit_row_merge(buf, colbuf, &av_yoko);
+        emit_yoko_col(buf, mir);
         break;
     }
 
@@ -795,11 +880,8 @@ BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t 
         // 180 deg: case 0 with BOTH axes reversed relative to it, so the
         // column index is deliberately the *un*-reversed raw value and the
         // emit direction flips.
-        memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t)); // pillarbox
         render_native_column(s, BTIME_FIRST_VISIBLE_LINE + av_yoko.row[dvi_y]);
-        col_to_rgb(colbuf);
-        if (mir) av_emit_row_merge(buf, colbuf, &av_yoko);
-        else     av_emit_row_merge_rev(buf, colbuf, &av_yoko);
+        emit_yoko_col(buf, !mir);
         break;
     }
 

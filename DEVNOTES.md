@@ -3376,6 +3376,78 @@ known-good baseline, not a review of the constant** -- the constant reads
 plausibly, and its comment even shows the arithmetic, which is right for the
 number it computes and wrong for the axis it is used on.
 
+### 81. Burger Time: a correct column renderer that was 2x too slow, and why
+
+**The transposition was right on the first try and the port still did not
+work.** All four rotations came back byte-identical against the old
+frame_pen path -- including `draw_background_col`, a scrolling 16x16 tile
+page with wraparound, subtractive x and flip on both axes, which is the
+fiddliest thing in this project to transpose. Then it was flashed and
+landscape ran at **render 9762us against the row path's 4950us**, on a game
+with about 1.1ms of headroom.
+
+**A correct renderer is not a working renderer.** The byte-compare proves
+the pixels; it says nothing about the cost, and on this game the cost is
+the whole question.
+
+**FIRST CORRECTION TO AN EARLIER CLAIM.** The previous commit called this
+"among the cheapest games here, so it can afford it". Wrong. Burger Time
+ships at `work_max` 15513us of 16660 -- CPU 6.9ms, sound 3.3ms, render
+4.9ms -- the tightest budget in the project after Donkey Kong. The
+"cheapest" impression came from #59's note that its renderer is 36% of the
+frame; 36% of a nearly-full frame is not cheap.
+
+**Why the transpose was slow, and it is not what the intuition says.** This
+renderer was optimised into `memcpy()`s -- a char row is an 8-byte copy, a
+background tile row a 16-byte copy -- and that is exactly what took it from
+red to 60fps in #59. Transposing turned every one of those copies into 256
+separate indexed byte reads. On this part SRAM is single-cycle and uniform,
+so **the stride is not what hurt**; replacing a handful of word-wide copies
+with 256 byte loads, each carrying its own three-level index arithmetic, is.
+
+Two fixes, both measured:
+
+| | render (yoko) |
+|---|---|
+| naive transpose | 9762us |
+| + column-major caches (`char_px_T`, `bg_px_T`, +80KB) | 7810us |
+| + palette and canvas mapping folded into one emit pass | **5017us** |
+
+The second was worth **2.8ms**, far more than the cache transpose and far
+more than expected. It removed one full pass over the column plus a
+320-pixel clear of every scanline: the obvious composition -- convert the
+pen column to RGB, then call the shared `av_emit_row_merge()` -- costs three
+passes where the row path takes two. **On a frame with 1.1ms to spare, an
+extra pass over 240 pixels is not a detail.**
+
+Landscape now costs what tate costs (`work_max` 14252us against 13455us,
+`starve` ~0 in both) and **all four rotations run at 60fps** -- the first
+time this game has had a working landscape at all.
+
+**SECOND CORRECTION: the aspect ratio stays wrong on this game.** It needs
+the correction more than any other -- a square 240x240 raster is 33.3% too
+wide for its height in BOTH orientations, against Pac-Man's 3.7% -- and it
+cannot afford it. Tate: render 4950us at 1:1 against 6624us corrected,
+`work_max` 17172us, starving ~240 times a frame. Yoko is marginal rather
+than broken (15783us, ~50 starves).
+
+That cost is structural. At 1:1 this renderer emits two pixels per 32-bit
+store, unrolled by four; a 240->320 upsample can use neither trick. Both
+the destination-driven and source-driven forms were measured and the
+source-driven one -- which ships, because it is better anyway -- is 635us
+faster and still 1.6ms short.
+
+So **Burger Time and Donkey Kong are now the two games that need the aspect
+correction and cannot afford it** (#78), for the same underlying reason: an
+upsampling emit cannot use the wide-store trick a 1:1 emit can. Whoever
+takes that on should fix it once, in a shared emit, and measure it on these
+two.
+
+RAM: 265,920 -> 293,664 bytes. The 57.6KB `frame_pen` went and the 80KB of
+column-major caches arrived, so this is the one game in the project where
+Phase 3 costs memory rather than saving it. Worth it for a working
+landscape; not worth it if the caches are ever needed elsewhere.
+
 ### 80. Yoko does not thin thin lines, it DELETES them -- merge, do not sample
 
 **Symptom, reported from a photograph of the real screen:** with the aspect

@@ -12,14 +12,20 @@ Status, newest first — the plan is section 7, the remaining work section 8:
 | 0 — honest host dumps | **done** |
 | 1 — one coordinate space (320x240 canvas) | **done**, verified byte-identical |
 | 2 — shared geometry module + aspect correction | **done**, correction OFF by default |
-| 2b — making the correction affordable | **partly**; DKong still ~1.0ms short in tate |
+| 2b — making the correction affordable | **partly**; DKong ~1.0ms and Burger Time ~1.6ms short in tate |
 | 3 — column primitive, kills the landscape red | **Pac-Man, Ms. Pac-Man, Burger Time done**; 4 games to go |
 | 4 — collapse the rotation cases | not started |
 | 5 — cleanups | not started |
 
-**Pac-Man, Ms. Pac-Man and Burger Time are complete**: all four rotations, correct aspect
+**Pac-Man and Ms. Pac-Man are complete**: all four rotations, correct aspect
 ratio on by default, 60fps, zero starvation, confirmed on the physical
 display (DEVNOTES #79/#80).
+
+**Burger Time runs all four rotations at 60fps but keeps its aspect error.**
+It needs the correction most of any game (33.3%, a square raster) and cannot
+afford it -- 1.1ms of headroom against a 1.6ms cost. It joins Donkey Kong in
+that category, for the same structural reason: an upsampling emit cannot use
+the wide-store trick a 1:1 emit can. DEVNOTES #81.
 
 **Landscape is now the CHEAP orientation** on both -- 9.5ms against 8.9ms on
 Pac-Man, 10.5ms against 12.8ms on Ms. Pac-Man -- because a column slice

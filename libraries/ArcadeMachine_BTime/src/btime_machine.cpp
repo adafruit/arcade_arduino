@@ -78,14 +78,28 @@ void btime_init(btime_system *system) {
     // first (GAME_WIDTH), then SHORT (GAME_HEIGHT).
     av_geom_init(BTIME_GAME_WIDTH, BTIME_GAME_HEIGHT);
 
-    // Aspect-ratio correction on, per-game and measured (see
-    // pacman_machine.cpp for the same call). This game needs it MOST of any
-    // in the project: its raster is square (240x240), so at 1:1 the picture
-    // is 33.3% too wide for its height in BOTH orientations, against
-    // Pac-Man's 3.7% in tate. It is also among the cheapest games here, so
-    // it can afford it -- which is a happy inversion of Donkey Kong, which
-    // needs the correction badly and cannot afford it (#78).
-    av_geom_set_stretch(true);
+    // ASPECT CORRECTION DELIBERATELY OFF FOR THIS GAME, and it is the one
+    // that needs it most: the raster is square (240x240), so at 1:1 the
+    // picture is 33.3% too wide for its height in BOTH orientations,
+    // against Pac-Man's 3.7% in tate.
+    //
+    // It does not fit. Measured on hardware (DEVNOTES #81), tate: render
+    // 4950us at 1:1 against 6624us corrected, on a frame whose other costs
+    // (CPU 6.9ms, sound 3.3ms) leave about 1.1ms spare. Corrected,
+    // `work_max` is 17172us of a 16660us budget and the DVI queue starves
+    // ~240 times a frame. Yoko is marginal rather than broken -- 15783us
+    // and ~50 starves -- but tate is this game's default.
+    //
+    // The cost is structural, not a missing optimisation: at 1:1 this
+    // renderer emits two pixels per 32-bit store, unrolled by four, and a
+    // 240->320 upsample cannot use either trick. Both the destination-driven
+    // and source-driven forms were measured; the source-driven one (which
+    // ships) is 635us better and still not enough.
+    //
+    // Turn it on with -DTEST_STRETCH=1 to see the correct proportions and
+    // the starvation together. Burger Time and Donkey Kong are now the two
+    // games that need the correction and cannot afford it (#78).
+    av_geom_set_stretch(false);
 
 
     // ROTATION 1 (90 deg CCW), predicted from MAME and still to be

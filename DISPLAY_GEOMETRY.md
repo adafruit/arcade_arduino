@@ -21,7 +21,15 @@ Status, newest first — the plan is section 7, the remaining work section 8:
 ratio on by default, 60fps, zero starvation, confirmed on the physical
 display (DEVNOTES #79/#80).
 
-**Galaga runs all four rotations and its remaining red is not a video
+**Galaga is done: `starve` 0 across ~7 minutes of continuous first-level
+play** (DEVNOTES #85). The red lines were a pipeline-runway problem, not a
+video or CPU one -- the scanline queue held 8 buffers, 508us, and Galaga's
+shortfall is a burst against ~2ms of average headroom. `N_SCANBUF` is now 32
+(2032us) and the two libdvi colour queues are re-initialised to match, which
+is what an earlier attempt to raise this number missed. The worst moment
+across 435 windows still had half the queue in hand.
+
+How that was found, and still true: **Galaga's frame is not a video
 problem.** Per-layer timing on device (DEVNOTES #84) settles it: on the first
 level with the formation up and the player firing, the whole renderer is
 3.5ms of a 15.3ms frame -- **23%** -- split starfield 345us / sprites 1047us

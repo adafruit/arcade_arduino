@@ -66,17 +66,34 @@ const uint32_t HAL_VIDEO_HEIGHT = DVI_HEIGHT / DVI_VERTICAL_REPEAT_USED;
 static struct dvi_inst dvi;
 
 // Scanline pixel buffers cycled between the render side (acquire/submit)
-// and the DVI encode side (hal_video_run). 8 is not a tunable choice --
-// this vendored libdvi's dvi_init() hardcodes q_colour_free/q_colour_valid
-// to exactly 8 elements each (queue_init_with_spinlock(..., 8, ...) in
-// src/libdvi/dvi.c), so this is a hard ceiling, not a starting point. (A
-// prior attempt to raise this to 24 hung setup() completely -- the 9th
-// queue_add_blocking_u32() call in hal_video_init() below blocks forever
-// once the queue's real capacity is full, since nothing consumes from it
-// until Core 1's pump starts, which never happens because setup() itself
-// is stuck. That's a full black screen, not a glitch -- if you see that
-// again, check this first.)
-#define N_SCANBUF 8
+// and the DVI encode side (hal_video_run).
+//
+// THIS IS THE PIPELINE'S RUNWAY, and it was long believed to be a hard
+// ceiling of 8. It is not. The vendored libdvi's dvi_init() does hardcode
+// q_colour_free/q_colour_valid to 8 elements each
+// (queue_init_with_spinlock(..., 8, ...) in src/libdvi/dvi.c), and a prior
+// attempt to raise this number alone hung setup() completely: the 9th
+// queue_add_blocking_u32() below blocks forever once the queue's real
+// capacity is full, because nothing drains it until Core 1's pump starts,
+// which never happens because setup() itself is stuck. Full black screen,
+// not a glitch.
+//
+// The fix is to raise the QUEUES too, which hal_video_init() now does by
+// re-initialising the two colour queues after dvi_init(). The vendored
+// library is left untouched -- they are a plain producer/consumer pair
+// used only by dvi_scanbuf_main_16bpp() and by acquire/submit here.
+//
+// Why 16: a scanline is 63.49us of DVI time (800x525 at 25.2MHz with
+// dvi_vertical_repeat 2), so 8 buffers is 508us of slack and 16 is 1016us.
+// Galaga has ~2ms of average headroom per frame and still starved, because
+// its shortfall is a BURST -- measured peak drawdown of 4-6 buffers against
+// the 8 available, before counting the ~300us stall of DEVNOTES #84, which
+// on its own eats 5. See DEVNOTES #85.
+//
+// Cost is 10,240 bytes of SRAM. Shrinking the buffers to HAL_VIDEO_WIDTH
+// (DISPLAY_GEOMETRY.md phase 5) would make 16 buffers cost exactly what 8
+// cost at 640 wide, i.e. free.
+#define N_SCANBUF 32
 // Still DVI_WIDTH (640) entries although libdvi reads only the first
 // HAL_VIDEO_WIDTH (320) of each -- 5,120 bytes of deliberate slack. Kept
 // for now so that a renderer which has not yet been converted to canvas
@@ -91,6 +108,22 @@ bool hal_video_init(void) {
     dvi.timing  = &dvi_timing_640x480p_60hz;
     dvi.ser_cfg = adafruit_fruitjam_cfg;
     dvi_init(&dvi, next_striped_spin_lock_num(), next_striped_spin_lock_num());
+
+    // Deepen the two colour queues to match N_SCANBUF. dvi_init() sized them
+    // at 8; re-initialising here is safe because they are a plain
+    // producer/consumer pair (see the N_SCANBUF comment), nothing has been
+    // pushed into them yet, and Core 1's pump has not started -- both cores
+    // pick up the new spinlock through the queue struct itself. This must
+    // stay AFTER dvi_init() and BEFORE the fill loop below.
+    //
+    // queue_init_with_spinlock() allocates, so the original 8-entry
+    // allocations are leaked: 64 bytes, once, at boot. Deliberate -- there
+    // is no queue_deinit() in this SDK version.
+    {
+        const uint spin_colour = next_striped_spin_lock_num();
+        queue_init_with_spinlock(&dvi.q_colour_valid, sizeof(void *), N_SCANBUF, spin_colour);
+        queue_init_with_spinlock(&dvi.q_colour_free,  sizeof(void *), N_SCANBUF, spin_colour);
+    }
 
     // Populate q_colour_free with all scanline buffers. hal_video_acquire_
     // scanline()/hal_video_submit_scanline() recycle them one at a time
@@ -119,6 +152,15 @@ static volatile uint32_t s_blocked_us = 0;
 // diagnostic, a race costs at most a miscount, and the locked variant
 // would add a critical section to a path that runs 240 times a frame.
 static volatile uint32_t s_starve_events = 0;
+// Lowest level the VALID queue has been seen at, i.e. how much runway was
+// left at the worst moment. This is the honest measure of pipeline margin:
+// `starve` only says whether a threshold was crossed, and the noblock-run
+// detector it replaced was valid ONLY while N_SCANBUF was 8. At depth 8,
+// free and valid are complementary and tight, so "acquire did not block"
+// implied "valid is nearly empty". At 16 the two decouple -- valid can sit
+// at a healthy 8 while 7 buffers are free and acquire never blocks -- and
+// the run counter reads high with no starvation at all. See DEVNOTES #85.
+static volatile uint32_t s_min_valid = 0xFFFFFFFFu;
 
 uint16_t *hal_video_acquire_scanline(void) {
     uint16_t *buf;
@@ -136,8 +178,18 @@ uint32_t hal_video_take_blocked_us(void) {
 
 void hal_video_submit_scanline(uint16_t *buf) {
     queue_add_blocking_u32(&dvi.q_colour_valid, &buf);
-    if (queue_get_level_unsafe(&dvi.q_colour_valid) <= 1u) s_starve_events++;
+    const uint32_t lvl = queue_get_level_unsafe(&dvi.q_colour_valid);
+    if (lvl <= 1u) s_starve_events++;
+    if (lvl < s_min_valid) s_min_valid = lvl;
 }
+
+uint32_t hal_video_take_min_valid_level(void) {
+    uint32_t v = s_min_valid;
+    s_min_valid = 0xFFFFFFFFu;
+    return (v == 0xFFFFFFFFu) ? 0u : v;
+}
+
+uint32_t hal_video_scanbuf_count(void) { return (uint32_t)N_SCANBUF; }
 
 uint32_t hal_video_take_starve_count(void) {
     uint32_t v = s_starve_events;

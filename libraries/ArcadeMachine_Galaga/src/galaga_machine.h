@@ -301,6 +301,15 @@ void galaga_run_frame(galaga_system *system);
 // Frame-budget diagnostics: peak single-scanline render time, and the
 // longest run of consecutive non-blocking scanline acquires (>= the DVI
 // queue depth of 8 means Core 1 starved -- a red line). Reading clears both.
+// Per-CPU host time, render/begin-frame totals, and the PEAK CUMULATIVE
+// SCANLINE DEFICIT in microseconds -- how far behind the 63.49us active-video
+// line period Core 0 gets within one frame. Divide by 63 for the number of
+// scanline buffers of runway required; N_SCANBUF is 8 today. Reset on read,
+// device-only, opt-in via -DGALAGA_FRAME_TRACE=1. See DEVNOTES #85.
+void galaga_debug_take_frame_costs(uint32_t *main_us, uint32_t *sub_us, uint32_t *sub2_us,
+                                   uint32_t *cpu_us, uint32_t *render_us,
+                                   uint32_t *begin_us, uint32_t *deficit_max_us);
+
 void galaga_debug_take_starvation(uint32_t *render_max_us, uint32_t *noblock_run_max);
 
 #ifdef __cplusplus

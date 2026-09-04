@@ -176,8 +176,18 @@ void loop() {
     // alongside it because the suspected trigger is a full enemy formation
     // (far more sprites than attract mode ever shows) combined with the
     // audio of the player firing.
+    // A MAX ALONE IS NOT A COST. render_max sent five optimisation attempts
+    // at the wrong 77% of this frame because a max over a 60-frame window
+    // reports the worst event a second, not the typical scanline
+    // (DEVNOTES #84). Totals are kept beside every maximum from here on:
+    // work_sum/60 is the mean, and mean-vs-max is what says whether a
+    // budget problem is throughput (grind the work down) or burst (give
+    // the pipeline runway).
     static uint32_t work_max = 0, sprites_max = 0;
+    static uint32_t work_sum = 0, blocked_sum = 0, blocked_max = 0, work_n = 0;
     if (work_us > work_max) work_max = work_us;
+    if (blocked_us > blocked_max) blocked_max = blocked_us;
+    work_sum += work_us; blocked_sum += blocked_us; work_n++;
     uint32_t nspr = galaga_video_debug_sprite_count();
     if (nspr > sprites_max) sprites_max = nspr;
 
@@ -205,12 +215,18 @@ void loop() {
         Serial.print(frame_us / 1000);
         Serial.print("ms (work ");
         Serial.print(work_us);
+        Serial.print("us, work_MEAN ");
+        Serial.print(work_n ? work_sum / work_n : 0);
         Serial.print("us, work_MAX ");
         Serial.print(work_max);
         Serial.print("us, sprites_max ");
         Serial.print(sprites_max);
         Serial.print(", blocked ");
         Serial.print(blocked_us);
+        Serial.print("us, blk_MEAN ");
+        Serial.print(work_n ? blocked_sum / work_n : 0);
+        Serial.print("us, blk_MAX ");
+        Serial.print(blocked_max);
         {   // starvation detector -- see galaga_machine.h. noblock_run >= 8
             // (the DVI queue depth) means Core 1 ran dry: a red line.
             uint32_t rmax = 0, nbrun = 0;
@@ -219,7 +235,9 @@ void loop() {
             Serial.print(rmax);
             Serial.print("us, noblock_run ");
             Serial.print(nbrun);
-            if (nbrun >= 8) Serial.print(" *** STARVED");
+            // NOT a starvation signal any more -- see
+            // hal_video_take_min_valid_level(). Kept only as a rough
+            // "how often was Core 0 not ahead" figure.
         }
         {   // per-layer render split -- see galaga_video.h / DEVNOTES #83
             uint32_t st=0, sp=0, ti=0, wt=0, ws=0, wp=0, wl=0;
@@ -234,13 +252,37 @@ void loop() {
             Serial.print(wp); Serial.print("+");
             Serial.print(wl);
         }
-        Serial.print("us, rot ");
+        {   // frame cost split + peak drawdown -- see galaga_machine.h
+            uint32_t cm=0, cs=0, c2=0, cc=0, cr=0, cb=0, dmax=0;
+            galaga_debug_take_frame_costs(&cm, &cs, &c2, &cc, &cr, &cb, &dmax);
+            Serial.print("us, cpu main/sub/sub2 ");
+            Serial.print(cm/60); Serial.print("/");
+            Serial.print(cs/60); Serial.print("/");
+            Serial.print(c2/60);
+            Serial.print("us_pf (cpu_tot ");
+            Serial.print(cc/60);
+            Serial.print(" rend ");
+            Serial.print(cr/60);
+            Serial.print(" begin ");
+            Serial.print(cb/60);
+            Serial.print("), DEFICIT_MAX ");
+            Serial.print(dmax);
+            Serial.print("us = ");
+            Serial.print(dmax / 63);
+            Serial.print(" buffers (have 8)");
+        }
+        Serial.print(", rot ");
         Serial.print((int)g_system.rotation);
         Serial.print(" stretch ");
         Serial.print((int)av_geom_get_stretch());
         Serial.print(" starve ");
         Serial.print(hal_video_take_starve_count());
+        Serial.print(" minq ");
+        Serial.print(hal_video_take_min_valid_level());
+        Serial.print("/");
+        Serial.print(hal_video_scanbuf_count());
         Serial.print("/60), ");
+        work_sum = blocked_sum = work_n = 0; blocked_max = 0; // work_max/sprites_max reset below
         Serial.print(frame_count * 1000UL / (millis() - loop_start_ms + 1));
         Serial.print(", isr ");
         { uint32_t iu=0, ic=0, im=0;

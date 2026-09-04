@@ -97,6 +97,15 @@ uint32_t hal_video_take_blocked_us(void);
 // (DEVNOTES.md #35). A board with no such failure mode may return 0.
 uint32_t hal_video_take_starve_count(void);
 
+// Lowest VALID-queue level seen since the last call, and the total number of
+// scanline buffers. min_valid is the pipeline's remaining runway at its
+// worst moment: 0 means the display ran dry (a red line), and a value near
+// the buffer count means the queue never came close. Prefer this over any
+// run-of-non-blocking-acquires heuristic, which is only meaningful when the
+// free and valid queues are complementary -- see DEVNOTES #85.
+uint32_t hal_video_take_min_valid_level(void);
+uint32_t hal_video_scanbuf_count(void);
+
 #ifdef __cplusplus
 }
 #endif

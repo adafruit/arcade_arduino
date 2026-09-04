@@ -4091,3 +4091,85 @@ path is done; leave it alone.
 The stall itself is still unidentified (~300us, ~once a second, not the audio
 ISR -- that measures 87 calls a window at 92us avg, 95us worst). It is too
 rare to matter for starvation, so it is recorded here and not chased.
+
+### 85. Galaga's red lines were a runway problem: the scanline queue was never a hard ceiling
+
+#84 showed Galaga's renderer is 23% of its frame and pointed at the CPU. The
+CPU turned out to be innocent too. The fix was the pipeline.
+
+**The budget was being read against the wrong line period.** 640x480p60 here
+is 800x525 at a 25.2MHz pixel clock, so active video is 480 * 31.746us =
+**15,238us** and vblank is 1,429us. With `dvi_vertical_repeat` 2 a submitted
+scanline is **63.49us**, not the 69us you get by dividing the whole 16,667us
+frame by 240 -- that figure silently spends the vblank on every line and
+overstates the per-line budget by 8%.
+
+**Mean work is nowhere near the ceiling.** The heartbeat printed `work_MAX`
+(a 60-frame maximum) next to `blocked` (a single frame's value) and no mean
+at all, which made the frame look full. Adding totals beside the maxima:
+
+```
+work_MEAN 13,205us   work_MAX 15,264us   active-video window 15,238us
+blk_MEAN  ~1,800us   blk_MAX  ~2,900us
+```
+
+Core 0 **blocks 1.8-2.9ms every frame** waiting for a free buffer. It is
+ahead of the display most of the time and has ~2ms of average headroom, and
+it still starved 61 times a frame. A shortfall with that shape is a BURST,
+and a burst is bounded by runway, not by throughput.
+
+**Runway was 508us.** `N_SCANBUF` was 8, and 8 * 63.49us = 508us. Measured
+peak within-frame drawdown was 4-6 buffers, and the ~300us stall of #84 eats
+5 more on its own.
+
+**And 8 was never a hard ceiling.** The comment in `hal_video_fruitjam.cpp`
+said it was, citing `dvi_init()`'s hardcoded
+`queue_init_with_spinlock(..., 8, ...)`, and recorded a previous attempt to
+raise it to 24 that hung `setup()` with a black screen. That attempt raised
+`N_SCANBUF` **without raising the queues**, so the 9th
+`queue_add_blocking_u32()` blocked forever -- nothing drains the queue until
+Core 1 starts, and Core 1 never starts because `setup()` is stuck. The fix is
+to re-initialise `q_colour_valid`/`q_colour_free` after `dvi_init()`, which
+`hal_video_init()` now does. **The vendored libdvi is untouched**: the colour
+queues are a plain producer/consumer pair, nothing is in them yet, and Core 1
+has not started, so both cores pick up the new spinlock through the queue
+struct. (It leaks the two original 8-entry allocations: 64 bytes, once.)
+
+Measured on hardware, rotation 3, scripted first-level worst case, ~7 minutes
+of continuous play per depth:
+
+| N_SCANBUF | runway | worst runway left | starve / window |
+|---|---|---|---|
+| 8 | 508us | 0 | up to **7223** |
+| 16 | 1016us | 1 of 16 | max 5 |
+| **32** | **2032us** | **16 of 32** | **0** |
+
+At 32 the queue never fell below half across 435 windows. Cost is 30KB of
+SRAM (40,960 bytes of buffers); the largest sketch, Lunar Rescue, sits at 73%
+with 136KB free, and all seven sketches build. Shrinking the buffers to
+`HAL_VIDEO_WIDTH` (DISPLAY_GEOMETRY.md phase 5) would halve that.
+
+**The noblock-run starvation detector had to be retired.** It inferred
+starvation from a run of non-blocking acquires, which is sound ONLY at depth
+8, where free and valid are complementary and tight: "acquire did not block"
+then implies "valid is nearly empty". At 32 they decouple -- valid can sit at
+a healthy 20 while 11 buffers are free and acquire never blocks -- and the
+counter reads 200+ with zero starvation. It now prints as a rough "how often
+was Core 0 not ahead" figure only. `hal_video_take_min_valid_level()`
+replaces it: the lowest VALID-queue level seen, which is the actual runway
+remaining and is meaningful at any depth.
+
+**Where the CPU time goes**, for the record, since #84 left it open. Per-CPU
+host time in the same worst case: **main 4050us, sub 3595us, sub2 2603us**
+(10.2ms of the 11.8ms; the rest is the interleave loop, the audio ISR at
+~134us/frame, and the trace's own overhead). It is all Z80 interpretation --
+not port handlers, not the 51XX/54XX/06XX helpers, not audio mixing. Nothing
+needed to be optimised.
+
+**The lesson, which is the same one as #84 in a different costume.** Every
+number that mattered here was already being printed and was unreadable
+because maxima and single samples were mixed with no totals: `work_MAX` (a
+window max) sat beside `blocked` (one frame) beside no mean at all. Print a
+total and a count next to every maximum. The whole investigation from #82
+onward -- five failed optimisations, two abandoned rewrites -- would have
+started in the right place with one extra number.

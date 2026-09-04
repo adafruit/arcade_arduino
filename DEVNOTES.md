@@ -4838,7 +4838,47 @@ the downsampled axes; tate upsamples both and skips it entirely. Runway sits
 at 16-17 of 32 rather than Invaders' 28 -- this game carries more CPU and
 audio per frame -- but `starve` is 0 everywhere and half the queue is in hand.
 
-**With this, all seven games are clean in all four rotations**, and the
-aspect correction is affordable everywhere except Burger Time's yoko and
-Donkey Kong's yoko, which still route through the scalar merge that #89's
-wide-store emit did not reach.
+**With this, all seven games are clean in all four rotations.**
+
+(This entry originally added "and the aspect correction is affordable
+everywhere except Burger Time's yoko and Donkey Kong's yoko". **That was
+wrong about Donkey Kong and overstated for Burger Time** -- both run at
+60fps with the correction on. See #99 for the measurements. The correction
+is affordable everywhere; what differs is the runway left, and only Burger
+Time's rotation 2 is genuinely tight.)
+
+### 99. Donkey Kong's yoko correction, measured at last -- it fits, with room
+
+#98 left this as the one open prediction: DKong's landscape aspect correction
+had never been measured since the landscape renderer was rewritten (#92-#94),
+so the only figures on record came from the old bursty build and were
+meaningless. Predicted ~+1.2ms by analogy with Burger Time. Measured, in
+gameplay:
+
+| rot | | correction off | correction on | cost | starve | runway |
+|---|---|---|---|---|---|---|
+| 0 | landscape | 12,038us | 13,454us | **+1,416us** | 0 | 20/32 |
+| 2 | landscape, mirrored | 12,778us | 13,440us | **+662us** | 0 | 20/32 |
+| 1 | tate (from #93) | -- | -- | +262us | 0 | 26/32 |
+
+The prediction was the right order of magnitude and the spread between the
+two landscape rotations (1,416 vs 662us) is wider than expected -- the same
+mirrored-twin asymmetry seen on Pac-Man (#86) and Ms. Pac-Man (#87), where
+the reversed emit path does slightly different work.
+
+**Donkey Kong can afford its landscape correction comfortably**: `starve` 0
+and 20 of 32 buffers in hand either way, against a 15,238us active-video
+window it uses 13.4ms of. That is a materially better position than Burger
+Time, which holds 60fps in the same configuration but with only 13 of 32
+buffers (#89).
+
+So the standing summary in #98 -- "affordable everywhere except Burger Time's
+yoko and Donkey Kong's yoko" -- was **wrong about Donkey Kong**, and only
+half right about Burger Time, which does run, just with the least margin in
+the project. Corrected: the aspect correction is affordable in every game and
+every rotation. What differs is how much runway is left, and the only place
+that is genuinely tight is Burger Time's rotation 2.
+
+The wide-store merge that would fix that remains unbuilt and is now the one
+piece of known-worthwhile optimisation left in the display work. It is
+optional: nothing is broken without it.

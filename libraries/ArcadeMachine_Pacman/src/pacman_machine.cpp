@@ -39,6 +39,26 @@ void pacman_init(pacman_system *system) {
     // arcade_video_geom.h for why those names and not width/height.
     av_geom_init(PACMAN_GAME_WIDTH, PACMAN_GAME_HEIGHT);
 
+    // Aspect-ratio correction ON for this game, which is a per-game call and
+    // not the module's default (see arcade_video_geom.h).
+    //
+    // WITHOUT it the picture is laid out in raw raster-pixel counts, so in
+    // yoko it occupies 224 canvas columns against 240 rows -- 0.933 wide for
+    // 1 tall, where a real cabinet's tube is 0.75. That is 24.4% too wide,
+    // and on a physical display it reads exactly as "squat". Tate is only
+    // 3.7% off and looks fine either way; yoko is the one that shows.
+    //
+    // Affordable here, measured on hardware (DEVNOTES #79): FREE in yoko,
+    // because the correction NARROWS that axis (224 -> 180 columns, fewer
+    // pixels emitted) -- work_max 10845us with it against 10872us without.
+    // In tate it upsamples and costs +1.6ms, landing at 12029us of a 16660us
+    // budget with starve 0/60. Both orientations have room.
+    //
+    // This is per-game on purpose: Donkey Kong cannot afford it in tate yet
+    // (#78), so the module still defaults off and each machine opts in once
+    // it has been measured on real hardware.
+    av_geom_set_stretch(true);
+
     // Screen rotation 3 (90 deg CW), NOT 1. This is the value that puts the
     // game upright on the same physically-rotated monitor that
     // ArcadeMachine_Invaders and ArcadeMachine_LunarRescue are upright on

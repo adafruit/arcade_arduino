@@ -297,6 +297,36 @@ static void render_native_column(const pacman_system *sys, uint32_t native_x,
     }
 }
 
+// Renders the group of native columns that canvas row `dvi_y` collapses,
+// merged into `out`.
+//
+// In yoko the raster's 288-column long axis has to fit 240 canvas rows, so
+// 48 columns share a row with a neighbour. Sampling just one of them (plain
+// nearest-neighbour) does not thin Pac-Man's 1-pixel maze walls, it deletes
+// them -- 21 of the 288 columns contain picture and would never be drawn at
+// all. Rendering the whole group and letting any non-background pixel win
+// keeps them, at the cost of thickening some features by a pixel.
+//
+// Measured on this game: one column per canvas row keeps 58.2% of the lit
+// pixels; merging this axis and the emit axis together keeps 82.3%. Costs
+// ~48 extra render_native_column() calls a frame, about +20% of the column
+// render. See DEVNOTES #80.
+//
+// `first` is the group's first native column in DISPLAY order and `step` is
+// +1 or -1, because case 0 walks the axis reversed and case 2 does not.
+static void render_native_column_group(const pacman_system *sys, uint32_t first,
+                                       int step, uint32_t count, uint16_t *out) {
+    render_native_column(sys, first, out);
+    if (count < 2u) return;
+
+    static uint16_t extra[PACMAN_GAME_HEIGHT];
+    for (uint32_t k = 1; k < count; k++) {
+        render_native_column(sys, (uint32_t)((int)first + step * (int)k), extra);
+        for (uint32_t i = 0; i < (uint32_t)PACMAN_GAME_HEIGHT; i++)
+            if (extra[i]) out[i] = extra[i];
+    }
+}
+
 // THE 129KB frame_cache THAT USED TO LIVE HERE IS GONE. It existed because
 // this file could only render rows: a yoko scanline reads one pixel from
 // every native row, so all 224 had to exist before the first scanline could
@@ -337,9 +367,14 @@ void pacman_video_render_scanline(const pacman_system *sys, uint32_t dvi_y, uint
         // must reverse exactly one axis relative to tate (case 1, which
         // does not reverse its equivalent), or the result is a mirror image
         // rather than a rotation (DEVNOTES #21).
-        render_native_column(sys, (uint32_t)(PACMAN_GAME_WIDTH - 1) - av_yoko.row[dvi_y], col);
-        if (mir) av_emit_row_rev(buf, col, &av_yoko);
-        else     av_emit_row(buf, col, &av_yoko);
+        render_native_column_group(
+            sys, (uint32_t)(PACMAN_GAME_WIDTH - 1) - av_yoko.row[dvi_y], -1,
+            av_yoko.rowrep[dvi_y], col);
+        // The emit MERGES rather than samples: yoko narrows the short axis
+        // (224 -> 180 canvas columns) and dropping the difference deletes
+        // whole maze walls. See av_emit_row_merge().
+        if (mir) av_emit_row_merge_rev(buf, col, &av_yoko);
+        else     av_emit_row_merge(buf, col, &av_yoko);
         break;
     }
 
@@ -380,9 +415,10 @@ void pacman_video_render_scanline(const pacman_system *sys, uint32_t dvi_y, uint
         // two 90s), so the column index is deliberately the *un*-reversed
         // raw value -- case 0 already reversed it once, and reversing that
         // again would cancel out -- while the emit direction flips.
-        render_native_column(sys, av_yoko.row[dvi_y], col);
-        if (mir) av_emit_row(buf, col, &av_yoko);
-        else     av_emit_row_rev(buf, col, &av_yoko);
+        render_native_column_group(sys, av_yoko.row[dvi_y], +1,
+                                   av_yoko.rowrep[dvi_y], col);
+        if (mir) av_emit_row_merge(buf, col, &av_yoko);
+        else     av_emit_row_merge_rev(buf, col, &av_yoko);
         break;
     }
 

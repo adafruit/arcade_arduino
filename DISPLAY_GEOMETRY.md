@@ -13,12 +13,18 @@ Status, newest first — the plan is section 7, the remaining work section 8:
 | 1 — one coordinate space (320x240 canvas) | **done**, verified byte-identical |
 | 2 — shared geometry module + aspect correction | **done**, correction OFF by default |
 | 2b — making the correction affordable | **partly**; DKong still ~1.0ms short in tate |
-| 3 — column primitive, kills the landscape red | **Pac-Man done**; 6 games to go |
+| 3 — column primitive, kills the landscape red | **Pac-Man done** (+ merge downsampling); 6 games to go |
 | 4 — collapse the rotation cases | not started |
 | 5 — cleanups | not started |
 
-**Pac-Man is complete**: all four rotations, correct aspect ratio available,
-60fps, zero starvation (DEVNOTES #79).
+**Pac-Man is complete**: all four rotations, correct aspect ratio on by
+default, 60fps, zero starvation (DEVNOTES #79/#80).
+
+**Yoko discards a third of the raster no matter what** (section 5), so HOW it
+is discarded is a visible decision: nearest-neighbour deletes whole 1-pixel
+maze walls, merging keeps them. Merging both axes takes the surviving lit
+pixels from 58.2% to 82.3% -- see #80, and note the long axis matters more
+than the short one, which is not the intuition.
 
 Originally written as an audit of `hal_video_fruitjam.cpp`,
 `arcade_hal_video.h`, all seven `*_video.cpp` renderers, the vendored

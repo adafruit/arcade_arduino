@@ -110,6 +110,18 @@ typedef struct {
     // frame without changing a pixel.
     uint16_t src_n;
     uint8_t  rep[AV_CANVAS_W];
+
+    // The same inversion for the ROW axis: rowrep[y] is how many raster
+    // samples collapse into canvas row y. 1 when the axis is 1:1 or being
+    // upsampled; 1 or 2 where it is being downsampled.
+    //
+    // Only yoko downsamples its row axis (288 raster samples onto 240 canvas
+    // rows), and only a renderer that produces one raster line per canvas
+    // row needs this -- to render the collapsed lines too and merge them,
+    // instead of letting nearest-neighbour delete them outright. Measured on
+    // Pac-Man: sampling one line per canvas row keeps 58.2% of the lit
+    // pixels, merging both axes keeps 82.3%.
+    uint8_t  rowrep[AV_CANVAS_H];
 } av_map_t;
 
 // Tate (rotations 1 and 3): col indexes the LONG axis, row the SHORT axis.
@@ -168,6 +180,48 @@ static inline void av_emit_row(uint16_t *dst, const uint16_t *src,
     }
     dst[x1]      = 0; // overspill, always inside the buffer's slack
     dst[x1 + 1u] = 0;
+}
+
+// DOWNSAMPLING variants. Where av_emit_row() spreads each raster sample over
+// one or two canvas columns, these collapse one or two samples into one
+// column -- and the rule is that a NON-BACKGROUND sample never loses to a
+// background one.
+//
+// That rule is the whole point. Nearest-neighbour picks one sample per
+// canvas column and discards the rest, which on 1-pixel line art does not
+// thin a maze wall, it DELETES it: 33 of Pac-Man's 224 raster columns and 21
+// of its 288 rows contain picture and are never sampled at all. Merging
+// keeps every feature, at the cost of thickening some by a pixel. See
+// DEVNOTES #80.
+//
+// Requires `dst` to be pre-cleared, which every renderer here already does.
+// There is no double store, so nothing spills into the next column.
+static inline void av_emit_row_merge(uint16_t *dst, const uint16_t *src,
+                                     const av_map_t *m) {
+    const uint8_t *rep = m->rep;   // hoisted -- see av_emit_row()
+    const uint32_t n   = m->src_n;
+    uint32_t x = m->x0;
+    for (uint32_t s = 0; s < n; s++) {
+        const uint16_t v = src[s];
+        if (v) dst[x] = v;
+        x += rep[s];
+    }
+}
+
+// av_emit_row_merge() mirrored. As in av_emit_row_rev(), `rep` is walked
+// FORWARDS while `src` is walked backwards: only the pixel VALUES mirror,
+// the column widths do not.
+static inline void av_emit_row_merge_rev(uint16_t *dst, const uint16_t *src,
+                                         const av_map_t *m) {
+    const uint8_t *rep = m->rep;
+    const uint32_t n   = m->src_n;
+    const uint32_t last = n - 1u;
+    uint32_t x = m->x0;
+    for (uint32_t s = 0; s < n; s++) {
+        const uint16_t v = src[last - s];
+        if (v) dst[x] = v;
+        x += rep[s];
+    }
 }
 
 // av_emit_row() with the raster reversed -- the within-scanline half of a

@@ -3333,6 +3333,63 @@ known-good baseline, not a review of the constant** -- the constant reads
 plausibly, and its comment even shows the arithmetic, which is right for the
 number it computes and wrong for the axis it is used on.
 
+### 80. Yoko does not thin thin lines, it DELETES them -- merge, do not sample
+
+**Symptom, reported from a photograph of the real screen:** with the aspect
+correction on, Pac-Man's landscape had the right proportions but "a lot of
+pixels are missing" -- maze walls patchy, some segments 2px, some 1px, some
+absent, "GAME OVER" with holes in the letters.
+
+**Not a bug in the correction. The arithmetic of yoko.** Landscape puts the
+raster's 288-sample long axis onto 240 canvas rows and its 224-sample short
+axis onto 180 canvas columns, so 67% of the native pixels is all that fits
+(DISPLAY_GEOMETRY.md section 5). The defect was in HOW the other 33% were
+given up.
+
+**Nearest-neighbour picks one sample per destination and discards the rest.**
+On photographic content that reads as slight softness. On 1-pixel line art it
+is destruction: measured on one Pac-Man frame, **33 of the 224 raster columns
+and 21 of the 288 rows contain picture and were never sampled at all.** A
+maze wall does not get thinner, it disappears, and the wall next to it stays
+2px -- which is exactly what "patchy" looks like.
+
+**Fix: merge instead of sample.** Every raster sample contributes, and a
+non-background sample never loses to a background one. Features are kept, at
+the cost of thickening some by a pixel.
+
+Measured on the same frame, fraction of the native lit pixels reaching the
+screen:
+
+| | kept | cost |
+|---|---|---|
+| nearest-neighbour (what shipped) | 58.2% | -- |
+| merge on the short axis only | 63.9% | free, it is just the emit rule |
+| merge on the long axis only | 75.0% | ~48 extra column renders a frame |
+| **both** | **82.3%** | both |
+
+**The long axis matters MORE than the short one, which is not the intuition.**
+The short axis is the one the aspect correction visibly narrows (224 -> 180),
+so it looks like the culprit; the long axis (288 -> 240) is quieter and
+costs more to fix, because merging there means actually RENDERING the
+collapsed columns rather than changing a write rule. Doing only the cheap
+half would have bought 6 points of the 24.
+
+Hardware, Pac-Man yoko with the correction on: `work_max` 10821us before,
+**11510us after**, `starve` 0/60 either way, `frame` pinned. The extra
+renders cost ~689us of a 16660us budget.
+
+**It improves UNSTRETCHED yoko too**, by +128 and +156 lit pixels in the two
+landscape rotations, because yoko's row axis maps 288 samples onto 240 canvas
+rows *regardless* of the aspect correction -- that axis was always
+downsampling and always deleting lines. Tate is untouched (it upsamples;
+nothing is ever dropped), and byte-identical.
+
+**Where this generalises:** any renderer whose destination is smaller than
+its raster on either axis. In this project that is every game in yoko, on
+the long axis, correction or no correction. `av_emit_row_merge()` handles
+the emit axis; the row axis needs the machine's own renderer to produce the
+collapsed lines, so it is per-game work.
+
 ### 79. Pac-Man: a column primitive removes the landscape red entirely, and 129KB with it
 
 **The fix for #18/#75, on the first game.** A yoko scanline IS a native

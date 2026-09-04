@@ -57,6 +57,18 @@ static void build_rep(av_map_t *m, uint32_t src_px) {
     m->src_n = (uint16_t)(src_px < AV_CANVAS_W ? src_px : AV_CANVAS_W);
 }
 
+// rowrep[y]: how many raster samples collapse into canvas row y. Derived
+// from row[] for the same reason build_rep() is derived from col[] -- one
+// mapping, one formula, no chance of the two disagreeing.
+static void build_rowrep(av_map_t *m, uint32_t row_src_px) {
+    for (uint32_t y = 0; y < AV_CANVAS_H; y++) m->rowrep[y] = 0;
+    for (uint32_t y = m->y0; y < m->y1; y++) {
+        const uint32_t next = (y + 1u < m->y1) ? m->row[y + 1u] : row_src_px;
+        const uint32_t n    = next - m->row[y];
+        m->rowrep[y] = (uint8_t)(n > 255u ? 255u : n);
+    }
+}
+
 static void rebuild(void) {
     if (!s_long_px || !s_short_px) return;
 
@@ -76,6 +88,8 @@ static void rebuild(void) {
 
         build_rep(&av_tate, s_long_px);
         build_rep(&av_yoko, s_short_px);
+        build_rowrep(&av_tate, s_short_px);
+        build_rowrep(&av_yoko, s_long_px);
     } else {
         // Historical layout: 1:1 with pillar/letterboxing, EXCEPT yoko's
         // row axis, which already resampled LONG onto all 240 canvas rows
@@ -91,6 +105,8 @@ static void rebuild(void) {
 
         build_rep(&av_tate, s_long_px);
         build_rep(&av_yoko, s_short_px);
+        build_rowrep(&av_tate, s_short_px);
+        build_rowrep(&av_yoko, s_long_px);
     }
 }
 

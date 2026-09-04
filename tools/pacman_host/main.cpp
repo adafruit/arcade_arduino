@@ -112,8 +112,9 @@ static void usage(const char *argv0) {
            "  --rom DIR       ROM directory (default: search for pacman_assets/rom,\n"
            "                  or $PACMAN_ROM_DIR)\n"
            "  --rotation N    override the machine's default screen rotation\n"
-           "  --stretch       aspect-ratio correction: fill 320x240 in tate,\n"
-           "                  180x240 in yoko, instead of 1:1 with pillarbox\n"
+           "  --stretch       force aspect-ratio correction ON: fill 320x240 in\n"
+           "                  tate, 180x240 in yoko, instead of 1:1 with pillarbox\n"
+           "  --no-stretch    force it OFF (this machine now defaults it ON)\n"
            "                  (0=landscape 1=90 CCW 2=180 3=90 CW), so an\n"
            "                  orientation can be checked without hardware\n"
            "  --frames N      frames to run (default 3000)\n"
@@ -137,14 +138,15 @@ int main(int argc, char **argv) {
     const char *rom_arg = NULL, *ppm_prefix = "frame";
     long frames = 3000, every = 0, ppm_every = 0, stall_lim = 0;
     long rotation = -1;
-    bool stretch = false;
+    int stretch = -1; // -1 = leave the machine's own default alone
     unsigned long long seed_cyc = 0;
     bool do_seed = false;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc)             rom_arg = argv[++i];
         else if (!strcmp(argv[i], "--rotation") && i + 1 < argc)   rotation = atol(argv[++i]);
-        else if (!strcmp(argv[i], "--stretch"))                    stretch = true;
+        else if (!strcmp(argv[i], "--stretch"))                    stretch = 1;
+        else if (!strcmp(argv[i], "--no-stretch"))                 stretch = 0;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)     frames = atol(argv[++i]);
         else if (!strcmp(argv[i], "--every") && i + 1 < argc)      every = atol(argv[++i]);
         else if (!strcmp(argv[i], "--ppm-every") && i + 1 < argc)  ppm_every = atol(argv[++i]);
@@ -172,7 +174,7 @@ int main(int argc, char **argv) {
     if (rotation >= 0 && rotation <= 3) g_system.rotation = (uint8_t)rotation;
     // Aspect-ratio correction (arcade_video_geom.h). Applied after
     // pacman_init(), which is where av_geom_init() built the maps.
-    if (stretch) av_geom_set_stretch(true);
+    if (stretch >= 0) av_geom_set_stretch(stretch != 0);
 
     uint16_t err = 0;
     if (!pacman_load_assets(&g_system, &err)) {

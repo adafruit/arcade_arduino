@@ -232,14 +232,15 @@ int main(int argc, char **argv) {
     const char *rom_arg = NULL, *ppm_prefix = "frame";
     long frames = 3000, every = 0, digest_every = 0, ppm_every = 0, stall_lim = 0;
     long rotation = -1;
-    bool stretch = false;
+    int stretch = -1; // -1 = leave the machine's own default alone
     unsigned long long seed_cyc = 0;
     bool do_seed = false, want_banks = false;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc)               rom_arg = argv[++i];
         else if (!strcmp(argv[i], "--rotation") && i + 1 < argc)     rotation = atol(argv[++i]);
-        else if (!strcmp(argv[i], "--stretch"))                   stretch = true;
+        else if (!strcmp(argv[i], "--stretch"))                   stretch = 1;
+        else if (!strcmp(argv[i], "--no-stretch"))                stretch = 0;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)       frames = atol(argv[++i]);
         else if (!strcmp(argv[i], "--every") && i + 1 < argc)        every = atol(argv[++i]);
         else if (!strcmp(argv[i], "--digest-every") && i + 1 < argc) digest_every = atol(argv[++i]);
@@ -266,7 +267,7 @@ int main(int argc, char **argv) {
     if (rotation >= 0 && rotation <= 3) g_system.rotation = (uint8_t)rotation;
     // Aspect-ratio correction (arcade_video_geom.h), applied after the
     // machine init that built the maps.
-    if (stretch) av_geom_set_stretch(true);
+    if (stretch >= 0) av_geom_set_stretch(stretch != 0);
 
     uint16_t err = 0;
     if (!mspacman_load_assets(&g_system, &err)) {

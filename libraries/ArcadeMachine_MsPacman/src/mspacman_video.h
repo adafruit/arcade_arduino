@@ -52,13 +52,6 @@ extern uint8_t mspacman_lookup_prom[MSPACMAN_LOOKUP_PROM_SIZE];
 // mspacman_draw_frame().
 void mspacman_video_build_caches(void);
 
-// Renders and submits one full frame (HAL_VIDEO_HEIGHT scanlines) from
-// `system`'s video/color/sprite RAM, honoring system->rotation,
-// system->mirror_x and system->flip_screen. Used directly only for
-// landscape/180-degree rotation now -- see mspacman_video_render_scanline()
-// below for why tate/CW drives its own loop instead.
-void mspacman_draw_frame(mspacman_system *system);
-
 // Renders one canvas scanline (dvi_y, 0..HAL_VIDEO_HEIGHT-1 -- the same
 // canvas coordinate every renderer here uses; see arcade_hal_video.h)
 // into `buf`. Exposed (not static) so mspacman_machine.cpp's

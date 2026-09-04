@@ -16,6 +16,7 @@
 // Core 0: game emulation, input polling, board-to-game input mapping.
 // Core 1: hal_video_run() -- drives the DVI signal; never returns.
 #include <arcade_hal_video.h>
+#include <arcade_video_geom.h>
 #include <arcade_hal_input.h>
 #include <mspacman_machine.h>
 #include <mspacman_video.h>
@@ -44,6 +45,23 @@ void setup() {
     // and calls hal_video_init() (struct/queue setup only -- does not start
     // the physical DVI signal, does not touch storage).
     mspacman_init(&g_system);
+
+    // Boot straight into a chosen rotation, for measuring one orientation
+    // without a hand on the rotate button:
+    //   arduino-cli compile --build-property compiler.cpp.extra_flags=-DTEST_ROTATION=2
+    // 0 = landscape, 1 = 90 CCW tate, 2 = 180, 3 = 90 CW tate (this game's
+    // default). NOTE rotation 2 is the UPRIGHT landscape for this family and
+    // 0 is upside-down, matching the tate default being 3 rather than 1 --
+    // see DEVNOTES #33.
+#ifdef TEST_ROTATION
+    g_system.rotation = (uint8_t)(TEST_ROTATION);
+#endif
+    // Aspect-ratio correction, which mspacman_init() turns on by default:
+    //   --build-property compiler.cpp.extra_flags=-DTEST_STRETCH=0
+    // forces it off for an A/B against the historical 1:1 layout.
+#ifdef TEST_STRETCH
+    av_geom_set_stretch(TEST_STRETCH != 0);
+#endif
 
     // Storage/ROM/PROM loading -- blocking, can be slow (SD card retries).
     // For this game it also builds the aux board's decrypted ROM bank out of
@@ -119,7 +137,15 @@ void loop() {
         Serial.print(blocked_us);
         Serial.print("us), work_max ");
         Serial.print(work_max);
-        Serial.println("us");
+        // rot/stretch/starve: "is the red gone" has to be a number per
+        // rotation, not an impression (DEVNOTES #35/#79).
+        Serial.print("us, rot ");
+        Serial.print((int)g_system.rotation);
+        Serial.print(", stretch ");
+        Serial.print((int)av_geom_get_stretch());
+        Serial.print(", starve ");
+        Serial.print(hal_video_take_starve_count());
+        Serial.println("/60");
     }
 }
 

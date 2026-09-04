@@ -217,80 +217,160 @@ static void render_native_row(const mspacman_system *sys, uint32_t native_y, uin
     }
 }
 
-// Full native frame cache (288x224 RGB565 = ~129KB -- affordable on the
-// RP2350B's 520KB SRAM), used ONLY by landscape/180-degree rotation
-// (cases 0/2 below), which genuinely need it: a single physical scanline
-// in those orientations reads one pixel from EVERY native row (a column
-// slice), so all 224 rows must exist before that scanline can be emitted
-// at all -- there is no way to compute those modes one row at a time.
+// Renders one native COLUMN (0..MSPACMAN_GAME_WIDTH-1) of tilemap + sprites
+// into `out` (MSPACMAN_GAME_HEIGHT RGB565 pixels), producing exactly what
+// taking that column out of every render_native_row() would.
 //
-// Tate (cases 1/3, the default) does NOT use this cache -- it renders its
-// one needed native row on demand, directly in
-// mspacman_video_render_scanline() below, same as invaders_video.cpp/
-// lrescue_video.cpp's per-call renderers. GETTING THIS WRONG WAS A REAL
-// BUG, found on real hardware: an earlier version of this file
-// unconditionally rendered the full frame_cache *before* calling
-// hal_video_acquire_scanline() even once. That starves Core 1's DVI
-// scanline queue for the entire ~224-row render burst (no acquire/submit
-// calls happen during it at all), which PicoDVI shows as its own explicit
-// "no valid scanline ready" solid-red fallback (see arcade_arduino/
-// DEVNOTES.md problem #18) -- reported as most of the screen going red
-// with only a sliver of real picture getting through.
-// hal_video_acquire_scanline()/hal_video_submit_scanline() exist
-// specifically to pace Core 0 against Core 1's fixed real DVI rate one
-// scanline at a time; any renderer on this framework must call them from
-// inside its per-scanline loop, never do a large uninterrupted compute
-// burst before the first call in a frame.
+// WHY THIS EXISTS. In yoko (landscape/180) one physical scanline IS a
+// native column, so a row-only renderer cannot emit a single scanline until
+// every row exists -- which is what forced the 129KB frame_cache and the
+// whole-frame burst that starved the DVI queue every frame (DEVNOTES
+// #18/#75). With a column primitive those orientations interleave exactly
+// like tate, the cache is gone, and so is the red.
+//
+// It is a transposition of render_native_row(), not a reimplementation:
+//   - `flip` maps display coords to internal ones on BOTH axes there, so
+//     here the incoming display column is un-flipped once into `x` and the
+//     outgoing display row is flipped per pixel.
+//   - the tilemap walks 28 tile ROWS of one column instead of 36 tile
+//     columns of one row (224 pixels rather than 288 -- slightly cheaper).
+//   - sprites keep the same descending 7..0 order so sprite 0 stays
+//     topmost, and the same two tunnel-wraparound copies; only the overlap
+//     test changes axis, from "does this sprite cover eff_y" to "does it
+//     cover x".
+//
+// Ms. Pac-Man draws all 8 sprites on every line with no per-line selection
+// limit, which is what makes this a straight transposition. A machine whose
+// hardware arbitrates sprites per scanline (Donkey Kong's 16-per-line
+// buffer) cannot be transposed this way without precomputing that
+// arbitration -- see DISPLAY_GEOMETRY.md section 7.
+static void render_native_column(const mspacman_system *sys, uint32_t native_x,
+                                 uint16_t *out) {
+    const bool flip = sys->flip_screen;
+    const uint32_t x = flip ? (uint32_t)(MSPACMAN_GAME_WIDTH - 1) - native_x : native_x;
+    const uint32_t tcol = x >> 3, px = x & 7u;
+
+    // Background tilemap: one tile column, all 28 tile rows.
+    for (uint32_t trow = 0; trow < 28; trow++) {
+        const uint16_t idx  = scan_rows(tcol, trow);
+        const uint8_t  tile = sys->video_ram[idx];
+        const uint8_t  attr = sys->color_ram[idx];
+        for (uint32_t py = 0; py < 8; py++) {
+            const uint32_t eff_y = trow * 8u + py;
+            const uint32_t out_y = flip ? (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - eff_y
+                                        : eff_y;
+            out[out_y] = pen_color(attr, tile_pixels[tile][px][py]);
+        }
+    }
+
+    // Sprites, descending index order (sprite 0 topmost) -- same ordering
+    // render_native_row() mirrors from draw_sprites().
+    for (int sp = 7; sp >= 0; sp--) {
+        const int offs = sp * 2;
+        const uint8_t num  = sys->sprite_num[offs];
+        const uint8_t code = num >> 2;
+        const bool fx = (num & 0x01) != 0;
+        const bool fy = (num & 0x02) != 0;
+        const uint8_t attr = sys->sprite_num[offs + 1];
+
+        const int sx = 272 - sys->sprite_pos[offs + 1];
+        int sy = sys->sprite_pos[offs] - 31;
+        if (sp < 3) sy += 1; // xoffsethack -- see header comment
+
+        // Real hardware clips sprites to tile columns 2..33 (x 16..271) --
+        // draw_sprites()'s `spriteclip`. In the row renderer this is a
+        // per-pixel test; here the whole column is in or out at once.
+        if ((int)x < 16 || (int)x > 271) continue;
+
+        for (int copy = 0; copy < 2; copy++) {
+            const int this_sx = (copy == 0) ? sx : sx - 256;
+            const int col = (int)x - this_sx;   // sprite-local column
+            if (col < 0 || col >= 16) continue;
+            const int px2 = fx ? 15 - col : col;
+            for (int local_y = 0; local_y < 16; local_y++) {
+                const int eff_y = sy + local_y;
+                if (eff_y < 0 || eff_y >= MSPACMAN_GAME_HEIGHT) continue;
+                const int py2 = fy ? 15 - local_y : local_y;
+                const uint8_t pixel2 = sprite_pixels[code][px2][py2];
+                if (pixel2 == 0) continue; // transparent
+                const uint32_t out_y = flip
+                    ? (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - (uint32_t)eff_y
+                    : (uint32_t)eff_y;
+                out[out_y] = pen_color(attr, pixel2);
+            }
+        }
+    }
+}
+
+// Renders the group of native columns that canvas row `dvi_y` collapses,
+// merged into `out`.
+//
+// In yoko the raster's 288-column long axis has to fit 240 canvas rows, so
+// 48 columns share a row with a neighbour. Sampling just one of them (plain
+// nearest-neighbour) does not thin Pac-Man's 1-pixel maze walls, it deletes
+// them -- 21 of the 288 columns contain picture and would never be drawn at
+// all. Rendering the whole group and letting any non-background pixel win
+// keeps them, at the cost of thickening some features by a pixel.
+//
+// Measured on this game: one column per canvas row keeps 58.2% of the lit
+// pixels; merging this axis and the emit axis together keeps 82.3%. Costs
+// ~48 extra render_native_column() calls a frame, about +20% of the column
+// render. See DEVNOTES #80.
+//
+// `first` is the group's first native column in DISPLAY order and `step` is
+// +1 or -1, because case 0 walks the axis reversed and case 2 does not.
+static void render_native_column_group(const mspacman_system *sys, uint32_t first,
+                                       int step, uint32_t count, uint16_t *out) {
+    render_native_column(sys, first, out);
+    if (count < 2u) return;
+
+    static uint16_t extra[MSPACMAN_GAME_HEIGHT];
+    for (uint32_t k = 1; k < count; k++) {
+        render_native_column(sys, (uint32_t)((int)first + step * (int)k), extra);
+        for (uint32_t i = 0; i < (uint32_t)MSPACMAN_GAME_HEIGHT; i++)
+            if (extra[i]) out[i] = extra[i];
+    }
+}
+
+// THE 129KB frame_cache THAT USED TO LIVE HERE IS GONE -- see
+// render_native_column() above, and DEVNOTES #79. It existed only because
+// this file could render rows and a yoko scanline needs a COLUMN, which
+// forced a whole-frame burst before the first hal_video_acquire_scanline()
+// and starved the DVI queue every frame (#18). It was a static, so it cost
+// its full 129KB in every orientation including the tate default, where it
+// was never read.
 //
 // mspacman_video_render_scanline() is exposed here (not static) so
-// mspacman_machine.cpp's mspacman_run_frame() can call it directly, once per
-// scanline, INTERLEAVED with the Z80 cycles that update the VRAM/sprite
-// state it reads -- see that function's own comment (DEVNOTES.md problem
-// #19) for why: even with tate's on-demand rendering fixed, running an
-// entire frame's ~50,688 Z80 cycles in one uninterrupted burst before
-// EVER calling hal_video_acquire_scanline() is the exact same starvation
-// mechanism, just moved into the CPU loop instead of the renderer.
-static uint16_t frame_cache[MSPACMAN_GAME_HEIGHT][MSPACMAN_GAME_WIDTH];
+// mspacman_machine.cpp can call it once per scanline, interleaved with the
+// Z80 cycles that update the VRAM/sprite state it reads (#19).
 
 void mspacman_video_render_scanline(const mspacman_system *sys, uint32_t dvi_y, uint16_t *buf) {
     memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
     bool mir = sys->mirror_x;
     static uint16_t row[MSPACMAN_GAME_WIDTH]; // scratch for tate's on-demand row
+    static uint16_t col[MSPACMAN_GAME_HEIGHT]; // scratch for yoko's on-demand column
 
     switch (sys->rotation) {
 
     case 0: {
-        // Landscape. `av_yoko.row` maps this canvas row onto the raster's
-        // LONG axis; `av_yoko.col` maps canvas columns onto the SHORT axis
-        // -- and in yoko the SHORT axis is the one that must NARROW (180
-        // canvas columns, not MSPACMAN_GAME_HEIGHT's worth at 1:1). See
-        // arcade_video_geom.h.
-        //
-        // The `(W-1) - dy` reversal is NOT cosmetic: a 90-degree rotation
+        // Landscape. This scanline IS a native column: av_yoko.row picks
+        // which one, av_yoko.col maps canvas columns onto the SHORT axis.
+        // The `(W-1) - dy` reversal is NOT cosmetic -- a 90-degree rotation
         // must reverse exactly one axis relative to tate (case 1, which
-        // does not reverse its equivalent), or the result is a mirror
-        // image rather than a rotation (DEVNOTES #21).
-        const uint32_t dy  = av_yoko.row[dvi_y];
-        const uint32_t col = (uint32_t)(MSPACMAN_GAME_WIDTH - 1) - dy;
-        if (av_yoko.col_1to1) {
-            uint16_t *out = buf + av_yoko.x0;
-            for (uint32_t i = 0; i < (uint32_t)MSPACMAN_GAME_HEIGHT; i++) {
-                const uint32_t dx = mir ? (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - i : i;
-                out[i] = frame_cache[dx][col];
-            }
-        } else {
-            for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
-                const uint32_t i  = av_yoko.col[x];
-                const uint32_t dx = mir ? (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - i : i;
-                buf[x] = frame_cache[dx][col];
-            }
-        }
+        // does not), or the result is a mirror image (DEVNOTES #21).
+        render_native_column_group(
+            sys, (uint32_t)(MSPACMAN_GAME_WIDTH - 1) - av_yoko.row[dvi_y], -1,
+            av_yoko.rowrep[dvi_y], col);
+        // MERGE rather than sample: yoko narrows the short axis and
+        // dropping the difference deletes whole maze walls (DEVNOTES #80).
+        if (mir) av_emit_row_merge_rev(buf, col, &av_yoko);
+        else     av_emit_row_merge(buf, col, &av_yoko);
         break;
     }
 
     case 1: {
         // 90 deg CCW (tate). Rendered on demand, one raster row per call --
-        // see frame_cache's header comment for why tate must NOT read it.
+        // rendered on demand from live VRAM, one raster row per call.
         if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) return;
         uint32_t dx = av_tate.row[dvi_y];
         if (mir) dx = (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - dx;
@@ -321,24 +401,13 @@ void mspacman_video_render_scanline(const mspacman_system *sys, uint32_t dvi_y, 
     }
 
     case 2: {
-        // 180 deg: case 0 with BOTH axes reversed relative to it (a 180 is
-        // two 90s), so `col` is deliberately the *un*-reversed raw value
-        // (case 0 already reversed it once; reversing that again would
-        // cancel out) and `dx`'s ternary is the mirror of case 0's.
-        const uint32_t col = av_yoko.row[dvi_y];
-        if (av_yoko.col_1to1) {
-            uint16_t *out = buf + av_yoko.x0;
-            for (uint32_t i = 0; i < (uint32_t)MSPACMAN_GAME_HEIGHT; i++) {
-                const uint32_t dx = mir ? i : (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - i;
-                out[i] = frame_cache[dx][col];
-            }
-        } else {
-            for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
-                const uint32_t i  = av_yoko.col[x];
-                const uint32_t dx = mir ? i : (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - i;
-                buf[x] = frame_cache[dx][col];
-            }
-        }
+        // 180 deg: case 0 with BOTH axes reversed relative to it, so the
+        // column index is deliberately the *un*-reversed raw value and the
+        // emit direction flips.
+        render_native_column_group(sys, av_yoko.row[dvi_y], +1,
+                                   av_yoko.rowrep[dvi_y], col);
+        if (mir) av_emit_row_merge(buf, col, &av_yoko);
+        else     av_emit_row_merge_rev(buf, col, &av_yoko);
         break;
     }
 
@@ -372,24 +441,6 @@ void mspacman_video_render_scanline(const mspacman_system *sys, uint32_t dvi_y, 
     }
 
     default: break;
-    }
-}
-
-void mspacman_draw_frame(mspacman_system *system) {
-    // Only landscape/180 (cases 0/2) need the full frame_cache -- see its
-    // header comment. This is still a real, not-yet-optimized stall risk
-    // for those two orientations (same queue-starvation mechanism the
-    // comment above describes) -- tate (the default, cases 1/3) is the
-    // one confirmed fixed so far.
-    if (system->rotation == 0 || system->rotation == 2) {
-        for (uint32_t y = 0; y < (uint32_t)MSPACMAN_GAME_HEIGHT; y++)
-            render_native_row(system, y, frame_cache[y]);
-    }
-
-    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
-        uint16_t *buf = hal_video_acquire_scanline();
-        mspacman_video_render_scanline(system, i, buf);
-        hal_video_submit_scanline(buf);
     }
 }
 

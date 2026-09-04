@@ -637,6 +637,15 @@ Cost is only known for DKong. Galaga is the other tight game (~14.5ms peak
 after phase 1) and would likely also need the rewrite; the remaining five
 have room.
 
+### Measure in gameplay, not in attract
+
+Galaga's attract loop peaks at 22-29 sprites; its first level opens with 45,
+and that is where it red-lines -- `render_max` 105-130us against 218-311us,
+`starve` <=5 a window against 123-3027 (DEVNOTES #82). **Every frame-budget
+number in this document taken from attract mode is a lower bound**, Pac-Man,
+Ms. Pac-Man and Burger Time included. Those three still need a pass with a
+coin in; Burger Time is the most likely to move, having the least headroom.
+
 ### Verifying it
 
 Most of this needs no hardware, which is the useful part:

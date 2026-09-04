@@ -111,17 +111,28 @@ void loop() {
     bool rotate = hal_input_read(HAL_BTN_ROTATE);
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
 
-    // Scripted coin+start, so the first level's alien entry -- the heaviest
-    // thing this game draws -- is reachable without a hand on the buttons
-    // and lands on the same frame every run:
+    // Scripted play, so this game's WORST case is reachable without a hand
+    // on the buttons and lands on the same frame every run:
     //   --build-property compiler.cpp.extra_flags=-DTEST_AUTOSTART=1
-    // Frames chosen to clear the boot RAM test before coining.
+    //
+    // Coin, start, then move right and keep shooting once the formation is
+    // in. The worst case is the full alien formation PLUS player bullets
+    // PLUS an explosion sprite -- the formation on its own does not red-line
+    // (DEVNOTES #82).
+    //
+    // Two things this got wrong first time. The coin was pressed at frame
+    // 300, before the boot RAM test finished, so the 51XX never saw a
+    // credit -- hence the second-long holds well past it. And fire is a
+    // ONE-SHOT pulse (#32): holding it fires once, so it has to be toggled.
 #ifdef TEST_AUTOSTART
     {
         static uint32_t autof = 0;
         autof++;
-        if (autof > 300 && autof < 312) coin   = true;
-        if (autof > 360 && autof < 372) start1 = true;
+        const uint32_t f = autof % 6000u;   // repeats, so a game over re-enters
+        if (f > 900u  && f < 960u)  coin   = true;
+        if (f > 1080u && f < 1140u) start1 = true;
+        if (f > 1500u && f < 1600u) right  = true;   // slide off centre
+        if (f > 1500u)              fire   = ((f / 12u) & 1u) != 0;
     }
 #endif
 

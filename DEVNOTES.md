@@ -3338,6 +3338,32 @@ it is a known quantity rather than a mystery.
 
 ## Display geometry (`DISPLAY_GEOMETRY.md`)
 
+### MEASURE IN GAMEPLAY, NOT IN ATTRACT -- applies to every game here
+
+Galaga's attract loop peaks at 22-29 sprites. Its first level opens with
+**45**, and that is where it red-lines: `render_max` 105-130us in attract
+against **218-311us** in play, `starve` <=5 a window against 123-3027
+(#82). Everything measured from attract mode understated the real peak by
+two to three times, and the failure was invisible until someone put a coin
+in.
+
+**Every frame-budget number in this file that was taken from attract mode
+should be treated as a lower bound**, including the Phase 3 figures for
+Pac-Man (#79), Ms. Pac-Man and Burger Time (#81). Those three were checked
+across all four rotations and long enough to catch the busy attract scenes,
+but NOT in play:
+
+- Pac-Man / Ms. Pac-Man: attract is the demo maze with 4 ghosts, which is
+  close to gameplay load, so the gap should be small -- but "should be" is
+  what this note exists to stop.
+- Burger Time: attract shows the high-score table and a short demo. Real
+  play adds enemies, pepper and the score row; it also has the tightest
+  headroom of the three (~1.1ms), so it is the most likely to move.
+
+The cheap way to do it is `-DTEST_ROTATION=n` plus a coin and a start, then
+read `work_max`/`starve` off the heartbeat while the busiest thing the game
+does is on screen. There is no substitute for playing it.
+
 ### 77. Donkey Kong's landscape picture was 16 pixels left of centre, and a byte-compare found it
 
 **Symptom:** none anybody had reported -- which is the point.
@@ -3450,6 +3476,53 @@ and the first level opens with 45, so every number in this file taken from
 attract mode understates the real peak by 2-3x. The one thing I contributed
 to tate's frame was building the per-column sprite buckets it never reads;
 that is now gated to yoko.
+
+### 83. Galaga's level-1 peak: what it is NOT, and a benchmark for whoever takes it on
+
+**Attempted and failed.** #82 said the level-1 red was "a sprite-cost
+problem" and pointed at the row renderer's strided
+`sprite_pixels[code][px2][py2]` -- the same trap Burger Time hit in #81.
+Transposed caches were added for both the sprite and tile decode (48KB) and
+the sprite span was clipped once instead of per pixel. Measured on the
+scripted worst case: `render_max` **313us -> 310us**, `starve` 7223 ->
+6461. About 1%, for 48KB. Reverted; the code is back to the shipped
+renderer.
+
+**What that rules out**, all measured rather than argued:
+
+- **Not the decode stride.** Making both reads contiguous changed ~1%.
+  Burger Time's identical-looking fix was worth 20%, so "same trap" was a
+  bad inference from a surface resemblance.
+- **Not sprite pixel volume.** With counters in the row renderer, the worst
+  scanline draws **256 sprite pixels** -- about 16 cells, some 10us of work
+  against a 310us scanline.
+- **Not per-sprite examination overhead.** 64 sprites examined per scanline
+  x 240 scanlines is ~15k trivial compares a frame, well under a
+  millisecond.
+- **Not the audio ISR landing inside the timed region.** That was the best
+  remaining theory -- `render_max` brackets the render call with `micros()`,
+  so a preempting ISR inflates it -- but the ISR rate is essentially
+  identical between attract (86 calls, 88us avg) and level 1 (87 calls,
+  92us avg), and one hit cannot turn 130us into 310us.
+
+**The unexplained fact**, for whoever picks this up: `render_max` scales
+from 105-130us to 310us as sprites go 29 -> 64, while the worst scanline's
+sprite PIXEL count stays low. Something in the sprite path costs far more
+per drawn cell than the pixels account for. The next step is per-layer
+timing ON DEVICE -- star/sprite/tilemap accumulators like
+`dkong_debug_take_render()` in #78 -- not another guess. **Five performance
+hypotheses were wrong in this session** (#78 twice, #82's write direction
+and bank conflicts, and this one); the two that landed both came from
+instrumenting first.
+
+**What IS reusable: a scripted worst case.** `-DTEST_AUTOSTART=1` in
+`galaga_fruitjam` coins up, starts, slides right and keeps firing, so the
+full formation plus bullets plus an explosion lands on the same frame every
+run -- 64 sprites, `render_max` 310us, `starve` 7223. The formation ALONE
+does not red-line; it needs the shots. Two things it got wrong first: the
+coin was pressed before the boot RAM test finished so the 51XX never saw a
+credit, and fire is a one-shot pulse (#32) that has to be toggled rather
+than held.
 
 **It is a sprite-cost problem, not a geometry one.** `render_max` scales
 with sprite count in both orientations, and the row renderer indexes

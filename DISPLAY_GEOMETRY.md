@@ -13,7 +13,7 @@ Status, newest first — the plan is section 7, the remaining work section 8:
 | 1 — one coordinate space (320x240 canvas) | **done**, verified byte-identical |
 | 2 — shared geometry module + aspect correction | **done**, correction OFF by default |
 | 2b — making the correction affordable | **partly**; DKong ~1.0ms and Burger Time ~1.6ms short in tate |
-| 3 — column primitive, kills the landscape red | **Pac-Man, Ms. Pac-Man, Burger Time, Galaga**; DKong + the two 8080bw games left |
+| 3 — column primitive, kills the landscape red | **Pac-Man, Ms. Pac-Man, Burger Time, Galaga, Donkey Kong**; the two 8080bw games (Space Invaders, Lunar Rescue) left |
 | 4 — collapse the rotation cases | not started |
 | 5 — cleanups | not started |
 
@@ -661,6 +661,32 @@ legitimate outcome** if the emit rewrite does not land.
 Cost is only known for DKong. Galaga is the other tight game, but #84 shows
 why that is: its renderer is only 23% of its frame, so an emit rewrite buys
 it far less than the CPU work would. The remaining five have room.
+
+### Donkey Kong: done, all four rotations
+
+Confirmed on hardware 2026-09-04: no red in any rotation, sound correct,
+aspect correction affordable in tate at 262us a frame. Getting there took
+three separate fixes and each one changed the failure mode rather than
+fixing it outright, which is worth remembering as a shape:
+
+1. **A burst** -- landscape rendered all 224 rows into a 114KB cache before
+   submitting a scanline (#92). Replaced with a column primitive. Still red.
+2. **Throughput** -- the column path was slower than the row path it
+   replaced, and mean work exceeded the whole frame (#93). Fixed by
+   inverting the sprite arbitration and hoisting the tilemap lookup out of
+   the per-pixel loop. Still red, but only across the top sixth.
+3. **A burst again, outside the loop** -- landscape ran its audio twice, once
+   in slices and once as a whole-frame call left over from the sequential
+   path (#94). ~2.5ms at the frame boundary, ~40 buffers drained.
+
+**The instrument that found the last one is the one worth keeping**: the
+lowest queue level reached, bucketed by position in the frame, compared
+against a rotation that works. Tate did MORE work per band and never dropped
+below 23 buffers; landscape did less work and started at 0. Costs could not
+see it because the cost was outside the loop being measured.
+
+Space Invaders and Lunar Rescue are the two games still on the old
+whole-frame path and should be expected to show step 1's symptom.
 
 ### Measure in gameplay, not in attract
 

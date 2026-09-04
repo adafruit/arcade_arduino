@@ -14,6 +14,7 @@
 // Core 0: game emulation, input polling, board-to-game input mapping.
 // Core 1: hal_video_run() -- drives the DVI signal; never returns.
 #include <arcade_hal_video.h>
+#include <arcade_video_geom.h>   // av_geom_toggle_on_edge() -- Button 1
 #include <arcade_hal_input.h>
 #include <lrescue_machine.h>
 #include <lrescue_video.h>
@@ -259,6 +260,10 @@ void loop() {
     bool shot   = hal_input_read(HAL_BTN_SHOOT);
     bool rotate = hal_input_read(HAL_BTN_ROTATE);
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
+    // Button 1: aspect correction on/off. Edge-detected inside
+    // av_geom_toggle_on_edge(); the right setting depends on the monitor,
+    // not the game, so it is a runtime toggle rather than a build flag.
+    av_geom_toggle_on_edge(hal_input_read(HAL_BTN_STRETCH));
 
     lrescue_input_update(&g_system, coin, start1, start2, left, right, shot, rotate, mirror);
 

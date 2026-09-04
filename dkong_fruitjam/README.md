@@ -92,6 +92,7 @@ sprites), matching the precedent in the other machine libraries.
 | SHOOT | Jump (Donkey Kong's one action button) |
 | ROTATE | Cycle screen rotation (0°/90° CCW "tate"/180°/270° CW) |
 | MIRROR | Toggle horizontal mirror (for Pepper's-Ghost half-silvered-mirror cabinets) |
+| STRETCH (Button 1) | Toggle aspect-ratio correction. Which setting looks right depends on your MONITOR, not the game: a 16:9 panel already stretches a rotated picture on its own, while a panel forced to 4:3 — or a real 4:3 panel — does not. Try both and keep the one that looks correct. |
 
 Jump uses the board's existing `HAL_BTN_SHOOT` (GPIO 10, header D10) — the
 same physical button Space Invaders fires with. **This game needed no new

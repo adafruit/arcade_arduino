@@ -110,6 +110,10 @@ void loop() {
     bool fire   = hal_input_read(HAL_BTN_SHOOT);
     bool rotate = hal_input_read(HAL_BTN_ROTATE);
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
+    // Button 1: aspect correction on/off. Edge-detected inside
+    // av_geom_toggle_on_edge(); the right setting depends on the monitor,
+    // not the game, so it is a runtime toggle rather than a build flag.
+    av_geom_toggle_on_edge(hal_input_read(HAL_BTN_STRETCH));
 
     // Scripted play, so this game's WORST case is reachable without a hand
     // on the buttons and lands on the same frame every run:

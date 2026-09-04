@@ -149,4 +149,10 @@ void av_geom_init(uint32_t long_px, uint32_t short_px) {
 }
 
 void av_geom_set_stretch(bool on) { s_stretch = on; rebuild(); }
+
+void av_geom_toggle_on_edge(bool pressed) {
+    static bool prev = false;
+    if (pressed && !prev) av_geom_set_stretch(!s_stretch);
+    prev = pressed;
+}
 bool av_geom_get_stretch(void)    { return s_stretch; }

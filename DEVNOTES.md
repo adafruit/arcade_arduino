@@ -4371,3 +4371,45 @@ have the same signature, so it is a one-line swap each, and the fallback
 makes it a no-op wherever stretch is off. Pac-Man and Ms. Pac-Man ship with
 stretch ON by default, so their tate rotations are now taking the new path
 and want a hardware look; both should also get slightly faster.
+
+### 90. Aspect correction is a runtime toggle on Button 1, because it is a property of the MONITOR
+
+#89 made the aspect correction cheap enough to ship. What it could not
+settle is whether it should be ON, and the reason is not about the games at
+all: **the right setting depends on the panel.**
+
+- A 16:9 HDMI monitor rotated for tate already stretches the picture on its
+  own, so the corrected image is over-corrected.
+- A wide panel that can be forced to 4:3 does not, so the correction is
+  needed.
+- A genuine 4:3 panel does not either.
+
+Only the person looking at the screen can say which they have. So it is a
+button, not a build flag and not a per-game default.
+
+**Button 1 (GPIO 0)**, joining ROTATE (Button 2, GPIO 4) and MIRROR
+(Button 3, GPIO 5). It was the last free button on the board -- GPIO 0 is
+UART0 TX by default, and is only available because this project's
+diagnostics go over USB CDC and nothing uses `Serial1`.
+
+The edge detection lives in `av_geom_toggle_on_edge()` in ArcadeHAL, **not**
+in the seven machines' `input_update()` where rotate and mirror live. That
+is deliberate and is the difference in kind: rotation and mirroring are
+per-cabinet game state held on each machine's `system` struct, while stretch
+is one global property of the display. One implementation, one behaviour,
+seven one-line call sites.
+
+Toggling rebuilds both maps mid-frame -- a few hundred microseconds, which
+the 32-buffer runway from #85 absorbs without a flicker. Before that change
+it would have cost a red line on the press, which is a small illustration of
+why the runway work had to come first.
+
+Verified on hardware: pressing Button 1 flips `stretch` in the heartbeat
+one step per press, with the picture snapping between letterboxed and
+full-height, at a steady 60fps either way. All seven sketches carry it and
+all seven READMEs document it.
+
+**Not persisted.** The setting resets to off on every boot, which for a
+fixed installation is the wrong default -- whoever owns the cabinet sets it
+once and wants it remembered. `FlashStorage` is already a dependency; this
+is the obvious next small piece of work.

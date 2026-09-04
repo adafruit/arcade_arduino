@@ -168,6 +168,21 @@ void av_geom_init(uint32_t long_px, uint32_t short_px);
 void av_geom_set_stretch(bool on);
 bool av_geom_get_stretch(void);
 
+// Edge-detected toggle for a physical button. Call once per frame with the
+// button's debounced level; a PRESS flips the aspect correction once, not
+// once per frame the button is held -- the same shape as the rotate/mirror
+// handling in each machine's input_update().
+//
+// This lives here rather than in the seven machines because, unlike rotation
+// and mirroring, the correct setting is a property of the MONITOR, not of
+// the game: a 16:9 panel already stretches a tate picture on its own, a
+// panel forced to 4:3 does not, and a genuine 4:3 panel does not. One
+// implementation, one behaviour, every game.
+//
+// Rebuilding both maps costs a few hundred microseconds and happens on the
+// press only -- never in a frame loop.
+void av_geom_toggle_on_edge(bool pressed);
+
 // Writes one raster row onto the canvas through `m`'s column mapping.
 // `dst` is the whole scanline buffer (indexed by absolute canvas x); `src`
 // is `m->src_n` raster samples. Equivalent to

@@ -29,6 +29,21 @@ enum {
     HAL_BTN_SHOOT,      // GPIO 10 (header D10)
     HAL_BTN_UP,         // GPIO 43 (header A3) -- added for Pac-Man's 4-way joystick
     HAL_BTN_DOWN,       // GPIO 44 (header A4) -- added for Pac-Man's 4-way joystick
+    HAL_BTN_STRETCH,    // GPIO 0  (Button 1)  -- toggle aspect correction
+                        //
+                        // The third meta control, alongside ROTATE and
+                        // MIRROR, and it is a per-INSTALLATION setting
+                        // rather than a per-game one: whether the picture
+                        // should be aspect-corrected depends on the monitor,
+                        // not the game. A 16:9 panel stretches a tate image
+                        // on its own; a panel forced to 4:3, or a real 4:3
+                        // panel, does not. Only the person looking at it can
+                        // say which, so it is a button.
+                        //
+                        // GPIO 0 is UART0 TX by default. Nothing in this
+                        // project uses Serial1 -- diagnostics go over USB
+                        // CDC -- so it is free, but that is why it was the
+                        // last button left.
 };
 
 // Undebounced button level, bypassing hal_input_read()'s filter (see

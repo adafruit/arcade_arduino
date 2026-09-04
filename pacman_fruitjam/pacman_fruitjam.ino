@@ -93,6 +93,10 @@ void loop() {
     bool right  = hal_input_read(HAL_BTN_RIGHT);
     bool rotate = hal_input_read(HAL_BTN_ROTATE);
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
+    // Button 1: aspect correction on/off. Edge-detected inside
+    // av_geom_toggle_on_edge(); the right setting depends on the monitor,
+    // not the game, so it is a runtime toggle rather than a build flag.
+    av_geom_toggle_on_edge(hal_input_read(HAL_BTN_STRETCH));
 
     // Scripted play, opt-in:
     //   --build-property compiler.cpp.extra_flags=-DTEST_AUTOSTART=1

@@ -208,6 +208,17 @@ void setup() {
     set_sys_clock_khz(252000, true);
 
     lrescue_init(&g_system);
+
+    // Boot straight into a chosen rotation, for measuring one orientation
+    // without a hand on the rotate button:
+    //   arduino-cli compile --build-property compiler.cpp.extra_flags=-DTEST_ROTATION=0
+    // 0 = landscape, 1 = 90 CCW tate (default), 2 = 180, 3 = 90 CW tate.
+#ifdef TEST_ROTATION
+    g_system.rotation = (uint8_t)(TEST_ROTATION);
+    Serial.print("[lrescue] TEST_ROTATION override -> ");
+    Serial.println((int)g_system.rotation);
+#endif
+
     g_assets_ok = lrescue_load_assets(&g_system, &g_error_color);
 
     // hal_input_init() has run by now (inside lrescue_load_assets()) --
@@ -288,7 +299,14 @@ void loop() {
         Serial.print(blocked_us);
         Serial.print("us), work_max ");
         Serial.print(work_max);
-        Serial.println("us");
+        // Queue-starvation counter -- the ONLY instrument that sees the red
+        // (arcade_hal_video.h), and exactly what #16 above dead-ended for
+        // want of.
+        Serial.print("us, rot ");
+        Serial.print((int)g_system.rotation);
+        Serial.print(", starve ");
+        Serial.print(hal_video_take_starve_count());
+        Serial.println("/60");
     }
 }
 

@@ -2381,12 +2381,17 @@ faithfully emulated), and the 8257 moves ~384 bytes a frame through the
 CPU's own read/write path. Comfortable at 60%, but this is the game to
 measure first if anything is ever added to its frame.
 
-**Also confirmed in play:** two-player mode, all four screen rotations, and
-the second stage. Note that unlike Pac-Man and Ms. Pac-Man, this game's yoko
-orientations were reported working rather than showing the red lines
-problems #18/#19/#20 predict for the sequential path -- consistent with its
-lighter per-frame budget (57% here against Ms. Pac-Man's), but worth a
-closer look if that ever changes.
+**Also confirmed in play:** two-player mode and the second stage.
+
+**RETRACTED (see #75):** this section previously said all four rotations
+were confirmed, and that unlike Pac-Man and Ms. Pac-Man this game's yoko
+orientations "were reported working" despite the sequential path, blaming
+its lighter per-frame budget. Both halves were wrong. Measured with the
+starve counter, DKong in rotation 0 starves the DVI queue **120-123 times
+per 60 frames** against **0** in rotation 1 -- #18 applies to it exactly as
+its source predicts. And the budget argument was backwards: this is the
+second-heaviest game in the project, not a light one. **Tate (rotation 1) is
+the confirmed-working orientation; landscape and 180 are not.**
 
 **Still not verified:** the later stages beyond the second (elevators,
 rivets).
@@ -3287,3 +3292,158 @@ Other candidates, in order:
 situation, everything else about the port matches the reference, and the
 next step needs a recording nobody has yet needed to make. Recorded here so
 it is a known quantity rather than a mystery.
+
+## Display geometry (`DISPLAY_GEOMETRY.md`)
+
+A full audit of the display path -- what the canvas actually is, whether
+either orientation matches the original cabinet's aspect ratio, and why
+landscape goes red -- is in `DISPLAY_GEOMETRY.md`, together with a phased
+plan. The two entries below are the parts that belong in the problem record:
+a measurement that retracts an earlier claim, and the geometry facts that
+should stop being rediscovered.
+
+### 75. The landscape/180 red is real in DKong too -- the "yoko works" report is RETRACTED
+
+**The claim being retracted.** The "Confirmed working on real hardware"
+section said of Donkey Kong: *"unlike Pac-Man and Ms. Pac-Man, this game's
+yoko orientations were reported working rather than showing the red lines
+problems #18/#19/#20 predict for the sequential path -- consistent with its
+lighter per-frame budget."*
+
+**Why it was doubted.** It contradicts the code. `dkong_machine.cpp` gates
+`run_frame_interleaved()` on `rotation == 1 || rotation == 3`, and
+`dkong_video.cpp` builds the same full-frame `frame_cache` Pac-Man does, so
+structurally DKong in rotation 0/2 does exactly what #18 describes: a
+whole-frame CPU burst plus a whole-frame render burst, both before the
+frame's first `hal_video_acquire_scanline()`. And the "lighter budget"
+justification was backwards -- DKong is the *second-heaviest* game in the
+project, not a light one.
+
+**How it was settled.** `hal_video_take_starve_count()` had been declared in
+`arcade_hal_video.h` and implemented in `hal_video_fruitjam.cpp` since #35 --
+and **called from nowhere**. The project's only instrument for the one
+failure mode invisible to every other instrument was dead code. Wiring it
+into the sketch heartbeat, plus a `-DTEST_ROTATION=n` build flag so an
+orientation can be measured without a hand on the rotate button, made the
+question answerable in two flashes per game:
+
+```
+arduino-cli compile --build-property compiler.cpp.extra_flags=-DTEST_ROTATION=0 \
+    -u -p /dev/cu.usbmodem<...> dkong_fruitjam
+```
+
+**Measured on hardware:**
+
+| game / rotation | work | frame | starve / 60 frames |
+|---|---|---|---|
+| Lunar Rescue, rot 1 (tate) | 3.1-3.4ms | 17.3ms | **4-5** |
+| Lunar Rescue, rot 0 (landscape) | 4.9-5.3ms | 17.3ms | **5** |
+| DKong, rot 1 (tate) | 11.7-13.7ms | 16.66ms, pinned | **0** |
+| DKong, rot 0 (landscape) | 12.4-14.7ms | 15.6-17.9ms, jittery | **120-123** |
+
+**Verdict: the report was wrong.** DKong's landscape starves the DVI queue
+about **twice per frame, every frame**, while its tate path starves *zero*
+times. There is nothing special about DKong; #18 applies to it exactly as
+predicted from its source.
+
+**Read the counter correctly.** 2 events per frame is not "2 bad
+scanlines" -- it is the saturation value for *one burst per frame*. The
+counter increments on a submit that leaves the valid-scanline queue at or
+below one entry. During the 12.5ms burst there are no submits at all, so
+nothing is counted while the queue is empty and Core 1 is painting red;
+the two events are the first two submits *after* the burst, before the
+producer gets back ahead of Core 1. The red itself is the ~180 scanlines
+in between. **A starve count of ~2/frame means the queue bottomed out once
+that frame, not that two pixels were wrong.**
+
+**Lunar Rescue is the control, and it confirms the other half of #18's
+logic.** Its landscape is exactly as clean as its tate -- same 4-5/60 floor
+in *both* orientations, so that floor is the residual #16 bus-contention
+effect and not an orientation effect at all. Lunar Rescue and Space
+Invaders are exempt from the landscape red not because their rotation code
+is better but because their video hardware is a 1-bit column-major bitmap
+in CPU RAM: `vram[dx*32 + (col>>3)]` costs the same along either axis, so
+there is no compositing step, no frame cache, and no burst.
+
+**What generalises:** *"reported working"* is not a measurement, and on this
+project the difference is not academic -- a game can look plausible while
+starving the queue twice a frame. Where a structural argument from the
+source contradicts an observation, prefer the source and go get a number.
+The instrument for this one already existed and only needed calling.
+
+**Incidental, unrelated to geometry, recorded so it is not lost:** Lunar
+Rescue's `frame` sits at **17.27-17.35ms in both rotations**, i.e. ~57.9fps
+rather than the flat 60fps DKong and Galaga hold, and its own `gap=` counter
+drifts a steady **+3600 cycles per 60 frames** -- the emulated CPU falling
+progressively behind its target. Not investigated here.
+
+### 76. Reference: display geometry facts that should stop being rediscovered
+
+Derivations, the per-game aspect tables and the fix plan are in
+`DISPLAY_GEOMETRY.md`. These are the load-bearing facts.
+
+- **The board is a 320x240 canvas of square pixels, not a 640x480
+  framebuffer.** Vertical doubling by `dvi_vertical_repeat = 2` is
+  documented (#8-#10). Horizontal doubling is not: `DVI_SYMBOLS_PER_WORD`
+  defaults to 2 and `_dvi_prepare_scanline_16bpp()` passes `pixwidth / 2`,
+  so libdvi reads **only `scanbuf[0..319]`** and doubles it across the line.
+  Bytes 320..639 of every scanline buffer are read by nothing, ever.
+
+- **The HAL contract still says otherwise.** `HAL_VIDEO_WIDTH` is 640 and
+  `dvi_y` arrives in 0..479 with only even values ever used, so the project
+  carries **two coordinate systems for one canvas** -- x in 320-space, y in
+  480-space -- and every rotation formula silently bridges them with a x2 or
+  /2. That is not cosmetic; see the next point.
+
+- **A change to the sample rate is not a change to the geometry.** #10's
+  summary -- *"preserved every existing TATE_BY/TATE_BX/LAND_BX calibration
+  constant unchanged"* -- was true of the border constants, which are
+  **positions**, and false of landscape's `/ HAL_VIDEO_HEIGHT` divisor,
+  which is a **resampling ratio**. The x1.875 stretch was a genuine,
+  hardware-measured fix in `invaders_pico` (canvas 320x480, real 2:1
+  pixels); after #10 it takes 240 samples of a 256- or 288-entry axis
+  instead of 480, turning a lossless upsample into a downsample that
+  silently drops 16 native lines (48 in the Namco games) on an uneven
+  truncating-division schedule. That is #23's irregular grid, and it is the
+  shared formula in every game except Burger Time. **Positions transfer
+  across a sample-rate change; ratios do not.**
+
+- **No renderer scales to the screen.** `TATE_BX = (320 - 256) / 2` is a
+  *centring* constant. The only scale factor in the project is
+  `btime_video.cpp`'s `g_aspect_stretch`, and it is off by default. So we do
+  not match the original aspect ratio in either orientation: in tate the
+  picture is too wide for its height by +3.7% (Namco), +16.7%
+  (Invaders/LRescue/DKong) or +33.3% (Burger Time); in yoko by +24.4% for
+  every 224-tall game and +33.3% for Burger Time.
+
+- **Tate is the supported mode for a geometric reason, not a taste one.**
+  Rotated, the canvas offers 240 x 320 = **77k pixels** for a game with
+  57-64k: every native pixel survives and the picture is *upsampled*.
+  Un-rotated, the aspect-correct window is 180 x 240 = **43k pixels** for
+  the same game. **Yoko must discard 20-37% of the game's pixels, inherently,
+  at any quality of implementation.** Worth knowing before anyone
+  re-litigates it as a rendering-quality problem better code could fix.
+
+- **Landscape needs the picture NARROWER, not taller.** A 3:4 portrait image
+  inside a 4:3 landscape canvas at full height is **180 canvas columns
+  wide, not 224**. The current code draws it 224 wide, which is the whole of
+  yoko's +24.4%. This is the one most likely to be got backwards.
+
+- **Every scaling ratio in this project is exact at 320 columns**, so the
+  aspect fix needs no division in any inner loop: 240 -> x3/4, 256 -> x4/5,
+  288 -> x9/10. A 320-entry LUT built at init covers all seven games.
+
+- **The 8-buffer scanline queue is ~555us of cover and cannot be raised**
+  (#9 -- `dvi_init()` hardcodes 8). Any renderer that needs more slack than
+  that has to get it by **not bursting**, not by buffering. This is why the
+  landscape fix is a column-render primitive rather than a bigger queue or a
+  second frame buffer.
+
+- **The host harness cannot see either failure.** `dump_ppm()` loops
+  `y = 0 .. HAL_VIDEO_HEIGHT-1`, rendering **every** physical row -- 480
+  samples, the *pre-#10* rate. It renders landscape the lossless way and so
+  structurally cannot reproduce the dropped-row bug at all. (It cannot see
+  red either, but that part is deliberate and documented in `hal_host.cpp`.)
+  **Fix `dump_ppm()` before changing any renderer**, or the change is
+  validated against a model that does not contain the defect -- and expect
+  to regenerate every byte-compare baseline when you do.

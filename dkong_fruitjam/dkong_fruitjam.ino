@@ -49,6 +49,16 @@ void setup() {
     dkong_init(&g_system);
     Serial.println("[dkong] boot: dkong_init done");
 
+    // Boot straight into a chosen rotation, for measuring one orientation
+    // without a hand on the rotate button:
+    //   arduino-cli compile --build-property compiler.cpp.extra_flags=-DTEST_ROTATION=0
+    // 0 = landscape, 1 = 90 CCW tate (default), 2 = 180, 3 = 90 CW tate.
+#ifdef TEST_ROTATION
+    g_system.rotation = (uint8_t)(TEST_ROTATION);
+    Serial.print("[dkong] TEST_ROTATION override -> ");
+    Serial.println((int)g_system.rotation);
+#endif
+
     // Storage/ROM/PROM loading -- blocking, can be slow (SD card retries).
     // Deliberately finishes before Core 1 is allowed to start the DVI pump.
     Serial.println("[dkong] boot: loading assets...");
@@ -155,7 +165,14 @@ void loop() {
         Serial.print(work_max);
         Serial.print("us, audio ");
         Serial.print(dkong_debug_audio_us());
-        Serial.println("us");
+        // Queue-starvation counter -- the ONLY instrument that sees the red
+        // (arcade_hal_video.h): `work` can sit inside the frame budget while
+        // an uneven patch inside that frame drains Core 1's queue anyway.
+        Serial.print("us, rot ");
+        Serial.print((int)g_system.rotation);
+        Serial.print(", starve ");
+        Serial.print(hal_video_take_starve_count());
+        Serial.println("/60");
     }
 }
 

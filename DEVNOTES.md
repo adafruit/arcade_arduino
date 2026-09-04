@@ -4419,3 +4419,61 @@ is `architectures=samd` and cannot build for RP2350 at all. It is a stale
 vendored library that nothing in this project includes. The arduino-pico
 core's own `EEPROM` is the right vehicle; see #91 for what persisting these
 actually costs.)
+
+### 91. Persisting the three display settings: the design, and why it is not built yet
+
+Deliberately NOT implemented -- recorded so the analysis does not have to be
+redone. Asked for and deferred 2026-09-04.
+
+**What would be stored.** Rotation (0-3), mirror (bool), stretch (bool).
+Eight bytes with a magic number, a version byte and a checksum, so a corrupt
+or first-boot sector falls back to defaults rather than booting sideways.
+**One setting shared by all seven games**, decided deliberately: it is one
+cabinet with one monitor. (And the longer-term plan is a separate Fruit Jam
+per cabinet anyway, which makes the question moot.)
+
+**`libraries/FlashStorage` cannot be used.** It is `architectures=samd`. The
+arduino-pico core's own `EEPROM` -- a 4KB emulated flash sector -- is the
+vehicle.
+
+**The cost is the write, not the storage.** Erase + program of a 4KB sector
+is ~40-60ms. Core 0 runs the flash routines from RAM for that whole time and
+produces NO scanlines, so ~3 frames starve. The 32-buffer queue holds 2ms.
+A save therefore always costs a brief visible glitch. That is inherent.
+
+**The part that had to be checked, and is good news.** The stock
+`EEPROM.commit()` calls `rp2040.idleOtherCore()`, which would park Core 1 and
+drop the DVI SIGNAL -- a monitor re-sync, far worse than a few starved
+frames. That is unnecessary here, because Core 1 never touches flash:
+
+```
+hal_video_run()        __not_in_flash("dvi")
+libdvi's functions     __dvi_func      = __not_in_flash_func
+dvi_timing_*           __dvi_const     = __not_in_flash_func
+tmds_table             __scratch_x
+```
+
+A custom commit that SKIPS the idle keeps the signal alive and sync locked;
+the glitch becomes a couple of scrambled frames instead. **This invariant is
+load-bearing and silently breaks if anyone ever moves a DVI function back to
+flash** -- assert it in a comment at the commit site.
+
+**Design.**
+
+- Defer and coalesce: mark dirty on change, commit only after the settings
+  have been UNCHANGED for ~3 seconds. Cycling four rotations becomes one
+  write, and the glitch lands after the player stops pressing rather than
+  during play. In practice invisible.
+- Load at boot, after `av_geom_init()` and before Core 1 starts -- free, that
+  phase already blocks.
+- Custom `settings_commit()` in ArcadeBoard_FruitJam, no `idleOtherCore()`.
+
+**Falls out for free:** the sector is the last 4KB of a 16MB flash while
+sketches are ~300KB, so settings survive reflashing a new `.uf2`, and are
+shared across games automatically. Wear is a non-issue -- 100k cycles against
+a 3-second coalescing rule.
+
+**Effort:** ~80 lines in ArcadeHAL, ~40 board-specific, 3-4 lines per sketch
+(rotation and mirror live on each machine's `system` struct, stretch is
+global, so the apply step cannot be fully shared). The real time is hardware
+verification: seven card swaps.

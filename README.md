@@ -77,7 +77,12 @@ its own, and the correction would over-correct it; a wide panel forced to 4:3,
 or a real 4:3 panel, needs the correction. Only the person looking at the
 screen can say which, so it is a button rather than a build option. It is off
 by default (on for Pac-Man and Ms. Pac-Man, whose native raster is already
-close to 4:3). The setting is not remembered across a power cycle.
+close to 4:3).
+
+**None of the three settings is remembered across a power cycle yet** —
+rotation, mirror and aspect correction all reset to their defaults at boot.
+Persisting them is planned future work; see `DISPLAY_GEOMETRY.md` section 8
+and `DEVNOTES.md` #91 for the design and the one hazard it has to avoid.
 
 `DISPLAY_GEOMETRY.md` has the derivation, the per-game measurements, and the
 frame-budget cost of each option.

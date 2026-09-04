@@ -672,8 +672,20 @@ every rotation.
    ~0.6-1.4ms in yoko on every game. It is what would let Galaga's landscape
    correction back on, and would give Burger Time's rotation 2 more than its
    current 13 of 32 buffers.
-2. **Persisting the three display settings** across a power cycle. Design and
-   costs are worked out in DEVNOTES #91; nothing is built.
+2. **Persisting the three display settings across a power cycle** —
+   **rotation, horizontal mirror, and aspect-ratio correction.** All three
+   reset to their defaults at every boot, which is the wrong behaviour for a
+   fixed installation: whoever owns the cabinet sets them once for their
+   monitor and expects them remembered. Design, costs and the one non-obvious
+   hazard are worked out in DEVNOTES #91 — nothing is built.
+
+   The short version: the settings are 8 bytes, but a flash write stalls
+   Core 0 for 40-60ms and so costs a visible glitch, which is why the design
+   defers and coalesces the write until the settings have been unchanged for
+   ~3 seconds. The hazard is that the stock `EEPROM.commit()` calls
+   `rp2040.idleOtherCore()`, which would park Core 1 and drop the DVI signal
+   entirely; that is unnecessary here because Core 1 never touches flash, and
+   a commit that skips it keeps sync locked.
 3. **Shrinking the scanline buffers 640 -> 320.** Would halve the 40KB the
    32-buffer queue costs (#85). Phase 5.
 4. **Collapsing the four rotation cases** per renderer. Phase 4, and now

@@ -427,6 +427,20 @@ typedef struct {
 static galaga_sprite_ent g_sprites[64];
 static int               g_sprite_count = 0;
 
+// The latched sprites bucketed by raster COLUMN, the same trick the
+// starfield uses. render_native_column() otherwise tests every one of up to
+// 64 sprites on every one of 240 columns; here it visits only the handful
+// that actually cover the column.
+//
+// This is the peak-cost lever, and peak is what matters: the DVI queue holds
+// 8 scanlines (~555us) and a RUN of scanlines slower than the 69us line rate
+// drains it. Landscape rotation 2 was starving with 2.9ms of average
+// headroom because its expensive columns land late in the frame, after the
+// vblank slack is spent (DEVNOTES #82).
+#define SPR_MAX_PER_COL 64
+static uint8_t g_spr_col_n[GALAGA_GAME_WIDTH];
+static uint8_t g_spr_col_i[GALAGA_GAME_WIDTH][SPR_MAX_PER_COL];
+
 // Number of sprites the last galaga_video_begin_frame() decoded as
 // on-screen. Exposed for the sketch's frame-budget heartbeat: sprite count
 // is the main content-driven driver of render cost, so a `work` spike is
@@ -474,6 +488,21 @@ GALAGA_VID_RAMFUNC void galaga_video_begin_frame(const galaga_system *sys) {
         e->sizey  = (uint8_t)sizey;
     }
     g_sprite_count = n;
+
+    // Bucket them by column, in list order so the draw order (later sprite
+    // over earlier) is preserved exactly.
+    for (uint32_t c = 0; c < (uint32_t)GALAGA_GAME_WIDTH; c++) g_spr_col_n[c] = 0;
+    for (int si = 0; si < n; si++) {
+        const galaga_sprite_ent *e = &g_sprites[si];
+        int x0 = e->sx;
+        int x1 = e->sx + 16 * (e->sizex + 1);
+        if (x0 < 0) x0 = 0;
+        if (x1 > GALAGA_GAME_WIDTH) x1 = GALAGA_GAME_WIDTH;
+        for (int c = x0; c < x1; c++) {
+            if (g_spr_col_n[c] < SPR_MAX_PER_COL)
+                g_spr_col_i[c][g_spr_col_n[c]++] = (uint8_t)si;
+        }
+    }
 }
 
 // `reverse_x` writes the row right-to-left. It is a purely GEOMETRIC
@@ -582,27 +611,44 @@ GALAGA_VID_RAMFUNC static void render_native_row(const galaga_system *sys, uint3
 //
 // Galaga draws all its latched sprites on every line with no per-line
 // arbitration, which is what makes a straight transposition possible.
+// `rev_out` reverses the OUTPUT index, so the caller can write straight
+// into the scanline buffer for the mirrored orientations instead of going
+// through a scratch column and an emit pass -- the same shortcut the tate
+// fast path takes, and worth ~1.3ms a frame here.
+//
+// `merge` skips the initial clear, which turns a second call into a MERGE
+// of two adjacent raster columns for free: every layer below already writes
+// only non-transparent pixels, so the clear is the ONLY thing that would
+// erase the previous column. Yoko collapses 288 raster columns onto 240
+// canvas rows and dropping the odd one out deletes 1-pixel features
+// (DEVNOTES #80), so the merge is required -- doing it this way costs
+// nothing beyond the second render itself.
 GALAGA_VID_RAMFUNC static void render_native_column(const galaga_system *sys,
-                                                    uint32_t native_x, uint16_t *out) {
+                                                    uint32_t native_x, uint16_t *out,
+                                                    bool rev_out, bool merge) {
     const bool flip = sys->flip_screen;
+    const bool orev = flip ^ rev_out;
     // The row renderer maps internal x to display x with `rev`; with no
     // reverse_x that is just `flip`, so invert it once here.
     const uint32_t x = flip ? (uint32_t)(GALAGA_GAME_WIDTH - 1) - native_x : native_x;
 
     // Background: black, then the starfield -- drawn FIRST so sprites and
     // the tilemap paint over it, matching screen_update_galaga()'s order.
-    for (uint32_t i = 0; i < (uint32_t)GALAGA_GAME_HEIGHT; i++) out[i] = 0;
+    if (!merge)
+        for (uint32_t i = 0; i < (uint32_t)GALAGA_GAME_HEIGHT; i++) out[i] = 0;
     {
         const uint8_t sn = star_col_n[x];
         for (uint8_t i = 0; i < sn; i++) {
             const uint32_t ey = star_col_y[x][i];
-            out[flip ? (uint32_t)(GALAGA_GAME_HEIGHT - 1) - ey : ey] = star_col_c[x][i];
+            out[orev ? (uint32_t)(GALAGA_GAME_HEIGHT - 1) - ey : ey] = star_col_c[x][i];
         }
     }
 
     // Sprites -- decoded once per frame, see galaga_video_begin_frame().
-    for (int si = 0; si < g_sprite_count; si++) {
-        const galaga_sprite_ent *e = &g_sprites[si];
+    const uint8_t sc_n = g_spr_col_n[x];
+    const uint8_t *sc_i = g_spr_col_i[x];
+    for (uint8_t k = 0; k < sc_n; k++) {
+        const galaga_sprite_ent *e = &g_sprites[sc_i[k]];
         const uint16_t *spen = sprite_pen_rgb[e->color];
 
         for (int cell_col = 0; cell_col <= e->sizex; cell_col++) {
@@ -619,7 +665,7 @@ GALAGA_VID_RAMFUNC static void render_native_column(const galaga_system *sys,
                 const int sub_code = (e->code + GFX_OFFS[gfx_row][gfx_col]) & (NUM_SPRITES - 1);
                 const uint8_t pixel2 = sprite_pixels[sub_code][px2][py2];
                 if (pixel2 == 0) continue; // transparent
-                out[flip ? (uint32_t)(GALAGA_GAME_HEIGHT - 1) - (uint32_t)eff_y
+                out[orev ? (uint32_t)(GALAGA_GAME_HEIGHT - 1) - (uint32_t)eff_y
                          : (uint32_t)eff_y] = spen[pixel2];
             }
         }
@@ -639,27 +685,22 @@ GALAGA_VID_RAMFUNC static void render_native_column(const galaga_system *sys,
             const uint8_t pixel2 = tp[py];
             if (!pixel2) continue; // 0 = transparent, see header comment
             const uint32_t ey = row * 8u + py;
-            out[flip ? (uint32_t)(GALAGA_GAME_HEIGHT - 1) - ey : ey] = pen[pixel2];
+            out[orev ? (uint32_t)(GALAGA_GAME_HEIGHT - 1) - ey : ey] = pen[pixel2];
         }
     }
 }
 
-// Renders the group of native columns that canvas row `dvi_y` collapses,
-// merged into `out`. Yoko fits a 288-column long axis onto 240 canvas rows,
-// so 48 columns share a row; sampling one and dropping the other deletes
-// 1-pixel features rather than thinning them (DEVNOTES #80).
+// Renders the group of raster columns that canvas row `dvi_y` collapses,
+// merged, into `out`. The merge is free: the second and later columns are
+// rendered with `merge` set, so they overlay the first instead of clearing
+// it. No scratch buffer and no second pass.
 GALAGA_VID_RAMFUNC static void render_native_column_group(const galaga_system *sys,
                                                           uint32_t first, int step,
-                                                          uint32_t count, uint16_t *out) {
-    render_native_column(sys, first, out);
-    if (count < 2u) return;
-
-    static uint16_t extra[GALAGA_GAME_HEIGHT];
-    for (uint32_t k = 1; k < count; k++) {
-        render_native_column(sys, (uint32_t)((int)first + step * (int)k), extra);
-        for (uint32_t i = 0; i < (uint32_t)GALAGA_GAME_HEIGHT; i++)
-            if (extra[i]) out[i] = extra[i];
-    }
+                                                          uint32_t count, uint16_t *out,
+                                                          bool rev_out) {
+    render_native_column(sys, first, out, rev_out, false);
+    for (uint32_t k = 1; k < count; k++)
+        render_native_column(sys, (uint32_t)((int)first + step * (int)k), out, rev_out, true);
 }
 
 // THE 129KB frame_cache THAT USED TO LIVE HERE IS GONE. It existed only
@@ -745,25 +786,70 @@ GALAGA_VID_RAMFUNC void galaga_video_render_scanline(const galaga_system *sys, u
         return;
     }
 
-    memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
     static uint16_t colbuf[GALAGA_GAME_HEIGHT]; // yoko's on-demand column
+
+    // Yoko clears only the PILLARBOX. render_native_column() writes every
+    // pixel of the picture itself, so clearing the full width here would
+    // write 224 of the 320 columns twice -- 53,760 redundant stores a
+    // frame, on the SRAM bus Core 1's DMA is competing for. The tate path
+    // below has always cleared only its borders, for the same reason.
+    if (sys->rotation == 0 || sys->rotation == 2) {
+        memset(buf, 0, av_yoko.x0 * sizeof(uint16_t));
+        memset(buf + av_yoko.x1, 0,
+               (HAL_VIDEO_WIDTH - av_yoko.x1) * sizeof(uint16_t));
+    } else {
+        memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
+    }
+
     switch (sys->rotation) {
 
     case 0: { // landscape -- see arcade_video_geom.h; yoko NARROWS the short axis
         const uint32_t dy  = av_yoko.row[dvi_y];
         const uint32_t col = (uint32_t)(GALAGA_GAME_WIDTH - 1) - dy;
-        render_native_column_group(sys, col, -1, av_yoko.rowrep[dvi_y], colbuf);
-        // MERGE rather than sample -- see av_emit_row_merge() and #80.
-        if (mir) av_emit_row_merge_rev(buf, colbuf, &av_yoko);
-        else     av_emit_row_merge(buf, colbuf, &av_yoko);
+        if (av_yoko.col_1to1) {
+            // Straight into the scanline buffer, no scratch and no emit --
+            // the same shortcut the tate path above takes.
+            // ONE COLUMN PER CANVAS ROW, NOT THE MERGED GROUP -- unlike
+            // Pac-Man and Ms. Pac-Man. Yoko collapses 288 raster columns
+            // onto 240 canvas rows, and merging the collapsed one back in
+            // costs a second full column render on 48 of the 240
+            // scanlines. Measured on hardware (DEVNOTES #82): that doubles
+            // those scanlines' cost, and `starve` goes from <=40 a window
+            // to 1806 -- visible red lines -- even though `work_max` only
+            // moves 14236us -> 14964us. Classic #35: the DVI queue cares
+            // about the DISTRIBUTION inside a frame, not the total.
+            //
+            // The merge is worth much less here than it is on the Namco
+            // maze games: +12.9%/+6.7% of the lit pixels, against Pac-Man's
+            // +41%, because Galaga's content is 16-pixel sprites and 8-pixel
+            // characters rather than 1-pixel maze walls, so a dropped column
+            // thins features instead of deleting them. Red lines are worse
+            // than slightly thinner sprites, so this ships un-merged.
+            //
+            // To get both, the extra column would have to be rendered on a
+            // NEIGHBOURING scanline that has slack rather than on the one
+            // that needs it -- a pipeline, not a bigger buffer.
+            render_native_column_group(sys, col, -1, 1u,
+                                       buf + av_yoko.x0, mir);
+        } else {
+            render_native_column_group(sys, col, -1, 1u, colbuf, false);
+            if (mir) av_emit_row_merge_rev(buf, colbuf, &av_yoko);
+            else     av_emit_row_merge(buf, colbuf, &av_yoko);
+        }
         break;
     }
 
     case 2: { // 180 deg
         const uint32_t col = av_yoko.row[dvi_y];
-        render_native_column_group(sys, col, +1, av_yoko.rowrep[dvi_y], colbuf);
-        if (mir) av_emit_row_merge(buf, colbuf, &av_yoko);
-        else     av_emit_row_merge_rev(buf, colbuf, &av_yoko);
+        if (av_yoko.col_1to1) {
+            // One column per canvas row -- see case 0's note.
+            render_native_column_group(sys, col, +1, 1u,
+                                       buf + av_yoko.x0, !mir);
+        } else {
+            render_native_column_group(sys, col, +1, 1u, colbuf, false);
+            if (mir) av_emit_row_merge(buf, colbuf, &av_yoko);
+            else     av_emit_row_merge_rev(buf, colbuf, &av_yoko);
+        }
         break;
     }
 

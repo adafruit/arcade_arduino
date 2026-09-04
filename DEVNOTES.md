@@ -3376,6 +3376,66 @@ known-good baseline, not a review of the constant** -- the constant reads
 plausibly, and its comment even shows the arithmetic, which is right for the
 number it computes and wrong for the axis it is used on.
 
+### 82. Galaga: a latent star bug, and peak-vs-average starvation
+
+**The transposition found a bug in the shipped ROW renderer.** `star_row_x`
+was `uint8_t`, but the star x is `STAR_OFFSET_X + (q & 255)` = 16..271 --
+so 256..271 wrapped to 0..15 and sixteen of the 256 star columns were drawn
+down the LEFT edge instead of near the right. Presumably there since the
+starfield landed. It surfaced only because `render_native_column()` buckets
+the same value untruncated, and the two paths then disagreed by exactly 17
+pixels, all isolated dots on black. Now `uint16_t`.
+
+**A better verification than the byte-compare.** Comparing against the
+pre-Phase-3 dumps cannot work here, because yoko's row axis downsamples
+288 -> 240 and any merge changes output legitimately. So the two paths are
+checked AGAINST EACH OTHER on one frame: the tate dump is the native raster
+at 1:1, and every column the yoko dump samples must equal the corresponding
+column of it. **0 mismatches of 53,760 pixels**, and the same test
+independently recovers the fact that rotation 0 reverses the long axis.
+This needs no old code to still exist, which is what makes it the right
+test for every remaining port.
+
+**THEN THE PEAK/AVERAGE LESSON, twice.** Landscape started at `work_max`
+18056us. Four changes took it to 13409us:
+
+| | rot 2 `work_max` |
+|---|---|
+| naive column port | 18056us |
+| + render straight into the scanline buffer, merge in place | 15058us |
+| + long-axis merge dropped (see below) | 14295us |
+| + border-only clear, sprite early-out | 13771us |
+| + sprites bucketed by column | **13409us** |
+
+Rendering straight into `buf` and merging in place (a second column
+rendered with the clear skipped -- every layer already writes only
+non-transparent pixels, so the clear was the ONLY thing erasing the first)
+was worth 3.0ms on its own.
+
+**The long-axis merge is OFF for this game, unlike the Namco maze games.**
+It costs a second full column render on 48 of 240 scanlines and measured
+`starve` 40 -> 1806 a window even though `work_max` only moved 728us. It is
+also worth far less here: +12.9%/+6.7% of the lit pixels against Pac-Man's
++41%, because Galaga is 16-pixel sprites and 8-pixel characters rather than
+1-pixel maze walls, so a dropped column thins rather than deletes.
+
+**REMAINING, and honest: rotation 2 still starves ~6 times a frame during
+one dense attract phase.** Rotation 0 does not, at `starve` <= 5. The two do
+the SAME work -- 13409us against 13737us -- and differ only in the order
+they walk the raster columns, because a 180 reverses that axis. Rotation 2's
+expensive columns land LATE in the frame, after the vblank slack is spent;
+rotation 0's land early. Measured directly: `noblock_run` 95 against 71, on
+identical `render_max`.
+
+**That is the #35 lesson in its purest form.** 2.9ms of average headroom and
+it still starves, because the DVI queue holds 8 scanlines and cares only
+about a RUN of scanlines slower than the 69us line rate. Two of my three
+hypotheses about the cause were wrong (descending writes; write-order bank
+conflicts) and a one-flash probe disproved each. The fix is to keep cutting
+the PEAK per-column cost, not the average -- the sprite bucketing above is
+the same lever the starfield already used, and it took the worst window from
+1420 to 366.
+
 ### 81. Burger Time: a correct column renderer that was 2x too slow, and why
 
 **The transposition was right on the first try and the port still did not

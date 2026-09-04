@@ -13,13 +13,20 @@ Status, newest first — the plan is section 7, the remaining work section 8:
 | 1 — one coordinate space (320x240 canvas) | **done**, verified byte-identical |
 | 2 — shared geometry module + aspect correction | **done**, correction OFF by default |
 | 2b — making the correction affordable | **partly**; DKong ~1.0ms and Burger Time ~1.6ms short in tate |
-| 3 — column primitive, kills the landscape red | **Pac-Man, Ms. Pac-Man, Burger Time done**; 4 games to go |
+| 3 — column primitive, kills the landscape red | **Pac-Man, Ms. Pac-Man, Burger Time, Galaga**; DKong + the two 8080bw games left |
 | 4 — collapse the rotation cases | not started |
 | 5 — cleanups | not started |
 
 **Pac-Man and Ms. Pac-Man are complete**: all four rotations, correct aspect
 ratio on by default, 60fps, zero starvation, confirmed on the physical
 display (DEVNOTES #79/#80).
+
+**Galaga runs all four rotations**, three of them clean and landscape-180
+still starving ~6 times a frame in one dense attract phase -- same work as
+landscape-0, which is clean, but its expensive raster columns land late in
+the frame after the vblank slack is spent (DEVNOTES #82). Its long-axis
+merge is off: worth only +7-13% of lit pixels here against Pac-Man's +41%,
+and it caused far worse starvation than it cured.
 
 **Burger Time runs all four rotations at 60fps but keeps its aspect error.**
 It needs the correction most of any game (33.3%, a square raster) and cannot

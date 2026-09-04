@@ -683,7 +683,27 @@ GALAGA_VID_RAMFUNC static void render_native_row(const galaga_system *sys, uint3
 // canvas rows and dropping the odd one out deletes 1-pixel features
 // (DEVNOTES #80), so the merge is required -- doing it this way costs
 // nothing beyond the second render itself.
-GALAGA_VID_RAMFUNC static void render_native_column(const galaga_system *sys,
+GALAGA_VID_RAMFUNC // GALAGA DOES NOT APPLY THE ASPECT CORRECTION IN YOKO. Measured, not
+// assumed (DEVNOTES #101): in gameplay with 64 sprites, rotation 0 peaks at
+// 15,025us uncorrected and 17,601us corrected -- past the whole 16,667us
+// frame, not merely past the 15,238us active-video window. `starve` averages
+// 6,601 a window and the queue empties outright. That is a SUSTAINED
+// deficit, the one shape a deeper queue cannot help (#88).
+//
+// It costs Galaga more than any other game for two reasons: this is the most
+// expensive machine here (three Z80s; 77% of the frame is CPU, #84), and
+// yoko-corrected also loses the col_1to1 shortcut, so the column can no
+// longer be written straight into the scanline buffer.
+//
+// So yoko is pinned to the 1:1 layout on this game and Button 1 does nothing
+// in rotations 0 and 2. The landscape picture stays 24.4% too wide, which is
+// the historical layout every game shipped with before the correction
+// existed. Tate still honours the correction -- there it costs about a tenth
+// as much, because the wide-store emit (#89) covers the upsample.
+#define GALAGA_YOKO_X0 ((HAL_VIDEO_WIDTH - (uint32_t)GALAGA_GAME_HEIGHT) / 2u)
+#define GALAGA_YOKO_X1 (GALAGA_YOKO_X0 + (uint32_t)GALAGA_GAME_HEIGHT)
+
+static void render_native_column(const galaga_system *sys,
                                                     uint32_t native_x, uint16_t *out,
                                                     bool rev_out, bool merge) {
     const bool flip = sys->flip_screen;
@@ -869,10 +889,15 @@ GALAGA_VID_RAMFUNC void galaga_video_render_scanline(const galaga_system *sys, u
     // av_emit_row_merge()'s own header says "requires dst to be
     // pre-cleared, which every renderer here already does" -- this one had
     // quietly stopped doing it.
-    if ((sys->rotation == 0 || sys->rotation == 2) && av_yoko.col_1to1) {
-        memset(buf, 0, av_yoko.x0 * sizeof(uint16_t));
-        memset(buf + av_yoko.x1, 0,
-               (HAL_VIDEO_WIDTH - av_yoko.x1) * sizeof(uint16_t));
+    if (sys->rotation == 0 || sys->rotation == 2) {
+        // Border-only, and now unconditionally safe: yoko always takes the
+        // 1:1 path below, which writes every pixel of the picture straight
+        // into the buffer. It was NOT safe while the corrected path was
+        // live -- av_emit_row_merge() stores conditionally and needs a
+        // pre-cleared buffer, which is DEVNOTES #100.
+        memset(buf, 0, GALAGA_YOKO_X0 * sizeof(uint16_t));
+        memset(buf + GALAGA_YOKO_X1, 0,
+               (HAL_VIDEO_WIDTH - GALAGA_YOKO_X1) * sizeof(uint16_t));
     } else {
         memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
     }
@@ -882,7 +907,6 @@ GALAGA_VID_RAMFUNC void galaga_video_render_scanline(const galaga_system *sys, u
     case 0: { // landscape -- see arcade_video_geom.h; yoko NARROWS the short axis
         const uint32_t dy  = av_yoko.row[dvi_y];
         const uint32_t col = (uint32_t)(GALAGA_GAME_WIDTH - 1) - dy;
-        if (av_yoko.col_1to1) {
             // Straight into the scanline buffer, no scratch and no emit --
             // the same shortcut the tate path above takes.
             // ONE COLUMN PER CANVAS ROW, NOT THE MERGED GROUP -- unlike
@@ -905,27 +929,16 @@ GALAGA_VID_RAMFUNC void galaga_video_render_scanline(const galaga_system *sys, u
             // To get both, the extra column would have to be rendered on a
             // NEIGHBOURING scanline that has slack rather than on the one
             // that needs it -- a pipeline, not a bigger buffer.
-            render_native_column_group(sys, col, -1, 1u,
-                                       buf + av_yoko.x0, mir);
-        } else {
-            render_native_column_group(sys, col, -1, 1u, colbuf, false);
-            if (mir) av_emit_row_merge_rev(buf, colbuf, &av_yoko);
-            else     av_emit_row_merge(buf, colbuf, &av_yoko);
-        }
+        render_native_column_group(sys, col, -1, 1u,
+                                   buf + GALAGA_YOKO_X0, mir);
         break;
     }
 
     case 2: { // 180 deg
         const uint32_t col = av_yoko.row[dvi_y];
-        if (av_yoko.col_1to1) {
             // One column per canvas row -- see case 0's note.
-            render_native_column_group(sys, col, +1, 1u,
-                                       buf + av_yoko.x0, !mir);
-        } else {
-            render_native_column_group(sys, col, +1, 1u, colbuf, false);
-            if (mir) av_emit_row_merge(buf, colbuf, &av_yoko);
-            else     av_emit_row_merge_rev(buf, colbuf, &av_yoko);
-        }
+        render_native_column_group(sys, col, +1, 1u,
+                                   buf + GALAGA_YOKO_X1 - (uint32_t)GALAGA_GAME_HEIGHT, !mir);
         break;
     }
 

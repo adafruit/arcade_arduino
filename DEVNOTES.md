@@ -4937,3 +4937,49 @@ than no harness**, because it converts a whole bug class into "works here,
 broken there". This one had been zeroing buffers since it was written, and
 the moment a renderer relied on the board doing the same, the dumps kept
 looking perfect. Poisoning costs nothing and models the real contract.
+
+### 101. Galaga cannot afford the aspect correction in yoko, and now says so
+
+#100 fixed the tiled-garbage picture by restoring the full-width clear. The
+picture became correct and the screen went red instead, which was the more
+honest failure: the border-only clear had been making the corrected path look
+affordable by SKIPPING WORK -- it was fast because it was wrong.
+
+Measured properly, rotation 0, gameplay with 64 sprites:
+
+| | work_MAX peak | starve | runway |
+|---|---|---|---|
+| correction off | 15,025us | 0 | 13/32 |
+| correction on | **17,601us** | mean 6,601 | **0/32** |
+
+**+2,576us, and past the whole 16,667us frame** -- not merely past the
+15,238us active-video window. A sustained deficit, the one shape a deeper
+queue cannot help (#88). The restored memset is ~600us of that; the rest is
+the correction itself.
+
+It costs Galaga more than any other game for two compounding reasons: this is
+the most expensive machine here (three Z80s, 77% of the frame is CPU, #84),
+and yoko-corrected also loses the `col_1to1` shortcut, so the column can no
+longer be written straight into the scanline buffer -- it goes to scratch and
+back through an emit.
+
+**Yoko is now pinned to the 1:1 layout on this game**, so Button 1 does
+nothing in rotations 0 and 2. Verified: rotation 0 with the correction ON now
+peaks at 14,999us, `starve` 0, runway 13/32 -- identical to the correction-off
+baseline, which is the point. The landscape picture stays 24.4% too wide,
+which is the layout every game shipped with before the correction existed.
+
+**Tate still honours it, and there the wide-store emit earns its keep.**
+But it is TIGHT, and this is the first time it has been measured in gameplay
+rather than attract: rotation 3 corrected peaks at **16,309us with runway
+4/32**. `starve` is 0 across 60 windows at 64 sprites, so it works, but 4 of
+32 buffers is the thinnest margin measured anywhere in this project -- thinner
+than Burger Time's 13/32. Worth re-measuring if anything in Galaga's frame
+ever gets more expensive.
+
+**The general lesson, and it is uncomfortable: a rendering bug can masquerade
+as performance headroom.** The corrected yoko path looked affordable for as
+long as it was skipping the clear. Any time an optimisation makes something
+newly affordable, check that it still produces the right pixels -- the host
+poison of #100 is exactly that check, and it is why that change matters more
+than this one.

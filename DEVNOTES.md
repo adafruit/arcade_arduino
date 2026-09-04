@@ -4411,5 +4411,11 @@ all seven READMEs document it.
 
 **Not persisted.** The setting resets to off on every boot, which for a
 fixed installation is the wrong default -- whoever owns the cabinet sets it
-once and wants it remembered. `FlashStorage` is already a dependency; this
-is the obvious next small piece of work.
+once and wants it remembered.
+
+(An earlier version of this entry said `FlashStorage` was already a
+dependency and could be used. **That is wrong** -- `libraries/FlashStorage`
+is `architectures=samd` and cannot build for RP2350 at all. It is a stale
+vendored library that nothing in this project includes. The arduino-pico
+core's own `EEPROM` is the right vehicle; see #91 for what persisting these
+actually costs.)

@@ -266,6 +266,10 @@ static const char *find_rom_dir(const char *explicit_dir) {
     return NULL;
 }
 
+#if defined(DKONG_HOST_SELFTEST)
+int dkong_video_selftest_column_vs_row(const dkong_system *sys);
+#endif
+
 static void usage(const char *argv0) {
     printf("usage: %s [options]\n"
            "  --rom DIR       ROM directory (default: search for dkong_assets/rom,\n"
@@ -375,6 +379,19 @@ int main(int argc, char **argv) {
                            btn_active(7, g_frame),  // jump
                            false, false);           // rotate/mirror meta
         dkong_run_frame(&g_system);
+#if defined(DKONG_HOST_SELFTEST)
+        // Compare the two native-raster paths on every frame. Cheap enough
+        // here and it catches a divergence on the exact frame it appears,
+        // including ones that only show up with sprites at the 16-per-line
+        // limit or straddling the wraparound edge.
+        {
+            const int bad = dkong_video_selftest_column_vs_row(&g_system);
+            if (bad) {
+                printf("SELFTEST FAIL: frame %ld, %d mismatched pixels\n", g_frame, bad);
+                return 1;
+            }
+        }
+#endif
         if (g_wav) wav_pump();
 
         if (every > 0 && (g_frame % every) == 0) {

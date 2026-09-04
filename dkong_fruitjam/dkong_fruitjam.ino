@@ -143,7 +143,17 @@ void loop() {
     // Button 1: aspect correction on/off. Edge-detected inside
     // av_geom_toggle_on_edge(); the right setting depends on the monitor,
     // not the game, so it is a runtime toggle rather than a build flag.
-    av_geom_toggle_on_edge(hal_input_read(HAL_BTN_STRETCH));
+    const bool stretch_btn = hal_input_read(HAL_BTN_STRETCH);
+    av_geom_toggle_on_edge(stretch_btn);
+
+    // BUTTON WITNESS, same idea as btime_fruitjam.ino's: a STICKY record of
+    // which meta buttons were seen down since the last heartbeat. Without
+    // it, "nothing happened" cannot be told apart from "the board never saw
+    // the press", and those need completely different fixes.
+    static uint8_t meta_seen = 0;
+    if (rotate)      meta_seen |= 0x01;
+    if (mirror)      meta_seen |= 0x02;
+    if (stretch_btn) meta_seen |= 0x04;
 
     dkong_input_update(&g_system, coin, start1, start2,
                        up, down, left, right, jump, rotate, mirror);
@@ -159,13 +169,17 @@ void loop() {
     // the CPU's own read/write path once per frame), and its renderer walks
     // every sprite for every scanline.
     static uint32_t frame_count = 0;
-    static uint32_t work_max = 0;
+    // Totals beside every maximum -- see DEVNOTES #84/#85.
+    static uint32_t work_max = 0, work_sum = 0, work_n = 0;
+    static uint32_t blk_sum = 0, blk_max = 0;
     uint32_t t0 = micros();
     dkong_run_frame(&g_system);
     uint32_t frame_us   = micros() - t0;
     uint32_t blocked_us = hal_video_take_blocked_us();
     uint32_t work_us    = (frame_us > blocked_us) ? (frame_us - blocked_us) : 0;
     if (work_us > work_max) work_max = work_us;
+    if (blocked_us > blk_max) blk_max = blocked_us;
+    work_sum += work_us; blk_sum += blocked_us; work_n++;
 
     if ((++frame_count % 60u) == 0) {
         Serial.print("[dkong] frame ");
@@ -176,8 +190,12 @@ void loop() {
         Serial.print(work_us);
         Serial.print("us, blocked ");
         Serial.print(blocked_us);
-        Serial.print("us), work_max ");
+        Serial.print("us), work_MEAN ");
+        Serial.print(work_n ? work_sum / work_n : 0);
+        Serial.print("us, work_max ");
         Serial.print(work_max);
+        Serial.print("us, blk_MEAN ");
+        Serial.print(work_n ? blk_sum / work_n : 0);
         Serial.print("us, audio ");
         Serial.print(dkong_debug_audio_us());
         // Queue-starvation counter -- the ONLY instrument that sees the red
@@ -185,8 +203,19 @@ void loop() {
         // an uneven patch inside that frame drains Core 1's queue anyway.
         Serial.print("us, rot ");
         Serial.print((int)g_system.rotation);
+        Serial.print(", stretch ");
+        Serial.print((int)av_geom_get_stretch());
+        Serial.print(", meta_seen(RMS) ");
+        Serial.print(meta_seen, BIN);
+        meta_seen = 0;
         Serial.print(", starve ");
         Serial.print(hal_video_take_starve_count());
+        // Runway left at the worst moment -- see DEVNOTES #85.
+        Serial.print(", minq ");
+        Serial.print(hal_video_take_min_valid_level());
+        Serial.print("/");
+        Serial.print(hal_video_scanbuf_count());
+        work_sum = blk_sum = work_n = 0; work_max = 0; blk_max = 0;
         // Where the render half of `work` actually goes -- see
         // dkong_video.h. `rows` below `lines` means the duplicate-row
         // memoisation is firing.

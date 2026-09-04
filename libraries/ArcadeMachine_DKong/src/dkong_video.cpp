@@ -348,13 +348,196 @@ static void render_native_row(const dkong_system *sys, uint32_t native_y, uint16
     if (num_sprt >= 16) g_sprite_limit_hits++;
 }
 
-// Full native frame cache, used ONLY by landscape/180 rotation, which
-// structurally need every native row before they can emit one physical
-// scanline (a column slice reads all 224 rows at once). Tate/CW render
-// their one needed row on demand instead. Same arrangement, and the same
-// known stall risk for the two yoko modes, as ArcadeMachine_Pacman -- see
-// DEVNOTES.md problems #18/#19/#20.
-static uint16_t frame_cache[DKONG_GAME_HEIGHT][DKONG_GAME_WIDTH];
+// COLUMN RENDERING -- what replaced the 114KB full-frame cache.
+//
+// Landscape needs a raster COLUMN per canvas scanline, and the obvious way
+// to get one is to render every row into a cache first. That is what this
+// game did, and it is why both landscape rotations were roughly 3/4 red on
+// a real screen: `run_frame_sequential()` ran a whole frame of CPU and then
+// rendered all 224 rows before submitting a single scanline. The 32-buffer
+// queue is 2,032us of runway (DEVNOTES #85) and that burst is many
+// milliseconds, so once the runway was spent the rest of the frame starved.
+//
+// The other four games were converted to a column primitive in phase 3;
+// Donkey Kong was left because of the sprite arbitration below.
+//
+// THE ARBITRATION PROBLEM. Real hardware evaluates sprites against a 64x9
+// line buffer and stops after 16 per scanline, and the game relies on it.
+// That limit is decided by walking sprite RAM IN ORDER for one scanline, so
+// a column renderer -- which visits a fixed x down every y -- cannot decide
+// it independently per pixel.
+//
+// THE PROPERTY THAT MAKES IT WORK. The coarse test is
+// ((y + add_y + 1 + scanline_vf) & 0xF0) == 0xF0. Call that sum t: it grows
+// by exactly 1 per scanline, so the test passes for exactly 16 CONSECUTIVE
+// scanlines, and local_y = t & 0x0F runs 0..15 across them in order. A
+// sprite is therefore always a contiguous 16-line band; arbitration can only
+// DROP individual lines inside it, never move or split it. (16 lines out of
+// every 256 also means at most one band can fall in the 224 visible lines,
+// so there is no second band to worry about.)
+//
+// THE DIRECTION TRAP, found by the self-test at the bottom of this file and
+// not by eye. With flip_screen set, scanline_vfc is XORed with 0xFF, so the
+// sum DECREASES by one per scanline and local_y runs 15 -> 0 down the raster
+// instead of 0 -> 15. The band is still 16 contiguous lines, but the row a
+// given sprite line lands on is y0 - local_y rather than y0 + local_y. Miss
+// that and the picture is right in every unflipped frame and silently
+// scrambled the moment the game flips the screen -- which it does for
+// player 2. Hence `ydown`.
+//
+// So the arbitration is run once per frame, exactly as the row renderer runs
+// it, and each sprite is recorded as {top line, 16-bit mask of the lines it
+// actually drew on}. Those are then bucketed by column, so a column visits
+// only the two or three sprites that overlap it instead of all 128.
+//
+// Cost: the per-frame arbitration walk is the SAME work the row path already
+// did per scanline, just hoisted; the column pass is ~3 sprites x 16 rows
+// instead of 224 rows x 16 sprites. And it frees 114KB of SRAM.
+#define DK_MAX_INST     255u   // sprite instances per frame (128 sprites x 2 wrap copies)
+#define DK_MAX_PER_COL   64u   // instances overlapping one raster column
+
+typedef struct {
+    int16_t  x;        // leftmost raster column of this copy (may be negative)
+    int16_t  y0;       // raster row carrying the band's local_y == 0 line
+    uint16_t mask;     // which of the 16 band lines survived arbitration
+    uint8_t  code, color, flipx, flipy;
+    uint8_t  ydown;    // 1 when raster row DECREASES as local_y increases
+} dk_spr_inst;
+
+static dk_spr_inst g_inst[DK_MAX_INST];
+static uint8_t     g_inst_n;
+static uint8_t     g_col_n[DKONG_GAME_WIDTH];
+static uint8_t     g_col_i[DKONG_GAME_WIDTH][DK_MAX_PER_COL];
+
+// Latches this frame's sprites for the column renderer. Must run before the
+// first render_native_column() of a frame; harmless (just unused) in tate,
+// which keeps its own per-scanline arbitration inside render_native_row().
+void dkong_video_begin_frame(const dkong_system *sys) {
+    g_inst_n = 0;
+    for (uint32_t c = 0; c < (uint32_t)DKONG_GAME_WIDTH; c++) g_col_n[c] = 0;
+
+    const bool flip = sys->flip_screen;
+    const int add_y = flip ? 0xF7 : 0xF9;
+    const int add_x = 0xF7;
+    const int base  = sys->sprite_bank << 9;
+
+    static int16_t  s_ytop[128];
+    static uint16_t s_mask[128];
+    for (uint32_t i = 0; i < 128u; i++) s_mask[i] = 0;
+
+    // Exactly render_native_row()'s selection loop, for every visible line.
+    // Deliberately a transcription and not a re-derivation: two formulas for
+    // one arbitration is how the tate and landscape pictures drift apart.
+    for (uint32_t ny = 0; ny < (uint32_t)DKONG_GAME_HEIGHT; ny++) {
+        const uint32_t screen_y = ny + DKONG_VBEND;
+        const int scanline = (int)(screen_y & 0xFFu);
+        int scanline_vf, scanline_vfc;
+        scanline_vf = scanline_vfc = (int)((screen_y - 1) & 0xFFu);
+        if (flip) { scanline_vf ^= 0xFF; scanline_vfc ^= 0xFF; }
+
+        int num_sprt = 0;
+        for (int offs = base; num_sprt < 16 && offs < base + 0x200; offs += 4) {
+            const int y = sys->sprite_ram[offs];
+            if (((y + add_y + 1 + scanline_vf) & 0xF0) != 0xF0) continue;
+            const int y_top   = scanline - ((y + add_y + 1 + scanline_vfc) & 0x0F);
+            const int local_y = scanline - y_top;
+            if (local_y < 0 || local_y >= 16) { num_sprt++; continue; }
+            const int slot = (offs - base) >> 2;
+            // y0 is the row carrying local_y == 0. With flip the raster row
+            // and local_y move in OPPOSITE directions, so it is ny + local_y
+            // there and ny - local_y otherwise; either way it is constant
+            // across the band, which is what makes one record per sprite
+            // enough. See THE DIRECTION TRAP above.
+            const int y0 = flip ? ((int)ny + local_y) : ((int)ny - local_y);
+            if (s_mask[slot] == 0) s_ytop[slot] = (int16_t)y0;
+            s_mask[slot] |= (uint16_t)(1u << local_y);
+            num_sprt++;
+        }
+    }
+
+    // Turn the surviving bands into instances, in sprite-RAM order so a later
+    // sprite still paints over an earlier one exactly as the row path does.
+    for (int slot = 0; slot < 128; slot++) {
+        if (s_mask[slot] == 0) continue;
+        const int offs = base + slot * 4;
+
+        const int code = ((sys->sprite_ram[offs + 1] & 0x7F) +
+                          ((sys->sprite_ram[offs + 2] & 0x40) << 1)) & 0x7F;
+        const uint8_t color = (uint8_t)((sys->sprite_ram[offs + 2] & 0x0F) + 16 * sys->palette_bank);
+        bool flipx = (sys->sprite_ram[offs + 2] & 0x80) != 0;
+        const bool flipy = (sys->sprite_ram[offs + 1] & 0x80) != 0;
+
+        int x = (sys->sprite_ram[offs + 3] + add_x + 1) & 0xFF;
+        if (flip) { x = (x ^ 0xFF) - 15; flipx = !flipx; }
+
+        // Both wraparound copies, same as the row path: "sprites wrap around
+        // from the right to the left instead of clipping".
+        for (int copy = 0; copy < 2; copy++) {
+            const int sx0 = (copy == 0) ? x : (flip ? x + 256 : x - 256);
+            if (sx0 >= DKONG_GAME_WIDTH || sx0 + 16 <= 0) continue;
+            if (g_inst_n >= DK_MAX_INST) break;
+
+            dk_spr_inst *e = &g_inst[g_inst_n];
+            e->x = (int16_t)sx0;  e->y0 = s_ytop[slot];  e->mask = s_mask[slot];
+            e->code = (uint8_t)code; e->color = color;
+            e->flipx = flipx ? 1u : 0u; e->flipy = flipy ? 1u : 0u;
+            e->ydown = flip ? 1u : 0u;
+
+            int c0 = sx0 < 0 ? 0 : sx0;
+            int c1 = sx0 + 16 > DKONG_GAME_WIDTH ? DKONG_GAME_WIDTH : sx0 + 16;
+            for (int c = c0; c < c1; c++)
+                if (g_col_n[c] < DK_MAX_PER_COL) g_col_i[c][g_col_n[c]++] = g_inst_n;
+            g_inst_n++;
+        }
+    }
+}
+
+// One raster COLUMN: out[ny] for ny in [0, DKONG_GAME_HEIGHT). The transpose
+// of render_native_row(), and it must agree with it pixel for pixel.
+static void render_native_column(const dkong_system *sys, uint32_t native_x, uint16_t *out) {
+    const bool flip = sys->flip_screen;
+    const uint32_t tcol = flip ? (31u - (native_x >> 3)) : (native_x >> 3);
+    const uint32_t tx   = flip ? (7u - (native_x & 7u)) : (native_x & 7u);
+
+    // Background tilemap. The tile index, its code and its PROM colour depend
+    // only on the TILE ROW, so they are recomputed 28 times a column rather
+    // than 224 -- the colour lookup carries two divisions, which per pixel
+    // would be 53k divisions a frame.
+    uint32_t last_trow = 0xFFFFFFFFu;
+    uint8_t  code = 0, color = 0;
+    for (uint32_t ny = 0; ny < (uint32_t)DKONG_GAME_HEIGHT; ny++) {
+        const uint32_t screen_y = ny + DKONG_VBEND;
+        const uint32_t ty   = flip ? (255u - screen_y) : screen_y;
+        const uint32_t trow = ty >> 3, py = ty & 7u;
+        if (trow != last_trow) {
+            const uint16_t tile_index = (uint16_t)(trow * 32u + tcol);
+            code  = sys->video_ram[tile_index];
+            color = (uint8_t)((dkong_color_prom[(tile_index % 32u) + 32u * (tile_index / 32u / 4u)] & 0x0F)
+                              + 0x10 * sys->palette_bank);
+            last_trow = trow;
+        }
+        out[ny] = pen_color(color, tile_pixels[code][tx][py]);
+    }
+
+    // Sprites: only the handful bucketed onto this column, in draw order.
+    const uint8_t n = g_col_n[native_x];
+    const uint8_t *idx = g_col_i[native_x];
+    for (uint8_t k = 0; k < n; k++) {
+        const dk_spr_inst *e = &g_inst[idx[k]];
+        const int cx  = (int)native_x - e->x;         // 0..15 by construction
+        const int spx = e->flipx ? (15 - cx) : cx;
+        uint16_t m = e->mask;
+        for (int ly = 0; ly < 16; ly++) {
+            if (!(m & (uint16_t)(1u << ly))) continue;
+            const int ny = e->ydown ? (e->y0 - ly) : (e->y0 + ly);
+            if (ny < 0 || ny >= DKONG_GAME_HEIGHT) continue;
+            const int sy = e->flipy ? (15 - ly) : ly;
+            const uint8_t pixel = sprite_pixels[e->code][spx][sy];
+            if (pixel == 0) continue; // transpen 0
+            out[ny] = pen_color(e->color, pixel);
+        }
+    }
+}
 
 // Frame-cost instrument. This game is the project's tightest budget and,
 // unlike Burger Time (#59), had no way to see WHERE its frame goes -- which
@@ -412,17 +595,22 @@ void dkong_video_render_scanline(const dkong_system *sys, uint32_t dvi_y, uint16
         // image rather than a rotation (DEVNOTES #21).
         const uint32_t dy  = av_yoko.row[dvi_y];
         const uint32_t col = (uint32_t)(DKONG_GAME_WIDTH - 1) - dy;
+        // Rendered on demand, one raster column per canvas scanline -- see
+        // render_native_column(). This is what removed the whole-frame burst
+        // that made both landscape rotations 3/4 red.
+        static uint16_t colbuf[DKONG_GAME_HEIGHT];
+        render_native_column(sys, col, colbuf);
         if (av_yoko.col_1to1) {
             uint16_t *out = buf + av_yoko.x0;
             for (uint32_t i = 0; i < (uint32_t)DKONG_GAME_HEIGHT; i++) {
                 const uint32_t dx = mir ? (uint32_t)(DKONG_GAME_HEIGHT - 1) - i : i;
-                out[i] = frame_cache[dx][col];
+                out[i] = colbuf[dx];
             }
         } else {
             for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
                 const uint32_t i  = av_yoko.col[x];
                 const uint32_t dx = mir ? (uint32_t)(DKONG_GAME_HEIGHT - 1) - i : i;
-                buf[x] = frame_cache[dx][col];
+                buf[x] = colbuf[dx];
             }
         }
         break;
@@ -430,7 +618,8 @@ void dkong_video_render_scanline(const dkong_system *sys, uint32_t dvi_y, uint16
 
     case 1: {
         // 90 deg CCW (tate). Rendered on demand, one raster row per call --
-        // see frame_cache's header comment for why tate must NOT read it.
+        // tate renders its one needed row directly; only landscape needs
+        // the column primitive and its per-frame sprite latch.
         if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) return;
         uint32_t dx = av_tate.row[dvi_y];
         if (mir) dx = (uint32_t)(DKONG_GAME_HEIGHT - 1) - dx;
@@ -475,17 +664,22 @@ void dkong_video_render_scanline(const dkong_system *sys, uint32_t dvi_y, uint16
         // (case 0 already reversed it once; reversing that again would
         // cancel out) and `dx`'s ternary is the mirror of case 0's.
         const uint32_t col = av_yoko.row[dvi_y];
+        // Rendered on demand, one raster column per canvas scanline -- see
+        // render_native_column(). This is what removed the whole-frame burst
+        // that made both landscape rotations 3/4 red.
+        static uint16_t colbuf[DKONG_GAME_HEIGHT];
+        render_native_column(sys, col, colbuf);
         if (av_yoko.col_1to1) {
             uint16_t *out = buf + av_yoko.x0;
             for (uint32_t i = 0; i < (uint32_t)DKONG_GAME_HEIGHT; i++) {
                 const uint32_t dx = mir ? i : (uint32_t)(DKONG_GAME_HEIGHT - 1) - i;
-                out[i] = frame_cache[dx][col];
+                out[i] = colbuf[dx];
             }
         } else {
             for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
                 const uint32_t i  = av_yoko.col[x];
                 const uint32_t dx = mir ? i : (uint32_t)(DKONG_GAME_HEIGHT - 1) - i;
-                buf[x] = frame_cache[dx][col];
+                buf[x] = colbuf[dx];
             }
         }
         break;
@@ -524,11 +718,62 @@ void dkong_video_render_scanline(const dkong_system *sys, uint32_t dvi_y, uint16
     }
 }
 
-void dkong_draw_frame(dkong_system *system) {
-    if (system->rotation == 0 || system->rotation == 2) {
-        for (uint32_t y = 0; y < (uint32_t)DKONG_GAME_HEIGHT; y++)
-            render_native_row(system, y, frame_cache[y]);
+// SELF-TEST: the column path must reproduce the row path exactly.
+//
+// Host-only (it needs a 114KB reference buffer -- the very cache this work
+// deleted from the device). This is the check that needs no historical
+// reference image and no hardware: render the native raster BOTH ways and
+// compare. If the sprite arbitration, the wraparound copies, the flip
+// handling or the tile lookup differ by one pixel between the two, this
+// says so and says where.
+//
+// Worth having because the two paths cannot be compared by eye: they are
+// used in different rotations, so a divergence shows up as "landscape looks
+// subtly wrong" long after the change that caused it.
+#if defined(DKONG_HOST_SELFTEST)
+#include <stdio.h>
+int dkong_video_selftest_column_vs_row(const dkong_system *sys) {
+    static uint16_t by_row[DKONG_GAME_HEIGHT][DKONG_GAME_WIDTH];
+    static uint16_t colbuf[DKONG_GAME_HEIGHT];
+    int bad = 0;
+
+    for (uint32_t y = 0; y < (uint32_t)DKONG_GAME_HEIGHT; y++)
+        render_native_row(sys, y, by_row[y]);
+
+    dkong_video_begin_frame(sys);
+    for (uint32_t x = 0; x < (uint32_t)DKONG_GAME_WIDTH; x++) {
+        render_native_column(sys, x, colbuf);
+        for (uint32_t y = 0; y < (uint32_t)DKONG_GAME_HEIGHT; y++) {
+            if (colbuf[y] != by_row[y][x]) {
+                // On a failure, dump the column's instance list -- that is
+                // what identified the flip-direction bug (THE DIRECTION
+                // TRAP above) in one run rather than by bisecting frames.
+                if (bad == 0) {
+                    printf("  MISMATCH x=%u y=%u  column=%04x row=%04x\n",
+                           (unsigned)x, (unsigned)y, colbuf[y], by_row[y][x]);
+                    printf("  sprite_bank=%u palette_bank=%u flip=%d, %u inst on this column\n",
+                           (unsigned)sys->sprite_bank, (unsigned)sys->palette_bank,
+                           (int)sys->flip_screen, (unsigned)g_col_n[x]);
+                    for (uint8_t k = 0; k < g_col_n[x]; k++) {
+                        const dk_spr_inst *e = &g_inst[g_col_i[x][k]];
+                        printf("    inst %u: x=%d y0=%d mask=%04x code=%02x color=%02x "
+                               "fx=%u fy=%u ydown=%u\n",
+                               (unsigned)g_col_i[x][k], (int)e->x, (int)e->y0,
+                               (unsigned)e->mask, (unsigned)e->code, (unsigned)e->color,
+                               (unsigned)e->flipx, (unsigned)e->flipy, (unsigned)e->ydown);
+                    }
+                }
+                bad++;
+            }
+        }
     }
+    return bad;
+}
+#endif
+
+void dkong_draw_frame(dkong_system *system) {
+    if (system->rotation == 0 || system->rotation == 2)
+        dkong_video_begin_frame(system);
 
     for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();

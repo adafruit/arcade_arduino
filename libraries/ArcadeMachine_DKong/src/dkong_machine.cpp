@@ -128,6 +128,12 @@ bool dkong_load_assets(dkong_system *system, uint16_t *out_error_color) {
 static void run_frame_interleaved(dkong_system *system) {
     uint32_t start = system->cpu.cyc;
 
+    // Landscape renders a raster COLUMN per canvas scanline and needs this
+    // frame's sprites latched and bucketed first (dkong_video.cpp). Tate
+    // arbitrates per scanline inside render_native_row() and skips it.
+    if (system->rotation == 0 || system->rotation == 2)
+        dkong_video_begin_frame(system);
+
     for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint32_t target_delta =
             (uint32_t)((uint64_t)DKONG_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_HEIGHT);
@@ -146,20 +152,20 @@ static void run_frame_interleaved(dkong_system *system) {
     }
 }
 
-static void run_frame_sequential(dkong_system *system) {
-    uint32_t start = system->cpu.cyc;
-    while ((uint32_t)(system->cpu.cyc - start) < DKONG_CYCLES_PER_FRAME) {
-        z80_step(&system->cpu);
-    }
-    dkong_draw_frame(system);
-}
+// run_frame_sequential() was deleted with the frame cache (DEVNOTES #92).
+// It ran a whole frame of CPU and then a whole frame of rendering before the
+// first scanline was submitted, which is exactly the shape that starves the
+// DVI queue. dkong_draw_frame() still exists for the standalone,
+// no-CPU-to-interleave case documented in dkong_video.h.
 
 void dkong_run_frame(dkong_system *system) {
-    if (system->rotation == 1 || system->rotation == 3) {
-        run_frame_interleaved(system);
-    } else {
-        run_frame_sequential(system);
-    }
+    // EVERY rotation interleaves now. Landscape used to take
+    // run_frame_sequential(), which ran a whole frame of CPU and then
+    // rendered all 224 raster rows into a 114KB cache before submitting a
+    // single scanline. Two bursts back to back, against 2,032us of queue
+    // runway -- which is why both landscape rotations were roughly 3/4 red
+    // on a real screen. See DEVNOTES #92.
+    run_frame_interleaved(system);
 
     // The vblank interrupt is an NMI, not an IRQ, and it is gated by a
     // software mask the ROM writes to 0x7D84 -- MAME's vblank_irq():

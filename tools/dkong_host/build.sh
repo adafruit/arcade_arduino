@@ -26,7 +26,7 @@ cc -O2 -g -std=c11 -Wall $INC -c "$LIBS/ArcadeCPU_Z80/src/z80.c" -o "$OBJ/z80.o"
 # The MCS-48 core (Donkey Kong's 8035 sound CPU) is C as well.
 cc -O2 -g -std=c11 -Wall $INC -c "$LIBS/ArcadeCPU_MCS48/src/mcs48.c" -o "$OBJ/mcs48.o"
 
-c++ -O2 -g -std=c++17 -Wall -Wno-unused-parameter $INC \
+c++ -O2 -g -std=c++17 -Wall -Wno-unused-parameter $EXTRA $INC \
     "$LIBS/ArcadeMachine_DKong/src"/*.cpp \
     "$LIBS/ArcadeHAL/src"/*.cpp \
     "$HERE/../host_common/hal_host.cpp" \

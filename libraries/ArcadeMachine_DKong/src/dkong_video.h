@@ -55,6 +55,12 @@ void dkong_draw_frame(dkong_system *system);
 
 // Renders ONE physical scanline (dvi_y) into `buf`, without acquiring or
 // submitting it.
+// Latches this frame's sprites for the column renderer that landscape uses.
+// MUST be called once per frame before the first landscape scanline; tate
+// does not need it (render_native_row() arbitrates per scanline itself).
+// See dkong_video.cpp's COLUMN RENDERING comment and DEVNOTES #92.
+void dkong_video_begin_frame(const dkong_system *system);
+
 void dkong_video_render_scanline(const dkong_system *system, uint32_t dvi_y, uint16_t *buf);
 
 // Per-frame render cost split, reset on read. `rows_us`/`rows` cover

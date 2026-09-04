@@ -4477,3 +4477,61 @@ a 3-second coalescing rule.
 (rotation and mirror live on each machine's `system` struct, stretch is
 global, so the apply step cannot be fully shared). The real time is hardware
 verification: seven card swaps.
+
+### 92. Donkey Kong's column renderer: the last whole-frame burst, and a flip-screen trap
+
+Both of Donkey Kong's landscape rotations were roughly 3/4 covered in red on
+a real screen. Confirmed on hardware first that it was NOT the aspect
+correction -- rotation 0 with stretch OFF already read `starve 120` a window,
+`minq 0/32` and frames stretching to 18,645us.
+
+**The cause, and it was structural.** Landscape took `run_frame_sequential()`,
+which ran a WHOLE frame of CPU and then rendered all 224 raster rows into a
+114KB `frame_cache` before submitting a single scanline. Two bursts back to
+back, against 2,032us of queue runway (#85). This is the same whole-frame
+shape phase 3 removed from Pac-Man, Ms. Pac-Man, Burger Time and Galaga;
+Donkey Kong was the one left, because of its sprite arbitration.
+
+**Why the arbitration looked like a blocker.** Real hardware evaluates
+sprites against a 64x9 line buffer and stops at 16 per scanline, and the game
+relies on it. That limit is decided by walking sprite RAM IN ORDER for one
+scanline, so a column renderer -- fixed x, every y -- cannot decide it
+per pixel.
+
+**The property that made it easy.** The coarse test is
+`((y + add_y + 1 + scanline_vf) & 0xF0) == 0xF0`. That sum moves by exactly 1
+per scanline, so it passes for exactly 16 CONSECUTIVE scanlines and
+`local_y = sum & 0x0F` walks 0..15 across them. A sprite is therefore always
+a contiguous 16-line band, and arbitration can only DROP lines inside it. So
+the arbitration is run once per frame -- the same work the row path did per
+scanline, just hoisted -- and each sprite becomes {y0, 16-bit line mask},
+bucketed by column. A column then visits 2-3 sprites instead of 128.
+
+**THE FLIP-SCREEN TRAP, and the reason the self-test exists.** With
+`flip_screen` set, `scanline_vfc` is XORed with 0xFF, so the sum DECREASES by
+one per scanline and `local_y` runs 15 -> 0 down the raster. The band is
+still 16 contiguous lines, but a given sprite line lands on `y0 - local_y`,
+not `y0 + local_y`. The first implementation assumed one direction. It was
+correct in every unflipped frame and scrambled the moment the game flipped
+the screen -- which it does for player 2, so this would have shipped and
+shown up as "landscape looks wrong sometimes".
+
+`dkong_video_selftest_column_vs_row()` caught it on frame 521 of the first
+run, and its instance dump named the cause (`flip=1`) immediately. **Render
+the native raster both ways and compare** -- it needs no reference image, no
+hardware and no historical baseline, and it is the only check that can see a
+divergence between two paths that are never on screen at the same time.
+
+Verified: 9,000 frames of scripted gameplay in rotation 0 and 6,000 in
+rotation 2, both with `flip_screen` active, zero mismatched pixels.
+
+**Caveat, stated because it is unexercised rather than proven:** the host run
+peaked at 11 sprites on a scanline and never hit the 16 limit, so the
+cap-and-drop path is transcribed but untested. It is a direct copy of the row
+path's loop, which is why it is trusted, but a run that provokes 16 would be
+worth having.
+
+**Also:** all four rotations now use `run_frame_interleaved()`;
+`run_frame_sequential()` is deleted rather than left as a second, diverging
+frame path. SRAM drops 318,644 -> 225,084 bytes, **94KB freed**, because the
+frame cache is gone and the column buckets cost 16KB.

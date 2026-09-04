@@ -4694,3 +4694,59 @@ that the geometry is doing what it claims.
 **Space Invaders can therefore afford the aspect correction in every
 rotation**, fixing its 16.7% tate error and 24.4% landscape error with ~8ms
 of headroom to spare.
+
+### 96. Space Invaders' yoko text was being DELETED, not distorted -- and it was wrong with the correction off too
+
+Photographs of the real screen showed the score line reading
+
+```
+uncorrected yoko:  SC.NRF<1> HT-SC.NRF SC.NRF<?>
+corrected yoko:    SC7BF(1> 4|-SrnRF SrrRF(?)
+tate (either):     SCORE<1> HI-SCORE SCORE<2>      <- correct
+```
+
+That is not stretching distortion. Letters have lost whole STROKES -- O
+reads as C, E as F, H as 4 -- which only happens when pixels are removed.
+
+**Both yoko axes downsample, and this game sampled instead of merging.**
+Yoko maps the long axis 256 -> 240 canvas rows in BOTH aspect modes (see
+rebuild() in arcade_video_geom.cpp -- that asymmetry is deliberate and is
+why landscape was 24.4% off while tate was 16.7%), and with the correction
+on it also narrows the short axis 224 -> 180. The renderer was
+destination-driven nearest-neighbour: one source sample per canvas pixel,
+the rest never read. On 1-pixel-wide line art that does not thin a feature,
+it DELETES it.
+
+**This is DEVNOTES #80 again, on the one game that never got the fix.**
+Pac-Man, Ms. Pac-Man, Galaga and Burger Time were all converted to
+source-driven merging; Space Invaders and Lunar Rescue were skipped because
+they never needed the column primitive that the conversion came bundled
+with -- their VRAM is already a framebuffer (#95). The merge is a separate
+concern from the burst, and it got missed with it.
+
+Fixed by walking the SOURCE on both axes and letting a lit sample win. The
+game is 1-bit white-on-black, so merging is simply OR: OR the raster columns
+that collapse into one canvas row, and let a lit sample overwrite an unlit
+one along the other axis.
+
+Measured on the host, lit pixels on the same attract frame, against tate
+(which upsamples both axes and so loses nothing):
+
+| | lit | vs tate |
+|---|---|---|
+| tate | 4,196 | 100% |
+| yoko, before | 3,792 | 90.4% |
+| yoko, after | 4,152 | **98.9%** |
+
+The aggregate understates it: what gets deleted is exactly the thin strokes,
+so the visible effect on text is far larger than 9%.
+
+Cost on hardware, worst case (landscape, corrected, gameplay): `work_MEAN`
+7,541us of a 15,238us window, `starve` 0, runway 28/32. This game had ~9ms
+spare and the merge spends about 1.5ms of it.
+
+**The lesson: "it needs no port" is not the same as "it needs nothing."**
+#95 correctly concluded Invaders needed no column primitive and then stopped
+looking, when a second, independent fix from the same phase had also passed
+it by. When a game is skipped for one reason, check what else was bundled
+with the thing it was skipped from.

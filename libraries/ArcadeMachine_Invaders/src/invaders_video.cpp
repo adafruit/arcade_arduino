@@ -40,13 +40,38 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
         // axis (dy); av_yoko.col maps canvas columns onto the SHORT axis --
         // and in yoko the SHORT axis is the one that must NARROW to 180
         // canvas columns, not sit at 1:1. See arcade_video_geom.h.
-        const uint32_t col = 255u - av_yoko.row[dvi_y];
-        const uint8_t  chi = (uint8_t)(col >> 3u);
-        const uint8_t  bit = (uint8_t)(col & 7u);
-        for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
-            const uint32_t i  = av_yoko.col[x];
-            const uint32_t dx = mir ? (uint32_t)(INVADERS_GAME_HEIGHT - 1) - i : i;
-            if ((vram[dx * 32u + chi] >> bit) & 1u) buf[x] = COLOR_WHITE;
+        // MERGED, both axes. Yoko DOWNSAMPLES both of them -- the long axis
+        // 256 -> 240 canvas rows always, and the short axis 224 -> 180 when
+        // the aspect correction is on -- and the loop this replaced was
+        // destination-driven nearest-neighbour: it read one source sample
+        // per canvas pixel and never looked at the rest. On 1-pixel-wide
+        // line art that does not thin a feature, it DELETES it. On a real
+        // screen the score line read "SC.NRF<1> HT-SC.NRF" uncorrected and
+        // "SC7BF(1> 4|-SrnRF" corrected -- whole letter strokes gone.
+        //
+        // Same rule and same fix as Pac-Man's (DEVNOTES #80): walk the
+        // SOURCE and let a lit sample win, so a collapsed feature is
+        // thickened by a pixel rather than lost. This game is 1-bit
+        // white-on-black, so "merge" is simply OR.
+        //
+        // Note this helps with the correction OFF too: yoko's long axis is
+        // resampled 256 -> 240 in BOTH modes (arcade_video_geom.h's
+        // rebuild()), which is where the uncorrected damage came from.
+        const uint32_t r0   = av_yoko.row[dvi_y];
+        const uint32_t nrow = av_yoko.rowrep[dvi_y] ? av_yoko.rowrep[dvi_y] : 1u;
+        const uint32_t n    = av_yoko.src_n;
+        const uint8_t *rep  = av_yoko.rep;
+        uint32_t x = av_yoko.x0;
+        for (uint32_t sx = 0; sx < n; sx++) {
+            const uint32_t dx = mir ? (uint32_t)(INVADERS_GAME_HEIGHT - 1) - sx : sx;
+            const uint8_t *vr = vram + dx * 32u;
+            uint32_t lit = 0;
+            for (uint32_t k = 0; k < nrow; k++) {
+                const uint32_t c = 255u - (r0 + k);
+                lit |= (uint32_t)(vr[c >> 3u] >> (c & 7u)) & 1u;
+            }
+            if (lit) buf[x] = COLOR_WHITE;
+            x += rep[sx];
         }
         break;
     }
@@ -68,13 +93,24 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
 
     case 2: {
         // 180 deg (landscape upside-down): dx reversed, dy un-reversed.
-        const uint32_t col = av_yoko.row[dvi_y];
-        const uint8_t  chi = (uint8_t)(col >> 3u);
-        const uint8_t  bit = (uint8_t)(col & 7u);
-        for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
-            const uint32_t i  = av_yoko.col[x];
-            const uint32_t dx = mir ? i : (uint32_t)(INVADERS_GAME_HEIGHT - 1) - i;
-            if ((vram[dx * 32u + chi] >> bit) & 1u) buf[x] = COLOR_WHITE;
+        // Merged, exactly as case 0 -- see the comment there. Only `col`'s
+        // reversal and dx's ternary differ, which is what makes this 180
+        // rather than a mirror of it (DEVNOTES #21).
+        const uint32_t r0   = av_yoko.row[dvi_y];
+        const uint32_t nrow = av_yoko.rowrep[dvi_y] ? av_yoko.rowrep[dvi_y] : 1u;
+        const uint32_t n    = av_yoko.src_n;
+        const uint8_t *rep  = av_yoko.rep;
+        uint32_t x = av_yoko.x0;
+        for (uint32_t sx = 0; sx < n; sx++) {
+            const uint32_t dx = mir ? sx : (uint32_t)(INVADERS_GAME_HEIGHT - 1) - sx;
+            const uint8_t *vr = vram + dx * 32u;
+            uint32_t lit = 0;
+            for (uint32_t k = 0; k < nrow; k++) {
+                const uint32_t c = r0 + k;
+                lit |= (uint32_t)(vr[c >> 3u] >> (c & 7u)) & 1u;
+            }
+            if (lit) buf[x] = COLOR_WHITE;
+            x += rep[sx];
         }
         break;
     }

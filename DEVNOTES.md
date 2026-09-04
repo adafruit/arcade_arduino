@@ -4882,3 +4882,58 @@ that is genuinely tight is Burger Time's rotation 2.
 The wide-store merge that would fix that remains unbuilt and is now the one
 piece of known-worthwhile optimisation left in the display work. It is
 optional: nothing is broken without it.
+
+### 100. Galaga's corrected yoko was tiled garbage: a conditional emit onto an uncleared buffer
+
+A photograph showed Galaga's landscape-with-correction picture repeating
+across the screen in wrong colours -- coherent content, tiled roughly fifteen
+times. Coherent-but-repeated is an ADDRESSING failure, never a resampling
+one, which narrowed it before any code was read.
+
+**Cause, and it was introduced by this session's own optimisation.** Galaga's
+yoko path had been changed to clear only the pillarbox:
+
+```c
+// render_native_column() writes every pixel of the picture itself, so
+// clearing the full width here would write 224 of the 320 columns twice
+if (sys->rotation == 0 || sys->rotation == 2) { clear borders only }
+```
+
+That reasoning is correct **only on the 1:1 branch**, where the column is
+written straight into `buf + av_yoko.x0` and every pixel really is written.
+With the aspect correction ON, yoko narrows 224 raster columns onto 180
+canvas columns and the picture goes through `av_emit_row_merge()`, which
+stores CONDITIONALLY -- `if (v) dst[x] = v`, so a background sample never
+overwrites a lit one (#80). Conditional stores mean the background is never
+written at all, so the buffer must already be black. It wasn't:
+`hal_video_acquire_scanline()` hands back a recycled buffer still holding an
+older frame, and that is what tiled across the screen.
+
+`av_emit_row_merge()`'s own header says "requires `dst` to be pre-cleared,
+which every renderer here already does". One of them had quietly stopped.
+
+**Why no test caught it, and the fix for that.** `tools/host_common/host_ppm.cpp`
+zeroed the scanline buffer before every render call. The board does no such
+thing -- each renderer is required to clear what it does not write -- so the
+harness was silently doing the renderer's job and the bug was invisible in
+every host dump. It now fills with **magenta poison (0xF81F)** instead, a
+colour no game here uses, so any pixel a renderer fails to write is
+unmissable.
+
+Measured immediately, corrected yoko, frame 0:
+
+| | unwritten pixels |
+|---|---|
+| Galaga, before the fix | **101,428 of 307,200 (33.0%)** |
+| Galaga, after | 0 |
+
+Then swept every other harness with the correction on -- Donkey Kong, Burger
+Time, Pac-Man, Ms. Pac-Man, Space Invaders: **0 unwritten in all of them.**
+Galaga was the only game with the border-only clear; the rest memset the full
+width unconditionally.
+
+**The lesson: a harness that is more forgiving than the hardware is worse
+than no harness**, because it converts a whole bug class into "works here,
+broken there". This one had been zeroing buffers since it was written, and
+the moment a renderer relied on the board doing the same, the dumps kept
+looking perfect. Poisoning costs nothing and models the real contract.

@@ -70,7 +70,19 @@ bool host_ppm_write(const char *path, host_ppm_render_fn render, void *ctx) {
     fprintf(fp, "P6\n%u %u\n255\n", out_w, out_h);
 
     for (uint32_t y = 0; y < HAL_VIDEO_HEIGHT; y++) {
-        memset(row, 0, sizeof(uint16_t) * HAL_VIDEO_WIDTH);
+        // POISON, not zero. The board does NOT clear scanline buffers --
+        // hal_video_acquire_scanline() hands back a recycled buffer still
+        // holding the last frame's pixels, and each renderer is required to
+        // clear whatever it does not write. Zeroing here quietly did that
+        // job FOR the renderer, so a renderer that stopped clearing looked
+        // perfect in every host dump and tiled garbage across a real screen.
+        // That is exactly what happened to Galaga's corrected yoko path
+        // (DEVNOTES #100), and this harness could not see it.
+        //
+        // Magenta is chosen to be loud: no game here uses it, so any pixel
+        // a renderer fails to write is unmissable in the PPM instead of
+        // blending into a black background.
+        for (uint32_t px = 0; px < HAL_VIDEO_WIDTH; px++) row[px] = 0xF81Fu;
         render(ctx, y, row);
 
         for (uint32_t x = 0; x < out_w; x++) {

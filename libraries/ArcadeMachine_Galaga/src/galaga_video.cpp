@@ -848,12 +848,28 @@ GALAGA_VID_RAMFUNC void galaga_video_render_scanline(const galaga_system *sys, u
 
     static uint16_t colbuf[GALAGA_GAME_HEIGHT]; // yoko's on-demand column
 
-    // Yoko clears only the PILLARBOX. render_native_column() writes every
-    // pixel of the picture itself, so clearing the full width here would
-    // write 224 of the 320 columns twice -- 53,760 redundant stores a
-    // frame, on the SRAM bus Core 1's DMA is competing for. The tate path
-    // below has always cleared only its borders, for the same reason.
-    if (sys->rotation == 0 || sys->rotation == 2) {
+    // Yoko clears only the PILLARBOX -- but ONLY when the column goes
+    // straight into the scanline buffer.
+    //
+    // The saving is real: render_native_column() writes every pixel of the
+    // picture, so clearing the full width as well would write 224 of the
+    // 320 columns twice, 53,760 redundant stores a frame on the SRAM bus
+    // Core 1's DMA is competing for.
+    //
+    // It is only VALID on the 1:1 branch. With the aspect correction on,
+    // yoko narrows 224 raster columns onto 180 canvas columns and the
+    // picture is written by av_emit_row_merge(), which stores
+    // CONDITIONALLY -- `if (v) dst[x] = v`, so a background sample never
+    // overwrites a lit one (DEVNOTES #80). Conditional stores mean the
+    // background is never written at all, so the buffer must already be
+    // black. Skipping the clear there left every background pixel holding
+    // whatever the last frame put in that recycled buffer: the picture
+    // tiled across the screen in garbage colour. See DEVNOTES #100.
+    //
+    // av_emit_row_merge()'s own header says "requires dst to be
+    // pre-cleared, which every renderer here already does" -- this one had
+    // quietly stopped doing it.
+    if ((sys->rotation == 0 || sys->rotation == 2) && av_yoko.col_1to1) {
         memset(buf, 0, av_yoko.x0 * sizeof(uint16_t));
         memset(buf + av_yoko.x1, 0,
                (HAL_VIDEO_WIDTH - av_yoko.x1) * sizeof(uint16_t));

@@ -12,6 +12,7 @@
 #include "btime_audio.h"
 #include "btime_assets.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 #include "arcade_hal_audio.h"
 #include "arcade_hal_storage.h"
 #include "arcade_hal_input.h"
@@ -70,6 +71,36 @@ void btime_init(btime_system *system) {
     m6502_init(&system->cpu);
     m6502_init(&system->audiocpu);
     btime_ports_wire(system);
+
+    // Build the canvas mapping for this raster (arcade_video_geom.h). Must
+    // happen before the first frame -- the renderer reads av_tate/av_yoko on
+    // every scanline and they are all zeroes until this runs. LONG axis
+    // first (GAME_WIDTH), then SHORT (GAME_HEIGHT).
+    av_geom_init(BTIME_GAME_WIDTH, BTIME_GAME_HEIGHT);
+
+    // ASPECT CORRECTION DELIBERATELY OFF FOR THIS GAME, and it is the one
+    // that needs it most: the raster is square (240x240), so at 1:1 the
+    // picture is 33.3% too wide for its height in BOTH orientations,
+    // against Pac-Man's 3.7% in tate.
+    //
+    // It does not fit. Measured on hardware (DEVNOTES #81), tate: render
+    // 4950us at 1:1 against 6624us corrected, on a frame whose other costs
+    // (CPU 6.9ms, sound 3.3ms) leave about 1.1ms spare. Corrected,
+    // `work_max` is 17172us of a 16660us budget and the DVI queue starves
+    // ~240 times a frame. Yoko is marginal rather than broken -- 15783us
+    // and ~50 starves -- but tate is this game's default.
+    //
+    // The cost is structural, not a missing optimisation: at 1:1 this
+    // renderer emits two pixels per 32-bit store, unrolled by four, and a
+    // 240->320 upsample cannot use either trick. Both the destination-driven
+    // and source-driven forms were measured; the source-driven one (which
+    // ships) is 635us better and still not enough.
+    //
+    // Turn it on with -DTEST_STRETCH=1 to see the correct proportions and
+    // the starvation together. Burger Time and Donkey Kong are now the two
+    // games that need the correction and cannot afford it (#78).
+    av_geom_set_stretch(false);
+
 
     // ROTATION 1 (90 deg CCW), predicted from MAME and still to be
     // confirmed against the framebuffer invariant.
@@ -293,7 +324,7 @@ static void run_scanline(btime_system *system, uint32_t line) {
 // the start.
 //
 // The mapping is unusually tidy on this machine: 240 of the 272 game
-// scanlines are visible, and HAL_VIDEO_SCANLINES_PER_FRAME is also 240, so
+// scanlines are visible, and HAL_VIDEO_HEIGHT is also 240, so
 // visible game line <-> submitted DVI row is 1:1 and the 32 blanking lines
 // carry CPU cycles and audio but no output.
 //
@@ -330,18 +361,17 @@ static void run_frame_interleaved(btime_system *system) {
         // line by up to 12% of a frame. That is deliberate and harmless --
         // the alternative is the starvation above, and every renderer here
         // already reads live VRAM mid-frame by design.
-        const uint32_t want = ((line + 1u) * HAL_VIDEO_SCANLINES_PER_FRAME)
+        const uint32_t want = ((line + 1u) * HAL_VIDEO_HEIGHT)
                               / BTIME_SCANLINES_PER_FRAME;
-        while (submitted < want && submitted < HAL_VIDEO_SCANLINES_PER_FRAME) {
-            const uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
+        while (submitted < want && submitted < HAL_VIDEO_HEIGHT) {
             uint16_t *buf = hal_video_acquire_scanline();
             const uint32_t r0 = COST_NOW();
-            btime_video_render_scanline(system, submitted * step, buf);
+            btime_video_render_scanline(system, submitted, buf);
             COST_ADD(g_render_us, r0);
             hal_video_submit_scanline(buf);
 
             const uint32_t a0 = COST_NOW();
-            btime_audio_run_slice(submitted, HAL_VIDEO_SCANLINES_PER_FRAME);
+            btime_audio_run_slice(submitted, HAL_VIDEO_HEIGHT);
             COST_ADD(g_audio_us, a0);
             submitted++;
         }
@@ -366,24 +396,12 @@ static void run_frame_interleaved(btime_system *system) {
 // Slicing off the scanline loop here rather than generating a whole frame's
 // audio in one call afterwards also keeps the #48 rule intact for free: no
 // single slice is a long uninterrupted burst.
-static void run_frame_sequential(btime_system *system) {
-    for (uint32_t line = 0; line < BTIME_SCANLINES_PER_FRAME; line++) {
-        run_scanline(system, line);
-        const uint32_t a0 = COST_NOW();
-        btime_audio_run_slice(line, BTIME_SCANLINES_PER_FRAME);
-        COST_ADD(g_audio_us, a0);
-    }
-    const uint32_t r0 = COST_NOW();
-    btime_draw_frame(system);
-    COST_ADD(g_render_us, r0);
-}
-
 void btime_run_frame(btime_system *system) {
-    if (system->rotation == 1 || system->rotation == 3) {
-        run_frame_interleaved(system);
-    } else {
-        run_frame_sequential(system);
-    }
+    // Every rotation, one path. btime_video.cpp's render_native_column()
+    // removed the reason landscape/180 ever needed a whole-frame burst
+    // (DEVNOTES #79), and with it the frame_pen cache and the separate
+    // sequential loop that fed it.
+    run_frame_interleaved(system);
     cost_frame_done();
 
     // NOTE the absence of anything here. Every other machine in this

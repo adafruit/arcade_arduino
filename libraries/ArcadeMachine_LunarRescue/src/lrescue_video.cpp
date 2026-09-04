@@ -29,13 +29,14 @@
 #include <string.h>
 #include "lrescue_video.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 #include <Arduino.h> // micros() for the render-vs-block split in lrescue_draw_frame() below
 
-// See invaders_video.cpp for the derivation of these constants -- identical
-// video RAM layout and target monitor, so identical border/scale math.
-#define TATE_BY  16u    // (480 - 224*2) / 2
-#define TATE_BX  32u    // (320 - 256)   / 2
-#define LAND_BX  48u    // (320 - 224)   / 2 -- centred in visible DVI x 0..319
+// Where the picture lands on the canvas comes from ArcadeHAL's
+// arcade_video_geom.h -- av_tate/av_yoko, built by av_geom_init() in
+// lrescue_init(). The TATE_BX/TATE_BY/LAND_BX constants this file used to
+// copy from invaders_video.cpp are gone; that copying is exactly what
+// DEVNOTES #21/#23/#33 came from.
 
 // Index i's bits map to (R=bit0, G=bit2, B=bit1) per palette_init_3bit_rbg()
 // above -- NOT the more intuitive bit0/1/2=R/G/B order the "RBG" name hints
@@ -66,44 +67,78 @@ static inline uint16_t block_color(const arcade_system *sys, uint32_t dx, uint32
 static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *sys) {
     memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
     const uint8_t *vram = sys->state.memory + 0x2400;
+    // Scratch for the tate cases' byte-grouped decode -- see case 1.
+    static uint16_t scratch[LRESCUE_GAME_WIDTH];
     bool mir = sys->mirror_x;
 
     switch (sys->rotation) {
 
     case 0: {
-        // Landscape: dx->DVI x x1, dy stretched x1.875 to fill 480 scanlines.
-        uint32_t dy  = ((uint32_t)dvi_y * (uint32_t)LRESCUE_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
-        uint32_t col = 255u - dy;
-        uint32_t chi = col >> 3u;
-        for (uint32_t i = 0; i < (uint32_t)LRESCUE_GAME_HEIGHT; i++) {
-            uint32_t dx = mir ? (uint32_t)(LRESCUE_GAME_HEIGHT - 1) - i : i;
-            uint8_t v = vram[dx * 32u + chi];
-            if ((v >> (col & 7u)) & 1u)
-                buf[LAND_BX + i] = block_color(sys, dx, chi);
+        // Landscape. av_yoko.row maps the canvas row onto the LONG axis;
+        // av_yoko.col maps canvas columns onto the SHORT axis, which in yoko
+        // must NARROW to 180 canvas columns rather than sit at 1:1. See
+        // arcade_video_geom.h.
+        // MERGED, both axes -- same fix and same reason as Space Invaders
+        // (DEVNOTES #96), which shares this VRAM layout. Yoko downsamples
+        // the long axis 256 -> 240 canvas rows in BOTH aspect modes, and the
+        // short axis 224 -> 180 when the correction is on. The
+        // destination-driven loop this replaces read ONE source sample per
+        // canvas pixel and never looked at the rest, which on 1-pixel line
+        // art deletes features rather than thinning them -- on Invaders it
+        // made the score line unreadable.
+        //
+        // Two differences from Invaders, both because this game has colour:
+        //
+        //  - The colour comes from block_color(dx, chi) and `chi` is derived
+        //    from the raster row, so each merged row carries its OWN colour.
+        //  - Ties go to the FIRST lit sample, not the last. That keeps the
+        //    pixel the old nearest-neighbour loop would have chosen whenever
+        //    it was lit, so the merge only ever ADDS what was being dropped
+        //    instead of also reshuffling colours. `buf` is cleared at the top
+        //    of this function, so "already written" is simply non-zero.
+        const uint32_t r0   = av_yoko.row[dvi_y];
+        const uint32_t nrow = av_yoko.rowrep[dvi_y] ? av_yoko.rowrep[dvi_y] : 1u;
+        const uint32_t n    = av_yoko.src_n;
+        const uint8_t *rep  = av_yoko.rep;
+        uint32_t x = av_yoko.x0;
+        for (uint32_t sx = 0; sx < n; sx++) {
+            const uint32_t dx = mir ? (uint32_t)(LRESCUE_GAME_HEIGHT - 1) - sx : sx;
+            for (uint32_t k = 0; k < nrow; k++) {
+                const uint32_t c = 255u - (r0 + k);
+                const uint32_t ci = c >> 3u;
+                if (((vram[dx * 32u + ci] >> (c & 7u)) & 1u) && !buf[x]) {
+                    buf[x] = block_color(sys, dx, ci);
+                    break;
+                }
+            }
+            x += rep[sx];
         }
         break;
     }
 
     case 1: {
-        // 90 deg CCW (tate): DVI y->dx(x2), DVI x->dy reversed(x1, x=BX->dy255/player).
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)LRESCUE_GAME_HEIGHT * 2u) return;
-        uint32_t dx = (dvi_y - TATE_BY) >> 1u;
+        // 90 deg CCW (tate): canvas y -> dx, canvas x -> dy reversed
+        // (x = x0 is dy 255, the player end).
+        if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) return;
+        uint32_t dx = av_tate.row[dvi_y];
         if (mir) dx = (uint32_t)(LRESCUE_GAME_HEIGHT - 1) - dx;
-        // Grouped by VRAM byte (chi) instead of iterating columns one at a
-        // time: all 8 columns sharing one byte also share the same
-        // block_color() result (its address only depends on dx>>3 and chi,
-        // neither of which vary within a group) -- the original per-column
-        // loop was re-reading the same byte up to 8x and recomputing/re-
-        // looking-up the same color once per SET PIXEL instead of once per
-        // 8-pixel group. Reading the byte once and skipping the whole group
-        // outright when it's 0 (blank -- buf's already memset to black, so
-        // there's nothing to write) cuts both to 1/8th their prior rate for
-        // the common case of a mostly-empty playfield. bb (0..7) maps
-        // directly to col&7 here since chi*8 is a multiple of 8 -- see
-        // case 3 below for why that mapping isn't as simple when the column
-        // order is reversed.
+
+        // Decoded into a scratch row, then mapped onto the canvas through
+        // av_tate.col. The scratch step is what PRESERVES the byte-grouped
+        // decode below, which is a measured win worth keeping: all 8 columns
+        // sharing one VRAM byte also share one block_color() result (its
+        // address depends only on dx>>3 and chi, neither varying within a
+        // group), so reading the byte once and skipping the whole group when
+        // it is zero cuts both the reads and the colour lookups to an eighth
+        // for the common mostly-empty playfield. That grouping needs 8
+        // CONSECUTIVE destination slots, which the canvas no longer
+        // guarantees once the column map resamples -- hence the scratch row
+        // rather than writing straight into `buf`. bb (0..7) maps directly
+        // to col&7 here since chi*8 is a multiple of 8; see case 3 for why
+        // that is less simple when the column order is reversed.
+        memset(scratch, 0, sizeof(uint16_t) * LRESCUE_GAME_WIDTH);
         const uint8_t *row = vram + dx * 32u;
-        uint16_t *out = buf + TATE_BX;
+        uint16_t *out = scratch;
         for (uint32_t chi = 0u; chi < (uint32_t)LRESCUE_GAME_WIDTH / 8u; chi++) {
             uint8_t v = row[chi];
             if (v) {
@@ -114,49 +149,61 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
             }
             out += 8u;
         }
+        for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
+            buf[x] = scratch[av_tate.col[x]];
         break;
     }
 
     case 2: {
-        // 180 deg (landscape upside-down): dx reversed, dy reversed x1.875.
-        uint32_t col = ((uint32_t)dvi_y * (uint32_t)LRESCUE_GAME_WIDTH) / HAL_VIDEO_HEIGHT; // reversed: top->dy255
-        uint32_t chi = col >> 3u;
-        for (uint32_t i = 0; i < (uint32_t)LRESCUE_GAME_HEIGHT; i++) {
-            uint32_t dx = mir ? i : (uint32_t)(LRESCUE_GAME_HEIGHT - 1) - i;
-            uint8_t v = vram[dx * 32u + chi];
-            if ((v >> (col & 7u)) & 1u)
-                buf[LAND_BX + i] = block_color(sys, dx, chi);
+        // 180 deg (landscape upside-down): dx reversed, dy un-reversed.
+        // Merged exactly as case 0 -- see the comment there. Only `col`'s
+        // reversal and dx's ternary differ, which is what makes this a 180
+        // rather than a mirror of it (DEVNOTES #21).
+        const uint32_t r0   = av_yoko.row[dvi_y];
+        const uint32_t nrow = av_yoko.rowrep[dvi_y] ? av_yoko.rowrep[dvi_y] : 1u;
+        const uint32_t n    = av_yoko.src_n;
+        const uint8_t *rep  = av_yoko.rep;
+        uint32_t x = av_yoko.x0;
+        for (uint32_t sx = 0; sx < n; sx++) {
+            const uint32_t dx = mir ? sx : (uint32_t)(LRESCUE_GAME_HEIGHT - 1) - sx;
+            for (uint32_t k = 0; k < nrow; k++) {
+                const uint32_t c = r0 + k;
+                const uint32_t ci = c >> 3u;
+                if (((vram[dx * 32u + ci] >> (c & 7u)) & 1u) && !buf[x]) {
+                    buf[x] = block_color(sys, dx, ci);
+                    break;
+                }
+            }
+            x += rep[sx];
         }
         break;
     }
 
     case 3: {
-        // 90 deg CW (tate): DVI y reversed->dx(x2), DVI x->dy(x1, x=BX->dy0/score).
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)LRESCUE_GAME_HEIGHT * 2u) return;
-        uint32_t dx = mir ? (dvi_y - TATE_BY) >> 1u
-                          : (uint32_t)(LRESCUE_GAME_HEIGHT - 1) - ((dvi_y - TATE_BY) >> 1u);
-        // Same grouped-by-byte approach as case 1 above, mirrored for this
-        // rotation's reversed column order. LRESCUE_GAME_WIDTH is a
-        // multiple of 8, so WIDTH-1-col0 always ends in binary ...111 (low
-        // 3 bits = 7) whenever col0 itself is a multiple of 8 -- meaning
-        // within one 8-column group, the bit tested counts down 7,6,...,0
-        // as bb goes 0..7 (i.e. bit = 7-bb), never needing a borrow from
-        // higher bits. That's what lets rev0/chi be computed once per
-        // group instead of once per column, exactly like case 1.
+        // 90 deg CW (tate): both axes reversed relative to case 1, so
+        // x = x0 is dy 0, the score end.
+        if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) return;
+        const uint32_t d  = av_tate.row[dvi_y];
+        const uint32_t dx = mir ? d : (uint32_t)(LRESCUE_GAME_HEIGHT - 1) - d;
+
+        // Same grouped-by-byte decode as case 1, into the same scratch row;
+        // the reversal is applied when mapping onto the canvas below rather
+        // than inside the decode, which keeps the grouping intact.
+        memset(scratch, 0, sizeof(uint16_t) * LRESCUE_GAME_WIDTH);
         const uint8_t *row = vram + dx * 32u;
-        uint16_t *out = buf + TATE_BX;
-        for (uint32_t col0 = 0u; col0 < (uint32_t)LRESCUE_GAME_WIDTH; col0 += 8u) {
-            uint32_t rev0 = (uint32_t)(LRESCUE_GAME_WIDTH - 1u) - col0;
-            uint32_t chi = rev0 >> 3u;
+        uint16_t *out = scratch;
+        for (uint32_t chi = 0u; chi < (uint32_t)LRESCUE_GAME_WIDTH / 8u; chi++) {
             uint8_t v = row[chi];
             if (v) {
                 uint16_t color = block_color(sys, dx, chi);
                 for (uint32_t bb = 0u; bb < 8u; bb++) {
-                    if ((v >> (7u - bb)) & 1u) out[bb] = color;
+                    if ((v >> bb) & 1u) out[bb] = color;
                 }
             }
             out += 8u;
         }
+        for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
+            buf[x] = scratch[(uint32_t)(LRESCUE_GAME_WIDTH - 1u) - av_tate.col[x]];
         break;
     }
 
@@ -197,13 +244,12 @@ void lrescue_draw_frame(arcade_system *system) {
     // across the whole frame here (not per-scanline-printed, unlike an
     // earlier version of this instrumentation) to keep overhead to just
     // cheap micros() reads, no Serial calls, in this loop.
-    uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
     uint32_t render_sum = 0, block_sum = 0;
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint32_t a = micros();
         uint16_t *buf = hal_video_acquire_scanline();
         uint32_t b = micros();
-        render_scanline(i * step, buf, system);
+        render_scanline(i, buf, system);
         uint32_t c = micros();
         hal_video_submit_scanline(buf);
         uint32_t d = micros();
@@ -215,7 +261,7 @@ void lrescue_draw_frame(arcade_system *system) {
 }
 
 void lrescue_draw_error_frame(uint16_t color) {
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
         for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) buf[x] = color;
         hal_video_submit_scanline(buf);

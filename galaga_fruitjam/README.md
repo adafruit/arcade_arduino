@@ -100,6 +100,7 @@ card, it is simply unused.
 | SHOOT | Fire |
 | ROTATE | Cycle screen rotation (0°/90° CCW "tate"/180°/270° CW) |
 | MIRROR | Toggle horizontal mirror (for Pepper's-Ghost half-silvered-mirror cabinets) |
+| STRETCH (Button 1) | Toggle aspect-ratio correction — **tate only on this game.** Galaga is the most expensive machine in the project (three Z80s), and in landscape the correction costs +2,576us a frame, which puts it past the whole frame budget and fills the screen with red. So landscape is pinned to the uncorrected 1:1 layout and this button does nothing in rotations 0 and 2. See `DEVNOTES.md` #101. In tate it works and is worth having, though it leaves less headroom than any other game/rotation here. |
 
 Galaga's native hardware framebuffer (288x224, before the cabinet's
 physical 90-degree mount) is displayed **portrait**, defaulting to rotation

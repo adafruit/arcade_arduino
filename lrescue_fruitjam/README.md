@@ -84,6 +84,7 @@ Two things worth knowing if you're assembling this set yourself:
 | SHOOT | The single fire/action button (this cabinet has no separate joystick + button combo beyond this) |
 | ROTATE | Cycle screen rotation (default: 90° CCW "tate") |
 | MIRROR | Toggle horizontal mirror (for Pepper's-Ghost half-silvered-mirror cabinets) |
+| STRETCH (Button 1) | Toggle aspect-ratio correction. Which setting looks right depends on your MONITOR, not the game: a 16:9 panel already stretches a rotated picture on its own, while a panel forced to 4:3 — or a real 4:3 panel — does not. Try both and keep the one that looks correct. |
 
 ## Self-test mode
 

@@ -57,6 +57,15 @@ extern uint8_t galaga_sprite_lookup_prom[GALAGA_SPRITE_LOOKUP_SIZE];
 // loading and before the first galaga_draw_frame().
 void galaga_video_build_caches(void);
 
+// Per-layer render timing, reset on read. Frame totals for star/sprite/
+// tilemap, plus the breakdown of the single worst scanline -- the totals say
+// where the frame goes, the worst scanline is what starves the DVI queue.
+// Device-only and opt-in (-DGALAGA_LAYER_TRACE=1); returns zeros otherwise.
+// See DEVNOTES #83 for why this exists.
+void galaga_debug_take_layers(uint32_t *star_us, uint32_t *spr_us, uint32_t *tile_us,
+                              uint32_t *worst, uint32_t *w_star, uint32_t *w_spr,
+                              uint32_t *w_tile);
+
 // Decodes this frame's sprite list once, up front. MUST be called at the
 // start of every frame, before any galaga_video_render_scanline() call for
 // that frame -- the per-scanline renderer consumes what this produces and
@@ -66,14 +75,6 @@ void galaga_video_build_caches(void);
 // budget fix on the Fruit Jam, and it does trade away mid-frame sprite
 // register changes).
 void galaga_video_begin_frame(const galaga_system *system);
-
-// Renders and submits one full frame (HAL_VIDEO_HEIGHT scanlines). Used
-// directly only for landscape/180-degree rotation -- see
-// pacman_video.h's identical convention (this file's rotation math is
-// ported from pacman_video.cpp near-verbatim, since it's purely geometric
-// and already real-hardware-verified there; only the game-content parts
-// -- tile/sprite decode, palette -- are Galaga-specific).
-void galaga_draw_frame(galaga_system *system);
 
 // Renders one physical scanline (dvi_y). Exposed so galaga_machine.cpp's
 // galaga_run_frame() can call it once per scanline, interleaved with CPU

@@ -39,28 +39,22 @@ extern uint8_t pacman_lookup_prom[PACMAN_LOOKUP_PROM_SIZE];
 // Decodes pacman_gfx_rom/_palette_prom/_lookup_prom (filled by
 // pacman_assets.cpp) into this file's internal tile/sprite pixel-index and
 // RGB565 palette caches. Call once, after loading and before the first
-// pacman_draw_frame().
+// first frame is drawn.
 void pacman_video_build_caches(void);
 
-// Renders and submits one full frame (HAL_VIDEO_HEIGHT scanlines) from
-// `system`'s video/color/sprite RAM, honoring system->rotation,
-// system->mirror_x and system->flip_screen. Used directly only for
-// landscape/180-degree rotation now -- see pacman_video_render_scanline()
-// below for why tate/CW drives its own loop instead.
-void pacman_draw_frame(pacman_system *system);
-
-// Renders one physical scanline (dvi_y, the same "physical row, before
-// HAL_VIDEO_SCANLINES_PER_FRAME accounting" coordinate invaders_video.cpp
-// uses) into `buf`. Exposed (not static) so pacman_machine.cpp's
+// Renders one canvas scanline (dvi_y, 0..HAL_VIDEO_HEIGHT-1 -- the same
+// canvas coordinate every renderer here uses; see arcade_hal_video.h)
+// into `buf`, honoring system->rotation, system->mirror_x and
+// system->flip_screen. Exposed (not static) so pacman_machine.cpp's
 // pacman_run_frame() can call it once per scanline, interleaved with the
 // Z80 cycles that update the VRAM/sprite state it reads -- see that
-// function's own comment (arcade_arduino/DEVNOTES.md problem #19) for why
-// this matters for tate/CW rotation specifically. Landscape/180-degree
-// rotation still needs the WHOLE frame's final VRAM state before any
-// scanline can be emitted (see pacman_video.cpp's frame_cache comment),
-// so pacman_run_frame() never calls this directly for those two modes --
-// it uses pacman_draw_frame() instead, after running the full frame's
-// cycles.
+// function's own comment (arcade_arduino/DEVNOTES.md problem #19).
+//
+// EVERY rotation goes through here now. Landscape/180 used to need the
+// whole frame's final VRAM state before any scanline could be emitted,
+// because a yoko scanline is a native COLUMN and this file could only
+// render rows. render_native_column() removed that, and took the 129KB
+// frame_cache and the separate whole-frame entry point with it.
 void pacman_video_render_scanline(const pacman_system *system, uint32_t dvi_y, uint16_t *buf);
 
 // Boot-time asset-load error screen: floods every scanline with a solid

@@ -18,6 +18,7 @@
 // Core 0: game emulation, input polling, board-to-game input mapping.
 // Core 1: hal_video_run() -- drives the DVI signal; never returns.
 #include <arcade_hal_video.h>
+#include <arcade_video_geom.h>
 #include <arcade_hal_input.h>
 #include <dkong_machine.h>
 #include <dkong_video.h>
@@ -48,6 +49,26 @@ void setup() {
     // storage).
     dkong_init(&g_system);
     Serial.println("[dkong] boot: dkong_init done");
+
+    // Boot straight into a chosen rotation, for measuring one orientation
+    // without a hand on the rotate button:
+    //   arduino-cli compile --build-property compiler.cpp.extra_flags=-DTEST_ROTATION=0
+    // 0 = landscape, 1 = 90 CCW tate (default), 2 = 180, 3 = 90 CW tate.
+#ifdef TEST_ROTATION
+    g_system.rotation = (uint8_t)(TEST_ROTATION);
+    Serial.print("[dkong] TEST_ROTATION override -> ");
+    Serial.println((int)g_system.rotation);
+#endif
+
+    // Aspect-ratio correction (arcade_video_geom.h), same build-flag shape:
+    //   --build-property compiler.cpp.extra_flags=-DTEST_STRETCH=1
+    // This game is the project's tightest frame budget, so it is the one to
+    // measure the correction's cost on.
+#ifdef TEST_STRETCH
+    av_geom_set_stretch(TEST_STRETCH != 0);
+    Serial.print("[dkong] TEST_STRETCH -> ");
+    Serial.println((int)av_geom_get_stretch());
+#endif
 
     // Storage/ROM/PROM loading -- blocking, can be slow (SD card retries).
     // Deliberately finishes before Core 1 is allowed to start the DVI pump.
@@ -119,6 +140,20 @@ void loop() {
     bool jump   = hal_input_read(HAL_BTN_SHOOT);
     bool rotate = hal_input_read(HAL_BTN_ROTATE);
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
+    // Button 1: aspect correction on/off. Edge-detected inside
+    // av_geom_toggle_on_edge(); the right setting depends on the monitor,
+    // not the game, so it is a runtime toggle rather than a build flag.
+    const bool stretch_btn = hal_input_read(HAL_BTN_STRETCH);
+    av_geom_toggle_on_edge(stretch_btn);
+
+    // BUTTON WITNESS, same idea as btime_fruitjam.ino's: a STICKY record of
+    // which meta buttons were seen down since the last heartbeat. Without
+    // it, "nothing happened" cannot be told apart from "the board never saw
+    // the press", and those need completely different fixes.
+    static uint8_t meta_seen = 0;
+    if (rotate)      meta_seen |= 0x01;
+    if (mirror)      meta_seen |= 0x02;
+    if (stretch_btn) meta_seen |= 0x04;
 
     dkong_input_update(&g_system, coin, start1, start2,
                        up, down, left, right, jump, rotate, mirror);
@@ -134,13 +169,32 @@ void loop() {
     // the CPU's own read/write path once per frame), and its renderer walks
     // every sprite for every scanline.
     static uint32_t frame_count = 0;
-    static uint32_t work_max = 0;
+    // Totals beside every maximum -- see DEVNOTES #84/#85.
+    static uint32_t work_max = 0, work_sum = 0, work_n = 0;
+    static uint32_t blk_sum = 0, blk_max = 0;
+    // THE INTER-FRAME GAP. Everything loop() does between the last submitted
+    // scanline of one frame and the first of the next: the vblank NMI, the
+    // button reads, the heartbeat itself. Core 1 keeps draining the queue
+    // throughout, at one buffer per 63.5us, so this gap is the ONE cost that
+    // shows up as red at the TOP of the picture rather than spread through
+    // it -- and no per-frame total or per-band figure can see it, because it
+    // happens outside the scanline loop entirely. See DEVNOTES #94.
+    static uint32_t s_prev_end = 0;
+    static uint32_t s_gap_sum = 0, s_gap_max = 0, s_gap_n = 0;
     uint32_t t0 = micros();
+    if (s_prev_end) {
+        const uint32_t gap = t0 - s_prev_end;
+        s_gap_sum += gap; s_gap_n++;
+        if (gap > s_gap_max) s_gap_max = gap;
+    }
     dkong_run_frame(&g_system);
-    uint32_t frame_us   = micros() - t0;
+    s_prev_end = micros();
+    uint32_t frame_us   = s_prev_end - t0;
     uint32_t blocked_us = hal_video_take_blocked_us();
     uint32_t work_us    = (frame_us > blocked_us) ? (frame_us - blocked_us) : 0;
     if (work_us > work_max) work_max = work_us;
+    if (blocked_us > blk_max) blk_max = blocked_us;
+    work_sum += work_us; blk_sum += blocked_us; work_n++;
 
     if ((++frame_count % 60u) == 0) {
         Serial.print("[dkong] frame ");
@@ -151,11 +205,80 @@ void loop() {
         Serial.print(work_us);
         Serial.print("us, blocked ");
         Serial.print(blocked_us);
-        Serial.print("us), work_max ");
+        Serial.print("us), work_MEAN ");
+        Serial.print(work_n ? work_sum / work_n : 0);
+        Serial.print("us, work_max ");
         Serial.print(work_max);
+        Serial.print("us, blk_MEAN ");
+        Serial.print(work_n ? blk_sum / work_n : 0);
         Serial.print("us, audio ");
         Serial.print(dkong_debug_audio_us());
-        Serial.println("us");
+        // Queue-starvation counter -- the ONLY instrument that sees the red
+        // (arcade_hal_video.h): `work` can sit inside the frame budget while
+        // an uneven patch inside that frame drains Core 1's queue anyway.
+        Serial.print("us, rot ");
+        Serial.print((int)g_system.rotation);
+        Serial.print(", stretch ");
+        Serial.print((int)av_geom_get_stretch());
+        Serial.print(", meta_seen(RMS) ");
+        Serial.print(meta_seen, BIN);
+        meta_seen = 0;
+        Serial.print(", starve ");
+        Serial.print(hal_video_take_starve_count());
+        // Runway left at the worst moment -- see DEVNOTES #85.
+        Serial.print(", minq ");
+        Serial.print(hal_video_take_min_valid_level());
+        Serial.print("/");
+        Serial.print(hal_video_scanbuf_count());
+        work_sum = blk_sum = work_n = 0; work_max = 0; blk_max = 0;
+        // Where the render half of `work` actually goes -- see
+        // dkong_video.h. `rows` below `lines` means the duplicate-row
+        // memoisation is firing.
+        {   // per-scanline-band cost -- see dkong_machine.h / DEVNOTES #94
+            uint32_t b[8];
+            dkong_debug_take_bands(b);
+            Serial.print(", bands ");
+            for (int bi = 0; bi < 8; bi++) { Serial.print(b[bi] / 60u); if (bi < 7) Serial.print("/"); }
+            Serial.print("us");
+            uint32_t q[8];
+            dkong_debug_take_band_minq(q);
+            Serial.print(", band_minq ");
+            for (int bi = 0; bi < 8; bi++) {
+                if (q[bi] == 0xFFFFFFFFu) Serial.print("-"); else Serial.print(q[bi]);
+                if (bi < 7) Serial.print("/");
+            }
+        }
+        {
+            Serial.print(", gap ");
+            Serial.print(s_gap_n ? s_gap_sum / s_gap_n : 0);
+            Serial.print("us avg / ");
+            Serial.print(s_gap_max);
+            Serial.print("us max = ");
+            Serial.print(s_gap_max / 63u);
+            Serial.print(" lines drained");
+            s_gap_sum = 0; s_gap_n = 0; s_gap_max = 0;
+        }
+        {   // landscape split -- see dkong_video.h / DEVNOTES #93
+            uint32_t b_us = 0, c_us = 0, c_n = 0;
+            dkong_debug_take_landscape(&b_us, &c_us, &c_n);
+            Serial.print(", begin ");
+            Serial.print(b_us / 60u);
+            Serial.print("us/f, cols ");
+            Serial.print(c_us / 60u);
+            Serial.print("us/f x");
+            Serial.print(c_n / 60u);
+        }
+        uint32_t r_us, e_us, rows, lines;
+        dkong_debug_take_render(&r_us, &e_us, &rows, &lines);
+        Serial.print("/60, rows ");
+        Serial.print(rows);
+        Serial.print("/");
+        Serial.print(lines);
+        Serial.print(" (");
+        Serial.print(r_us / 60u);
+        Serial.print("us/f), emit ");
+        Serial.print(e_us / 60u);
+        Serial.println("us/f");
     }
 }
 

@@ -14,6 +14,7 @@
 // Core 0: game emulation, input polling, board-to-game input mapping.
 // Core 1: hal_video_run() -- drives the DVI signal; never returns.
 #include <arcade_hal_video.h>
+#include <arcade_video_geom.h>   // av_geom_toggle_on_edge() -- Button 1
 #include <arcade_hal_input.h>
 #include <lrescue_machine.h>
 #include <lrescue_video.h>
@@ -208,6 +209,22 @@ void setup() {
     set_sys_clock_khz(252000, true);
 
     lrescue_init(&g_system);
+
+    // Boot straight into a chosen rotation, for measuring one orientation
+    // without a hand on the rotate button:
+    //   arduino-cli compile --build-property compiler.cpp.extra_flags=-DTEST_ROTATION=0
+    // 0 = landscape, 1 = 90 CCW tate (default), 2 = 180, 3 = 90 CW tate.
+#ifdef TEST_STRETCH
+    av_geom_set_stretch((TEST_STRETCH) != 0);
+    Serial.print("[lrescue] TEST_STRETCH -> ");
+    Serial.println((int)av_geom_get_stretch());
+#endif
+#ifdef TEST_ROTATION
+    g_system.rotation = (uint8_t)(TEST_ROTATION);
+    Serial.print("[lrescue] TEST_ROTATION override -> ");
+    Serial.println((int)g_system.rotation);
+#endif
+
     g_assets_ok = lrescue_load_assets(&g_system, &g_error_color);
 
     // hal_input_init() has run by now (inside lrescue_load_assets()) --
@@ -248,6 +265,10 @@ void loop() {
     bool shot   = hal_input_read(HAL_BTN_SHOOT);
     bool rotate = hal_input_read(HAL_BTN_ROTATE);
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
+    // Button 1: aspect correction on/off. Edge-detected inside
+    // av_geom_toggle_on_edge(); the right setting depends on the monitor,
+    // not the game, so it is a runtime toggle rather than a build flag.
+    av_geom_toggle_on_edge(hal_input_read(HAL_BTN_STRETCH));
 
     lrescue_input_update(&g_system, coin, start1, start2, left, right, shot, rotate, mirror);
 
@@ -269,13 +290,17 @@ void loop() {
     // or a Core-1-side hiccup) and no amount of Core 0 optimisation will
     // help.
     static uint32_t frame_count = 0;
-    static uint32_t work_max = 0;
+    // Totals beside every maximum plus the runway figure -- see #84/#85.
+    static uint32_t work_max = 0, work_sum = 0, work_n = 0;
+    static uint32_t blk_sum = 0, blk_max = 0;
     uint32_t t0 = micros();
     lrescue_run_frame(&g_system);
     uint32_t frame_us   = micros() - t0;
     uint32_t blocked_us = hal_video_take_blocked_us();
     uint32_t work_us    = (frame_us > blocked_us) ? (frame_us - blocked_us) : 0;
     if (work_us > work_max) work_max = work_us;
+    if (blocked_us > blk_max) blk_max = blocked_us;
+    work_sum += work_us; blk_sum += blocked_us; work_n++;
 
     if ((++frame_count % 60u) == 0) {
         Serial.print("[lrescue] frame ");
@@ -286,9 +311,27 @@ void loop() {
         Serial.print(work_us);
         Serial.print("us, blocked ");
         Serial.print(blocked_us);
-        Serial.print("us), work_max ");
+        Serial.print("us), work_MEAN ");
+        Serial.print(work_n ? work_sum / work_n : 0);
+        Serial.print("us, work_max ");
         Serial.print(work_max);
-        Serial.println("us");
+        Serial.print("us, blk_MEAN ");
+        Serial.print(work_n ? blk_sum / work_n : 0);
+        // Queue-starvation counter -- the ONLY instrument that sees the red
+        // (arcade_hal_video.h), and exactly what #16 above dead-ended for
+        // want of.
+        Serial.print("us, rot ");
+        Serial.print((int)g_system.rotation);
+        Serial.print(", stretch ");
+        Serial.print((int)av_geom_get_stretch());
+        Serial.print(", starve ");
+        Serial.print(hal_video_take_starve_count());
+        Serial.print(", minq ");
+        Serial.print(hal_video_take_min_valid_level());
+        Serial.print("/");
+        Serial.print(hal_video_scanbuf_count());
+        work_sum = blk_sum = work_n = 0; work_max = 0; blk_max = 0;
+        Serial.println("/60");
     }
 }
 

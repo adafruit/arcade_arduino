@@ -12,6 +12,7 @@
 #include "pacman_audio.h"
 #include "pacman_assets.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 #include "arcade_hal_audio.h"
 #include "arcade_hal_storage.h"
 #include "arcade_hal_input.h"
@@ -30,6 +31,33 @@ void pacman_init(pacman_system *system) {
 
     z80_init(&system->cpu);
     pacman_ports_wire(system);
+
+    // Build the canvas mapping for this raster. Must happen before the
+    // first frame -- pacman_video.cpp reads av_tate/av_yoko on every
+    // scanline and they are all zeroes until this runs. LONG axis first
+    // (GAME_WIDTH, 288), then SHORT (GAME_HEIGHT, 224); see
+    // arcade_video_geom.h for why those names and not width/height.
+    av_geom_init(PACMAN_GAME_WIDTH, PACMAN_GAME_HEIGHT);
+
+    // Aspect-ratio correction ON for this game, which is a per-game call and
+    // not the module's default (see arcade_video_geom.h).
+    //
+    // WITHOUT it the picture is laid out in raw raster-pixel counts, so in
+    // yoko it occupies 224 canvas columns against 240 rows -- 0.933 wide for
+    // 1 tall, where a real cabinet's tube is 0.75. That is 24.4% too wide,
+    // and on a physical display it reads exactly as "squat". Tate is only
+    // 3.7% off and looks fine either way; yoko is the one that shows.
+    //
+    // Affordable here, measured on hardware (DEVNOTES #79): FREE in yoko,
+    // because the correction NARROWS that axis (224 -> 180 columns, fewer
+    // pixels emitted) -- work_max 10845us with it against 10872us without.
+    // In tate it upsamples and costs +1.6ms, landing at 12029us of a 16660us
+    // budget with starve 0/60. Both orientations have room.
+    //
+    // This is per-game on purpose: Donkey Kong cannot afford it in tate yet
+    // (#78), so the module still defaults off and each machine opts in once
+    // it has been measured on real hardware.
+    av_geom_set_stretch(true);
 
     // Screen rotation 3 (90 deg CW), NOT 1. This is the value that puts the
     // game upright on the same physically-rotated monitor that
@@ -74,60 +102,23 @@ bool pacman_load_assets(pacman_system *system, uint16_t *out_error_color) {
     return true;
 }
 
-// Runs the frame's cycles then renders -- the straightforward, fully
-// sequential approach. Used for landscape/180-degree rotation, which
-// structurally need the whole frame's final VRAM state before their
-// renderer can emit even one physical scanline (see pacman_video.cpp's
-// frame_cache comment) -- there's no way to interleave those two modes'
-// rendering with CPU execution the way pacman_run_frame() does for
-// tate/CW below. Known, confirmed-real stall risk for these two
-// orientations (arcade_arduino/DEVNOTES.md problems #18/#19) -- not yet
-// fixed, since tate is this project's supported orientation for this game
-// (a real Pac-Man cabinet is always portrait).
-//
-// `system->cpu.cyc` (the z80 core's own field) is a running total of
-// every T-state executed since boot -- it is NEVER reset, by this file or
-// by the core itself, and it's a `uint32_t` (pinned to that exact width
-// in z80.h -- it used to be `unsigned long`, which is 32-bit on this
-// target but 64-bit on a typical host, and that difference once hid a
-// wraparound bug from a host-side test harness; see z80.h's comment).
-// The locals below are uint32_t to MATCH it: mixing a 32-bit counter with
-// a 64-bit local silently defeats the wraparound-safe subtraction this
-// whole comment is about. At Pac-Man's real 3.072MHz clock, real-time-paced play
-// advances it by ~3,072,000 per second, so it wraps roughly every 23
-// minutes (2^32 / 3,072,000 ~= 1398s) -- see DEVNOTES.md problem #22 for
-// the real symptom this caused (a permanent hang after leaving the
-// attract loop running idle). Comparing ELAPSED CYCLES (a subtraction,
-// `system->cpu.cyc - start`) rather than comparing `system->cpu.cyc`
-// directly against a precomputed absolute target is what makes this safe
-// indefinitely: unsigned subtraction wraps modulo 2^32 exactly like the
-// counter itself does, so the computed delta is still correct even if
-// `cyc` wrapped past 0 partway through this frame -- as long as the real
-// elapsed delta never approaches half of 2^32, which a single frame's
-// ~50,688-cycle budget never remotely does.
-static void run_frame_sequential(pacman_system *system) {
-    uint32_t start = system->cpu.cyc;
-    while ((uint32_t)(system->cpu.cyc - start) < PACMAN_CYCLES_PER_FRAME) {
-        z80_step(&system->cpu);
-    }
-    if (system->interrupt_enable) {
-        z80_gen_int(&system->cpu, system->interrupt_vector);
-    }
-    pacman_draw_frame(system);
-}
-
 // Runs the frame's cycles INTERLEAVED with scanline submission, evenly
-// spreading PACMAN_CYCLES_PER_FRAME across the HAL_VIDEO_SCANLINES_PER_FRAME
+// spreading PACMAN_CYCLES_PER_FRAME across the HAL_VIDEO_HEIGHT
 // acquire/submit calls instead of running them all in one uninterrupted
 // burst before the first call. Fixes arcade_arduino/DEVNOTES.md problem
 // #19: even after fixing the renderer itself (problem #18), a real,
 // visible stall remained because *this* loop still ran the whole frame's
-// ~50,688 Z80 cycles before pacman_draw_frame() ever called
+// ~50,688 Z80 cycles before the frame renderer ever called
 // hal_video_acquire_scanline() -- same starvation mechanism, just moved
-// from the renderer into the CPU loop. Only safe for tate/CW rotation,
-// which render each scanline from LIVE VRAM state on demand (see
-// pacman_video_render_scanline()'s doc comment) -- landscape/180 use
-// run_frame_sequential() above instead.
+// from the renderer into the CPU loop.
+//
+// THIS IS NOW THE ONLY PATH. It used to be gated to tate/CW, with
+// landscape/180 falling back to a fully sequential run_frame_sequential()
+// because a yoko scanline needs a native COLUMN and the renderer could only
+// produce rows. pacman_video.cpp's render_native_column() removed that
+// constraint, so the gate, the sequential path and the 129KB frame_cache
+// are all gone together -- and with them the red those orientations showed
+// every frame (DEVNOTES #18/#75).
 //
 // Side effect worth knowing about: because each scanline is now rendered
 // from whatever VRAM/sprite state exists at that exact point in the
@@ -138,39 +129,40 @@ static void run_frame_sequential(pacman_system *system) {
 // sprites move only a few pixels per frame, so it should be imperceptible
 // in practice; flag it if anything looks like a one-frame tear on fast-
 // moving elements.
-// Same "compare elapsed delta, not absolute cyc" wraparound-safety as
-// run_frame_sequential() above -- see its comment for the full
-// explanation (arcade_arduino/DEVNOTES.md problem #22).
+// `system->cpu.cyc` is the z80 core's own free-running uint32_t, never
+// reset, so at Pac-Man's 3.072MHz it wraps roughly every 23 minutes.
+// Comparing ELAPSED cycles (a subtraction) rather than an absolute target
+// is what makes that safe indefinitely: unsigned subtraction wraps modulo
+// 2^32 exactly as the counter does. DEVNOTES.md problem #22 is a real
+// permanent hang from getting this wrong, and it is why every local here is
+// uint32_t and not `long`.
 static void run_frame_interleaved(pacman_system *system) {
     uint32_t start = system->cpu.cyc;
-    uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
 
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         // Exact proportional target delta (not repeated addition) so the
         // final slice lands exactly on PACMAN_CYCLES_PER_FRAME elapsed
         // regardless of how that divides by the scanline count.
         uint32_t target_delta =
-            (uint32_t)((uint64_t)PACMAN_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_SCANLINES_PER_FRAME);
+            (uint32_t)((uint64_t)PACMAN_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_HEIGHT);
         while ((uint32_t)(system->cpu.cyc - start) < target_delta) {
             z80_step(&system->cpu);
         }
 
         uint16_t *buf = hal_video_acquire_scanline();
-        pacman_video_render_scanline(system, i * step, buf);
+        pacman_video_render_scanline(system, i, buf);
         hal_video_submit_scanline(buf);
     }
 
-    // Same interrupt semantics/placement as run_frame_sequential() -- see
-    // its sibling comment for why this fires once, at the end.
+    // One vblank interrupt per frame, fired at the end -- unchanged from
+    // when this shared the job with a sequential path.
     if (system->interrupt_enable) {
         z80_gen_int(&system->cpu, system->interrupt_vector);
     }
 }
 
 void pacman_run_frame(pacman_system *system) {
-    if (system->rotation == 1 || system->rotation == 3) {
-        run_frame_interleaved(system);
-    } else {
-        run_frame_sequential(system);
-    }
+    // Every rotation, one path. See run_frame_interleaved()'s comment for
+    // why there is no longer a sequential fallback for landscape/180.
+    run_frame_interleaved(system);
 }

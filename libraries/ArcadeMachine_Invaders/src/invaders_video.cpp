@@ -12,19 +12,16 @@
 #include <string.h>
 #include "invaders_video.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 
-// Border/scale constants, calibrated for a 640x480 4:3 monitor -- see this
-// file's header comment and invaders_pico's DEVNOTES.md for the derivation.
-// Tate (90/270 deg): DVI x visible range is 0..319 (physical monitor width after rotation).
-//   Game columns (224) along DVI y x2 = 448 px; game rows (256) along DVI x x1 = 256 px.
-// Landscape (0/180 deg): DVI x visible range is still 0..319 (physical monitor height).
-//   DVI x pixels are 2x the physical size of DVI y pixels on this 4:3 monitor at this
-//   resolution, so game columns (224) go along DVI x x1, game rows (256) are stretched
-//   x1.875 into DVI y (dy = dvi_y * 256 / 480) to compensate -- fills all 480 scanlines,
-//   no crop, near-square pixels.
-#define TATE_BY  16u    // (480 - 224*2) / 2
-#define TATE_BX  32u    // (320 - 256)   / 2
-#define LAND_BX  48u    // (320 - 224)   / 2 -- centred in visible DVI x 0..319
+// Where the picture lands on the canvas, and how it is resampled to get
+// there, comes from ArcadeHAL's arcade_video_geom.h -- av_tate and av_yoko,
+// built by av_geom_init(INVADERS_GAME_WIDTH, INVADERS_GAME_HEIGHT) in
+// invaders_init(). This file used to carry its own TATE_BX/TATE_BY/LAND_BX,
+// and every other renderer in the project was derived from those constants
+// by hand; that copying is what produced DEVNOTES #21, #23 and #33.
+//
+// Read arcade_video_geom.h before touching the loops below.
 
 #define COLOR_WHITE 0xFFFFu
 
@@ -39,53 +36,95 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
     switch (sys->rotation) {
 
     case 0: {
-        // Landscape: dx->DVI x x1, dy stretched x1.875 to fill 480 scanlines.
-        uint32_t dy  = ((uint32_t)dvi_y * (uint32_t)INVADERS_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
-        uint32_t col = 255u - dy;
-        for (uint32_t i = 0; i < (uint32_t)INVADERS_GAME_HEIGHT; i++) {
-            uint32_t dx = mir ? (uint32_t)(INVADERS_GAME_HEIGHT - 1) - i : i;
-            uint8_t v = vram[dx * 32u + (col >> 3u)];
-            if ((v >> (col & 7u)) & 1u)
-                buf[LAND_BX + i] = COLOR_WHITE;
+        // Landscape. av_yoko.row maps the canvas row onto the raster's LONG
+        // axis (dy); av_yoko.col maps canvas columns onto the SHORT axis --
+        // and in yoko the SHORT axis is the one that must NARROW to 180
+        // canvas columns, not sit at 1:1. See arcade_video_geom.h.
+        // MERGED, both axes. Yoko DOWNSAMPLES both of them -- the long axis
+        // 256 -> 240 canvas rows always, and the short axis 224 -> 180 when
+        // the aspect correction is on -- and the loop this replaced was
+        // destination-driven nearest-neighbour: it read one source sample
+        // per canvas pixel and never looked at the rest. On 1-pixel-wide
+        // line art that does not thin a feature, it DELETES it. On a real
+        // screen the score line read "SC.NRF<1> HT-SC.NRF" uncorrected and
+        // "SC7BF(1> 4|-SrnRF" corrected -- whole letter strokes gone.
+        //
+        // Same rule and same fix as Pac-Man's (DEVNOTES #80): walk the
+        // SOURCE and let a lit sample win, so a collapsed feature is
+        // thickened by a pixel rather than lost. This game is 1-bit
+        // white-on-black, so "merge" is simply OR.
+        //
+        // Note this helps with the correction OFF too: yoko's long axis is
+        // resampled 256 -> 240 in BOTH modes (arcade_video_geom.h's
+        // rebuild()), which is where the uncorrected damage came from.
+        const uint32_t r0   = av_yoko.row[dvi_y];
+        const uint32_t nrow = av_yoko.rowrep[dvi_y] ? av_yoko.rowrep[dvi_y] : 1u;
+        const uint32_t n    = av_yoko.src_n;
+        const uint8_t *rep  = av_yoko.rep;
+        uint32_t x = av_yoko.x0;
+        for (uint32_t sx = 0; sx < n; sx++) {
+            const uint32_t dx = mir ? (uint32_t)(INVADERS_GAME_HEIGHT - 1) - sx : sx;
+            const uint8_t *vr = vram + dx * 32u;
+            uint32_t lit = 0;
+            for (uint32_t k = 0; k < nrow; k++) {
+                const uint32_t c = 255u - (r0 + k);
+                lit |= (uint32_t)(vr[c >> 3u] >> (c & 7u)) & 1u;
+            }
+            if (lit) buf[x] = COLOR_WHITE;
+            x += rep[sx];
         }
         break;
     }
 
     case 1: {
-        // 90 deg CCW (tate): DVI y->dx(x2), DVI x->dy reversed(x1, x=BX->dy255/player).
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)INVADERS_GAME_HEIGHT * 2u) return;
-        uint32_t dx = (dvi_y - TATE_BY) >> 1u;
+        // 90 deg CCW (tate): canvas y -> dx, canvas x -> dy REVERSED.
+        // VRAM's bit index is 255-dy (see the layout note above), so the
+        // loop variable `col` IS 255-dy: x = x0 is dy 255, the player end.
+        if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) return;
+        uint32_t dx = av_tate.row[dvi_y];
         if (mir) dx = (uint32_t)(INVADERS_GAME_HEIGHT - 1) - dx;
-        for (uint32_t col = 0u; col < (uint32_t)INVADERS_GAME_WIDTH; col++) {
-            uint8_t v = vram[dx * 32u + (col >> 3u)];
-            if ((v >> (col & 7u)) & 1u)
-                buf[TATE_BX + col] = COLOR_WHITE;
+        const uint8_t *row = vram + dx * 32u;
+        for (uint32_t x = av_tate.x0; x < av_tate.x1; x++) {
+            const uint32_t col = av_tate.col[x];
+            if ((row[col >> 3u] >> (col & 7u)) & 1u) buf[x] = COLOR_WHITE;
         }
         break;
     }
 
     case 2: {
-        // 180 deg (landscape upside-down): dx reversed, dy reversed x1.875.
-        uint32_t col = ((uint32_t)dvi_y * (uint32_t)INVADERS_GAME_WIDTH) / HAL_VIDEO_HEIGHT; // reversed: top->dy255
-        for (uint32_t i = 0; i < (uint32_t)INVADERS_GAME_HEIGHT; i++) {
-            uint32_t dx = mir ? i : (uint32_t)(INVADERS_GAME_HEIGHT - 1) - i;
-            uint8_t v = vram[dx * 32u + (col >> 3u)];
-            if ((v >> (col & 7u)) & 1u)
-                buf[LAND_BX + i] = COLOR_WHITE;
+        // 180 deg (landscape upside-down): dx reversed, dy un-reversed.
+        // Merged, exactly as case 0 -- see the comment there. Only `col`'s
+        // reversal and dx's ternary differ, which is what makes this 180
+        // rather than a mirror of it (DEVNOTES #21).
+        const uint32_t r0   = av_yoko.row[dvi_y];
+        const uint32_t nrow = av_yoko.rowrep[dvi_y] ? av_yoko.rowrep[dvi_y] : 1u;
+        const uint32_t n    = av_yoko.src_n;
+        const uint8_t *rep  = av_yoko.rep;
+        uint32_t x = av_yoko.x0;
+        for (uint32_t sx = 0; sx < n; sx++) {
+            const uint32_t dx = mir ? sx : (uint32_t)(INVADERS_GAME_HEIGHT - 1) - sx;
+            const uint8_t *vr = vram + dx * 32u;
+            uint32_t lit = 0;
+            for (uint32_t k = 0; k < nrow; k++) {
+                const uint32_t c = r0 + k;
+                lit |= (uint32_t)(vr[c >> 3u] >> (c & 7u)) & 1u;
+            }
+            if (lit) buf[x] = COLOR_WHITE;
+            x += rep[sx];
         }
         break;
     }
 
     case 3: {
-        // 90 deg CW (tate): DVI y reversed->dx(x2), DVI x->dy(x1, x=BX->dy0/score).
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)INVADERS_GAME_HEIGHT * 2u) return;
-        uint32_t dx = mir ? (dvi_y - TATE_BY) >> 1u
-                          : (uint32_t)(INVADERS_GAME_HEIGHT - 1) - ((dvi_y - TATE_BY) >> 1u);
-        for (uint32_t col = 0u; col < (uint32_t)INVADERS_GAME_WIDTH; col++) {
-            uint32_t rev = (uint32_t)(INVADERS_GAME_WIDTH - 1u) - col; // dy=0 at x=TATE_BX
-            uint8_t v = vram[dx * 32u + (rev >> 3u)];
-            if ((v >> (rev & 7u)) & 1u)
-                buf[TATE_BX + col] = COLOR_WHITE;
+        // 90 deg CW (tate): both axes reversed relative to case 1, so
+        // x = x0 is dy 0 -- the score end.
+        if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) return;
+        const uint32_t d  = av_tate.row[dvi_y];
+        const uint32_t dx = mir ? d : (uint32_t)(INVADERS_GAME_HEIGHT - 1) - d;
+        const uint8_t *row = vram + dx * 32u;
+        for (uint32_t x = av_tate.x0; x < av_tate.x1; x++) {
+            const uint32_t rev = (uint32_t)(INVADERS_GAME_WIDTH - 1u) - av_tate.col[x];
+            if ((row[rev >> 3u] >> (rev & 7u)) & 1u) buf[x] = COLOR_WHITE;
         }
         break;
     }
@@ -99,20 +138,17 @@ void invaders_video_render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_
 }
 
 void invaders_draw_frame(arcade_system *system) {
-    // HAL_VIDEO_SCANLINES_PER_FRAME may be less than HAL_VIDEO_HEIGHT (see
-    // arcade_hal_video.h) -- `step` maps each submission index back onto
-    // the physical-row coordinate space the rotation/mirror math above is
-    // calibrated against.
-    uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    // One submission per canvas row, in canvas coordinates -- there is no
+    // longer a submission-index-to-physical-row conversion to get wrong.
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
-        render_scanline(i * step, buf, system);
+        render_scanline(i, buf, system);
         hal_video_submit_scanline(buf);
     }
 }
 
 void invaders_draw_error_frame(uint16_t color) {
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
         for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) buf[x] = color;
         hal_video_submit_scanline(buf);

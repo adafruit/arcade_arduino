@@ -164,6 +164,7 @@ matching the precedent in the other machine libraries.
 | SHOOT | Throw pepper (Burger Time's one action button) |
 | ROTATE | Cycle screen rotation (0°/90° CCW "tate"/180°/270° CW) |
 | MIRROR | Toggle horizontal mirror (for Pepper's-Ghost half-silvered-mirror cabinets) |
+| STRETCH (Button 1) | Toggle aspect-ratio correction. Which setting looks right depends on your MONITOR, not the game: a 16:9 panel already stretches a rotated picture on its own, while a panel forced to 4:3 — or a real 4:3 panel — does not. Try both and keep the one that looks correct. |
 
 Default rotation is **1** (90° CCW, "tate"). MAME's `GAME()` line for
 `btime` says `ROT270`, and across every game in this project that is

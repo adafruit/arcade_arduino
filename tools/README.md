@@ -19,6 +19,7 @@ mspacman_host/   ArcadeMachine_MsPacman (1x Z80, banked/encrypted ROM)
 dkong_host/      ArcadeMachine_DKong    (1x Z80 + i8257 DMA + 8035 sound CPU)
 btime_host/      ArcadeMachine_BTime    (2x 6502, one of them encrypted)
 m6502_test/      ArcadeCPU_M6502 conformance runner -- NOT a machine harness
+geom_test/       arcade_video_geom conformance runner -- NOT a machine harness
 ```
 
 ```sh
@@ -30,6 +31,22 @@ m6502_test/      ArcadeCPU_M6502 conformance runner -- NOT a machine harness
 ./btime_host/build.sh    && ./btime_host/btime_host       --frames 5000 \
                               --rom ../../btime_assets/rom
 ```
+
+`geom_test/` checks ArcadeHAL's shared screen geometry
+(`arcade_video_geom.*`) directly, with no machine attached:
+
+```sh
+./geom_test/build.sh && ./geom_test/geom_test
+```
+
+It exists because that geometry fails SILENTLY -- a wrong border constant
+does not crash, it shifts the picture, and nobody notices until someone
+photographs a screen and measures it (DEVNOTES.md #21, #23, #33, #77). It
+asserts that with the aspect correction OFF the maps reproduce the
+project's historical hand-derived layout exactly, that with it ON every game
+lands on the same cabinet-correct destination (320x240 tate, 180x240 yoko),
+and that every index a renderer's inner loop will use is monotonic and
+inside the raster.
 
 `m6502_test/` is the odd one out: it runs only the CPU core, against the
 standard 6502 test suites (Klaus Dormann's functional test, Bruce Clark's
@@ -252,22 +269,53 @@ question could not be answered any other way:
   disappears under the music in a spectrum, and its own verification becomes
   impossible. "I cannot see it" is not "it is not there".
 
-### PPM dumps and the half-width buffer
+### PPM dumps and what the monitor actually shows
 
-`HAL_VIDEO_WIDTH` is 640, but only the **first 320** pixels of each scanline
-buffer are ever displayed: the vendored libdvi's 16bpp path encodes
-`h_active_pixels / 2` source pixels across the full line
-(`_dvi_prepare_scanline_16bpp()` in
+**The real canvas is 320x240 square pixels, not 640x480.** `HAL_VIDEO_WIDTH`
+is 640, but only the **first 320** pixels of each scanline buffer are ever
+displayed: the vendored libdvi's 16bpp path encodes `h_active_pixels / 2`
+source pixels across the full line (`_dvi_prepare_scanline_16bpp()` in
 `PicoDVI - Adafruit Fork/src/libdvi/dvi.c`), doubling horizontally exactly as
 `dvi_vertical_repeat = 2` doubles vertically. That is why every renderer in
 this project lays its picture out against a 320-wide visible axis — see the
 `TATE_BX`/`LAND_BX` constants, all written as `(320 - N) / 2`.
 
-`invaders_host`'s `--ppm-every` doubles accordingly, so its dumps look like
-the monitor. `pacman_host`/`galaga_host` dump the raw 640-wide buffer, which
-puts the picture in the left half against black — a dump artifact, not a
-rendering fault, and harmless for the byte-identical comparison those
-harnesses use it for.
+All six harnesses now share one dumper, `host_common/host_ppm.cpp`, which
+reproduces **both** doublings. Output stays 640x480 and looks like the
+monitor. Two properties hold of every dump and are worth asserting on if you
+ever doubt one: adjacent output rows are identical in pairs, and adjacent
+output columns are identical in pairs.
+
+**Why this replaced six private copies.** Every harness's old `dump_ppm()`
+looped `y = 0 .. HAL_VIDEO_HEIGHT-1`, rendering **480** rows. The device
+submits **240** and lets the hardware repeat each one (DEVNOTES #10). For
+tate that difference is invisible — tate's formula halves `dvi_y` and lands
+on the same native row either way. For **landscape** it is the entire bug:
+`dy = dvi_y * GAME_WIDTH / HAL_VIDEO_HEIGHT` is a resampling ratio, and
+
+```
+480 samples (old dumper):  288 of 288 source columns drawn,   0 dropped
+240 samples (real device): 240 of 288 source columns drawn,  48 dropped
+```
+
+So the harnesses rendered landscape at the **pre-#10 sample rate** — they
+drew it the lossless way and structurally could not reproduce the defect.
+Anything validated against those dumps was validated against a model that
+did not contain the bug. A wrong measuring instrument is worse than a wrong
+subject: it does not look like a defect, it looks like evidence. See
+DEVNOTES #75/#76 and `DISPLAY_GEOMETRY.md`.
+
+**This changes every stored byte-compare baseline** — regenerate the
+`before_*.ppm` files any workflow keeps. `galaga_host` and `pacman_host`
+move most: their old dumps did not horizontal-double at all, so the picture
+sat in the left half against black.
+
+Use `--rotation N` (all six harnesses have it) to dump an orientation
+without hardware:
+
+```sh
+./pacman_host/pacman_host --rotation 0 --frames 3100 --ppm-every 1500 --ppm-prefix land
+```
 
 ## Counting what you actually care about
 

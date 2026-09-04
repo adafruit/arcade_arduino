@@ -12,6 +12,7 @@ OBJ="$HERE/build"
 OUT="$HERE/btime_host"
 
 INC="-I$HERE/../host_common/shim \
+     -I$HERE/../host_common \
      -I$LIBS/ArcadeHAL/src \
      -I$LIBS/ArcadeCPU_M6502/src \
      -I$LIBS/ArcadeMachine_BTime/src"
@@ -25,7 +26,9 @@ cc -O2 -g -std=c11 -Wall $INC -c "$LIBS/ArcadeCPU_M6502/src/m6502.c" -o "$OBJ/m6
 
 c++ -O2 -g -std=c++17 -Wall -Wno-unused-parameter $INC \
     "$LIBS/ArcadeMachine_BTime/src"/*.cpp \
+    "$LIBS/ArcadeHAL/src"/*.cpp \
     "$HERE/../host_common/hal_host.cpp" \
+    "$HERE/../host_common/host_ppm.cpp" \
     "$HERE/main.cpp" \
     "$OBJ/m6502.o" \
     -o "$OUT"

@@ -72,7 +72,7 @@ extern "C" {
 // Frame/scanline geometry, same source.
 #define BTIME_SCANLINES_PER_FRAME 272
 #define BTIME_FIRST_VISIBLE_LINE  8   // raw y of the first visible scanline
-// 240 visible lines -> exactly HAL_VIDEO_SCANLINES_PER_FRAME submissions.
+// 240 visible lines -> exactly HAL_VIDEO_HEIGHT submissions.
 
 // Cycles per scanline, derived rather than measured, because on this board
 // CPU and video both divide down from the same 12MHz crystal and come out

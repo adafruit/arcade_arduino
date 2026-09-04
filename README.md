@@ -53,6 +53,40 @@ just read `ArcadeHAL/src/*.h` for the contracts themselves.
 Each game's own README covers its specific ROM/sample layout, controls, and
 any known quirks. They all share the building steps below.
 
+### Screen orientation and aspect ratio
+
+Every game runs in **all four rotations** — upright, 90° CCW ("tate", the
+rotated-monitor orientation these cabinets used), 180°, and 90° CW — plus an
+independent horizontal mirror for Pepper's-Ghost cabinets. All seven are
+verified on physical hardware in each rotation, in gameplay rather than
+attract mode.
+
+Three front-panel buttons control the display, and they are the same on every
+game:
+
+| Button | |
+|---|---|
+| **1** | Aspect-ratio correction on/off |
+| **2** | Cycle rotation |
+| **3** | Horizontal mirror |
+
+**Button 1 is the one that depends on your monitor, not on the game.** These
+cabinets had 4:3 tubes, so a correct picture fills the screen in the same
+4:3 proportion. A 16:9 panel rotated for tate already stretches the image on
+its own, and the correction would over-correct it; a wide panel forced to 4:3,
+or a real 4:3 panel, needs the correction. Only the person looking at the
+screen can say which, so it is a button rather than a build option. It is off
+by default (on for Pac-Man and Ms. Pac-Man, whose native raster is already
+close to 4:3).
+
+**None of the three settings is remembered across a power cycle yet** —
+rotation, mirror and aspect correction all reset to their defaults at boot.
+Persisting them is planned future work; see `DISPLAY_GEOMETRY.md` section 8
+and `DEVNOTES.md` #91 for the design and the one hazard it has to avoid.
+
+`DISPLAY_GEOMETRY.md` has the derivation, the per-game measurements, and the
+frame-budget cost of each option.
+
 ### Prebuilt firmware
 
 If you'd rather not install the toolchain, ready-to-flash `.uf2` files for
@@ -64,6 +98,15 @@ The binaries contain no ROM data — you still need the microSD card with
 legally-obtained ROMs described in each game's README. Each release build
 uses the optimization level that game's own `sketch.yaml` pins, which is
 not the same for every game; see below.
+
+To build the whole set yourself, ready to attach to a release:
+
+```bash
+./dist/build_all.sh      # writes dist/<game>_fruitjam.uf2 for all seven
+```
+
+`dist/` is gitignored apart from that script and its README — the binaries
+belong on a release, not in the tree.
 
 ## Building
 
@@ -174,8 +217,9 @@ harnesses above instead; they answer the same questions in about a second.
 See `DEVNOTES.md` for the full account of every real bug found while
 bringing this up on actual hardware, across both the shared framework and
 each individual game port — several of the fixes there
-(`dvi_vertical_repeat`, the hard-coded 8-scanline-buffer ceiling, the
-`-Os`-isn't-fast-enough finding, the cycle-vs-real-time audio-clock lesson)
+(`dvi_vertical_repeat`, the scanline-buffer ceiling that turned out not to
+be one, the `-Os`-isn't-fast-enough finding, the cycle-vs-real-time
+audio-clock lesson)
 are non-obvious and worth reading before touching `ArcadeBoard_FruitJam`,
 `ArcadeCPU_i8080`, or adding a new synthesized-audio channel to any game.
 

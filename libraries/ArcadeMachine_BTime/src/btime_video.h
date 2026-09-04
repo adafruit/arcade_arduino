@@ -39,13 +39,9 @@ void btime_video_build_caches(void);
 // rather than a one-off.
 void btime_video_palette_write(uint8_t index, uint8_t value);
 
-// Renders and submits one full frame. Used only for landscape/180 rotation
-// -- see btime_video_render_scanline() for why tate drives its own loop.
-void btime_draw_frame(btime_system *system);
-
-// Renders one physical scanline (dvi_y, the "physical row before
-// HAL_VIDEO_SCANLINES_PER_FRAME accounting" coordinate every renderer here
-// uses) into `buf`. Exposed so btime_machine.cpp can call it once per
+// Renders one canvas scanline (dvi_y, 0..HAL_VIDEO_HEIGHT-1 -- the same
+// canvas coordinate every renderer here uses; see arcade_hal_video.h)
+// into `buf`. Exposed so btime_machine.cpp can call it once per
 // scanline interleaved with CPU execution.
 void btime_video_render_scanline(const btime_system *system, uint32_t dvi_y,
                                  uint16_t *buf);

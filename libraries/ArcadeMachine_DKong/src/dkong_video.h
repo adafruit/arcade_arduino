@@ -55,7 +55,26 @@ void dkong_draw_frame(dkong_system *system);
 
 // Renders ONE physical scanline (dvi_y) into `buf`, without acquiring or
 // submitting it.
+// Latches this frame's sprites for the column renderer that landscape uses.
+// MUST be called once per frame before the first landscape scanline; tate
+// does not need it (render_native_row() arbitrates per scanline itself).
+// See dkong_video.cpp's COLUMN RENDERING comment and DEVNOTES #92.
+void dkong_video_begin_frame(const dkong_system *system);
+
+// Landscape's two costs, reset on read: the once-per-frame sprite
+// arbitration walk and the total time in render_native_column(). Device
+// only, behind DKONG_COST_TRACE. See DEVNOTES #93.
+void dkong_debug_take_landscape(uint32_t *begin_us, uint32_t *cols_us, uint32_t *cols_n);
+
 void dkong_video_render_scanline(const dkong_system *system, uint32_t dvi_y, uint16_t *buf);
+
+// Per-frame render cost split, reset on read. `rows_us`/`rows` cover
+// render_native_row(); `emit_us` covers turning that row into canvas pixels;
+// `lines` is how many scanlines did any work. `rows` < `lines` means the
+// duplicate-row memoisation is firing (see arcade_video_geom.h). Device-only
+// numbers -- the host harness returns zeros for the timings.
+void dkong_debug_take_render(uint32_t *rows_us, uint32_t *emit_us,
+                             uint32_t *rows, uint32_t *lines);
 
 // Boot-time asset-load error screen: floods every scanline with a solid
 // colour, bypassing game VRAM entirely.

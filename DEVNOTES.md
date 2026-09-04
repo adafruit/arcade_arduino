@@ -2275,10 +2275,36 @@ of budget (see #36 for the numbers), and **confirmed playing correctly on
 the physical display** — no tearing, consistent with Pac-Man and Lunar
 Rescue after the same change.
 
-`mspacman_fruitjam` (the full Ms. Pac-Man game) in **portrait (rotation 3)**,
-with the real `mspacman_assets/rom/` set -- the aux board's encrypted bank,
-its 40 patches and its address-triggered bank switching all working on real
-hardware, at 63% RAM.
+`mspacman_fruitjam` (the full Ms. Pac-Man game), with the real
+`mspacman_assets/rom/` set -- the aux board's encrypted bank, its 40 patches
+and its address-triggered bank switching all working on real hardware.
+
+**ALL FOUR ROTATIONS CONFIRMED, at the correct aspect ratio** (#79/#80), the
+second game in the project complete in every orientation. Observed on the
+physical display and measured alongside, aspect correction on throughout:
+
+| rotation | `work` | `work_max` | `starve`/60 |
+|---|---|---|---|
+| 0 landscape (inverted) | 10.70-10.74ms | 12410us | **0** |
+| 1 tate CCW | 11.65-11.71ms | 13270us | **0** |
+| 2 landscape (upright) | 10.54-10.60ms | 12337us | **0** |
+| 3 tate CW (default) | 12.65-12.80ms | 14343us | **0** |
+
+`frame` pinned at 16650-16666us throughout. RAM fell from 63% to **39%**
+(334,984 -> 207,336 bytes) when the 129KB `frame_cache` went.
+
+Two things the numbers say. **This game is meaningfully heavier than
+Pac-Man** -- 12.8ms against 8.9ms in the same default rotation, which is the
+banked/encrypted ROM decode and not the video work; it leaves ~2.3ms of
+headroom rather than Pac-Man's ~6ms, so this is the one to measure first if
+anything is ever added to its frame. And **landscape is now the CHEAP
+orientation** (10.5ms against 12.8ms), because a column slice walks 224
+pixels where a row slice walks 288 and yoko's aspect correction narrows
+rather than upsamples. That is the exact inversion of where this started:
+landscape used to be the orientation that burst and went red.
+
+As with Pac-Man, **rotation 2 is the upright landscape and 0 is
+upside-down** (#33).
 
 **This port reached working hardware with zero hardware debug cycles** --
 the first one in the project to do so. Everything was found and fixed in
@@ -2331,13 +2357,30 @@ problem #33)** — video
 `pacman_assets/rom/` ROM/PROM set, after fixing problems #18-20 above; no
 red-line/queue-starvation artifacts, no visible tearing from problem #20's
 interleaved-rendering trade-off. The attract loop has also run unattended
-overnight with no hang (problem #22 fixed and confirmed). Problem #21's
-mirror-orientation fix was applied but not independently re-confirmed by
-observation afterward -- worth a quick visual check next time tate/Yoko
-switching comes up. **Not yet tested/fixed:** landscape/180-degree
-rotation (known stall risk from problem #18, plus the separate aspect-
-ratio/aliasing issues in problem #23), two-player mode, extended sessions
-across multiple levels.
+overnight with no hang (problem #22 fixed and confirmed).
+
+**ALL FOUR ROTATIONS NOW CONFIRMED ON HARDWARE, at the correct aspect
+ratio** (#79/#80), which makes this the first game in the project that is
+complete in every orientation. Observed on the physical display: landscape
+and tate both clean, **no red lines, smooth motion**, and the picture
+correctly proportioned rather than the 24.4%-too-wide "squat" landscape that
+shipped before. Measured alongside: `starve` 0/60 in every rotation with
+`frame` pinned at 16665us, `work_max` 13065us of a 16660us budget with the
+aspect correction on.
+
+That closes three things this section previously listed as open: the
+landscape/180 stall risk (#18), the aspect-ratio and aliasing issues (#23),
+and problem #21's mirror-orientation fix, which is now re-confirmed by
+observation -- all four rotations were switched through and read correctly.
+
+Worth knowing when cycling with the ROTATE button: **rotation 2 is this
+game's upright landscape and rotation 0 is upside-down**, matching its tate
+default being 3 rather than 1 (#33 -- the Namco cabinets mount their
+monitors opposite to the 8080bw ones). Cycling passes through two inverted
+orientations, which is correct behaviour and not a bug.
+
+**Still not tested:** two-player mode, extended sessions across multiple
+levels.
 
 `galaga_fruitjam` (the full Galaga game) in **portrait (rotation 3)** — all three
 Z80 CPUs, all three video layers (05XX starfield, sprites, tilemap),
@@ -2381,12 +2424,17 @@ faithfully emulated), and the 8257 moves ~384 bytes a frame through the
 CPU's own read/write path. Comfortable at 60%, but this is the game to
 measure first if anything is ever added to its frame.
 
-**Also confirmed in play:** two-player mode, all four screen rotations, and
-the second stage. Note that unlike Pac-Man and Ms. Pac-Man, this game's yoko
-orientations were reported working rather than showing the red lines
-problems #18/#19/#20 predict for the sequential path -- consistent with its
-lighter per-frame budget (57% here against Ms. Pac-Man's), but worth a
-closer look if that ever changes.
+**Also confirmed in play:** two-player mode and the second stage.
+
+**RETRACTED (see #75):** this section previously said all four rotations
+were confirmed, and that unlike Pac-Man and Ms. Pac-Man this game's yoko
+orientations "were reported working" despite the sequential path, blaming
+its lighter per-frame budget. Both halves were wrong. Measured with the
+starve counter, DKong in rotation 0 starves the DVI queue **120-123 times
+per 60 frames** against **0** in rotation 1 -- #18 applies to it exactly as
+its source predicts. And the budget argument was backwards: this is the
+second-heaviest game in the project, not a light one. **Tate (rotation 1) is
+the confirmed-working orientation; landscape and 180 are not.**
 
 **Still not verified:** the later stages beyond the second (elevators,
 rivets).
@@ -3287,3 +3335,1656 @@ Other candidates, in order:
 situation, everything else about the port matches the reference, and the
 next step needs a recording nobody has yet needed to make. Recorded here so
 it is a known quantity rather than a mystery.
+
+## Display geometry (`DISPLAY_GEOMETRY.md`)
+
+### MEASURE IN GAMEPLAY, NOT IN ATTRACT -- applies to every game here
+
+Galaga's attract loop peaks at 22-29 sprites. Its first level opens with
+**45**, and that is where it red-lines: `render_max` 105-130us in attract
+against **218-311us** in play, `starve` <=5 a window against 123-3027
+(#82). Everything measured from attract mode understated the real peak by
+two to three times, and the failure was invisible until someone put a coin
+in.
+
+**Every frame-budget number in this file that was taken from attract mode
+should be treated as a lower bound**, including the Phase 3 figures for
+Pac-Man (#79), Ms. Pac-Man and Burger Time (#81). Those three were checked
+across all four rotations and long enough to catch the busy attract scenes,
+but NOT in play:
+
+- Pac-Man / Ms. Pac-Man: attract is the demo maze with 4 ghosts, which is
+  close to gameplay load, so the gap should be small -- but "should be" is
+  what this note exists to stop.
+- Burger Time: attract shows the high-score table and a short demo. Real
+  play adds enemies, pepper and the score row; it also has the tightest
+  headroom of the three (~1.1ms), so it is the most likely to move.
+
+The cheap way to do it is `-DTEST_ROTATION=n` plus a coin and a start, then
+read `work_max`/`starve` off the heartbeat while the busiest thing the game
+does is on screen. There is no substitute for playing it.
+
+### 77. Donkey Kong's landscape picture was 16 pixels left of centre, and a byte-compare found it
+
+**Symptom:** none anybody had reported -- which is the point.
+
+**Found by:** replacing the seven renderers' hand-derived
+`TATE_BX`/`TATE_BY`/`LAND_BX` constants with one shared module
+(`ArcadeHAL/src/arcade_video_geom.*`) and then byte-comparing 44 PPM dumps
+before and after. Forty were identical. The four that differed were Donkey
+Kong's two yoko rotations, and the diff was a pure 16-canvas-pixel
+translation with the vacated columns black -- verified programmatically, not
+eyeballed.
+
+**Cause:** `dkong_video.cpp` had
+
+```c
+#define LAND_BX  32u    // (320 - 256)   / 2 -- landscape puts cols along DVI x
+```
+
+but its landscape loop writes `DKONG_GAME_HEIGHT` (224) entries, not 256. So
+the constant was derived from the LONG axis while the loop walked the SHORT
+one, and the picture sat at canvas columns 32..255 instead of centred at
+48..271. Every other game computed the same constant as `(320 - 224) / 2 =
+48`. It is a copy of the file's own `TATE_BX` -- correct there, wrong one
+line down.
+
+**Why it survived:** it is 16 pixels, in an orientation that already showed
+red bars (#75), on a game whose yoko modes were "reported working". Nothing
+about it looks like a defect on a photographed screen.
+
+**What generalises:** this is the fourth bug in the same family as #21, #23
+and #33 -- a per-game constant derived by hand from a sibling's rather than
+from one source of truth. The fix for the family is not to check the
+constants more carefully; it is to stop having seven copies of them. **And
+the thing that actually caught it was a byte-compare against a
+known-good baseline, not a review of the constant** -- the constant reads
+plausibly, and its comment even shows the arithmetic, which is right for the
+number it computes and wrong for the axis it is used on.
+
+### 82. Galaga: a latent star bug, and peak-vs-average starvation
+
+**The transposition found a bug in the shipped ROW renderer.** `star_row_x`
+was `uint8_t`, but the star x is `STAR_OFFSET_X + (q & 255)` = 16..271 --
+so 256..271 wrapped to 0..15 and sixteen of the 256 star columns were drawn
+down the LEFT edge instead of near the right. Presumably there since the
+starfield landed. It surfaced only because `render_native_column()` buckets
+the same value untruncated, and the two paths then disagreed by exactly 17
+pixels, all isolated dots on black. Now `uint16_t`.
+
+**A better verification than the byte-compare.** Comparing against the
+pre-Phase-3 dumps cannot work here, because yoko's row axis downsamples
+288 -> 240 and any merge changes output legitimately. So the two paths are
+checked AGAINST EACH OTHER on one frame: the tate dump is the native raster
+at 1:1, and every column the yoko dump samples must equal the corresponding
+column of it. **0 mismatches of 53,760 pixels**, and the same test
+independently recovers the fact that rotation 0 reverses the long axis.
+This needs no old code to still exist, which is what makes it the right
+test for every remaining port.
+
+**THEN THE PEAK/AVERAGE LESSON, twice.** Landscape started at `work_max`
+18056us. Four changes took it to 13409us:
+
+| | rot 2 `work_max` |
+|---|---|
+| naive column port | 18056us |
+| + render straight into the scanline buffer, merge in place | 15058us |
+| + long-axis merge dropped (see below) | 14295us |
+| + border-only clear, sprite early-out | 13771us |
+| + sprites bucketed by column | **13409us** |
+
+Rendering straight into `buf` and merging in place (a second column
+rendered with the clear skipped -- every layer already writes only
+non-transparent pixels, so the clear was the ONLY thing erasing the first)
+was worth 3.0ms on its own.
+
+**The long-axis merge is OFF for this game, unlike the Namco maze games.**
+It costs a second full column render on 48 of 240 scanlines and measured
+`starve` 40 -> 1806 a window even though `work_max` only moved 728us. It is
+also worth far less here: +12.9%/+6.7% of the lit pixels against Pac-Man's
++41%, because Galaga is 16-pixel sprites and 8-pixel characters rather than
+1-pixel maze walls, so a dropped column thins rather than deletes.
+
+**REMAINING, and honest: rotation 2 still starves ~6 times a frame during
+one dense attract phase.** Rotation 0 does not, at `starve` <= 5. The two do
+the SAME work -- 13409us against 13737us -- and differ only in the order
+they walk the raster columns, because a 180 reverses that axis. Rotation 2's
+expensive columns land LATE in the frame, after the vblank slack is spent;
+rotation 0's land early. Measured directly: `noblock_run` 95 against 71, on
+identical `render_max`.
+
+**AND THEN, FROM ACTUALLY PLAYING IT: every rotation red-lines during the
+first level's alien entry -- INCLUDING TATE, whose renderer and frame loop
+Phase 3 never touched.** Reported from the screen and then measured on the
+shipped tate path with 43-45 sprites on screen:
+
+| | attract (what I had been measuring) | level 1 entry |
+|---|---|---|
+| `render_max` | 105-130us | **218-311us** |
+| `work_max` | 13.8-14.4ms | 14.8-15.3ms |
+| `starve` | <= 5 a window | **123-3027 a window** |
+
+Against a 69us DVI line rate, a 311us scanline is 4.5x over. The 8-buffer
+queue (~555us) cannot absorb a run of those, and `noblock_run` sits at
+175-220.
+
+**This is a pre-existing Galaga limit, not a Phase 3 regression**, and the
+reason it was never seen is that nobody had measured the game while
+PLAYING it. #35 says `work` can sit inside budget while the queue starves;
+this adds a second half to that -- the attract loop peaks at 22-29 sprites
+and the first level opens with 45, so every number in this file taken from
+attract mode understates the real peak by 2-3x. The one thing I contributed
+to tate's frame was building the per-column sprite buckets it never reads;
+that is now gated to yoko.
+
+### 83. Galaga's level-1 peak: what it is NOT, and a benchmark for whoever takes it on
+
+**Attempted and failed.** #82 said the level-1 red was "a sprite-cost
+problem" and pointed at the row renderer's strided
+`sprite_pixels[code][px2][py2]` -- the same trap Burger Time hit in #81.
+Transposed caches were added for both the sprite and tile decode (48KB) and
+the sprite span was clipped once instead of per pixel. Measured on the
+scripted worst case: `render_max` **313us -> 310us**, `starve` 7223 ->
+6461. About 1%, for 48KB. Reverted; the code is back to the shipped
+renderer.
+
+**What that rules out**, all measured rather than argued:
+
+- **Not the decode stride.** Making both reads contiguous changed ~1%.
+  Burger Time's identical-looking fix was worth 20%, so "same trap" was a
+  bad inference from a surface resemblance.
+- **Not sprite pixel volume.** With counters in the row renderer, the worst
+  scanline draws **256 sprite pixels** -- about 16 cells, some 10us of work
+  against a 310us scanline.
+- **Not per-sprite examination overhead.** 64 sprites examined per scanline
+  x 240 scanlines is ~15k trivial compares a frame, well under a
+  millisecond.
+- **Not the audio ISR landing inside the timed region.** That was the best
+  remaining theory -- `render_max` brackets the render call with `micros()`,
+  so a preempting ISR inflates it -- but the ISR rate is essentially
+  identical between attract (86 calls, 88us avg) and level 1 (87 calls,
+  92us avg), and one hit cannot turn 130us into 310us.
+
+**The unexplained fact**, for whoever picks this up: `render_max` scales
+from 105-130us to 310us as sprites go 29 -> 64, while the worst scanline's
+sprite PIXEL count stays low. Something in the sprite path costs far more
+per drawn cell than the pixels account for.
+
+> **RESOLVED IN #84, WHICH RETRACTS THE FRAMING ABOVE.** The 310us is not a
+> scanline's work at all -- it is a ~300us stall, once a second, attributed
+> to whichever layer was timing. A typical scanline renders in 14.6us of a
+> 69us line period, and the whole renderer is 23% of the frame. The sprite
+> path was never the problem, and neither was the video path. Read #84
+> before spending any time on the paragraphs above.
+
+The next step is per-layer timing ON DEVICE -- star/sprite/tilemap accumulators like
+`dkong_debug_take_render()` in #78 -- not another guess. **Five performance
+hypotheses were wrong in this session** (#78 twice, #82's write direction
+and bank conflicts, and this one); the two that landed both came from
+instrumenting first.
+
+**What IS reusable: a scripted worst case.** `-DTEST_AUTOSTART=1` in
+`galaga_fruitjam` coins up, starts, slides right and keeps firing, so the
+full formation plus bullets plus an explosion lands on the same frame every
+run -- 64 sprites, `render_max` 310us, `starve` 7223. The formation ALONE
+does not red-line; it needs the shots. Two things it got wrong first: the
+coin was pressed before the boot RAM test finished so the 51XX never saw a
+credit, and fire is a one-shot pulse (#32) that has to be toggled rather
+than held.
+
+**It is a sprite-cost problem, not a geometry one.** `render_max` scales
+with sprite count in both orientations, and the row renderer indexes
+`sprite_pixels[code][px2][py2]` with px2 varying -- a stride of 16 per
+pixel, where the column renderer's fixed-px2 walk is contiguous. That is
+the same access-pattern trap Burger Time hit in #81, in the shipped code
+this time. Fixing it is its own piece of work and belongs outside the
+display-geometry series.
+
+**That is the #35 lesson in its purest form.** 2.9ms of average headroom and
+it still starves, because the DVI queue holds 8 scanlines and cares only
+about a RUN of scanlines slower than the 69us line rate. Two of my three
+hypotheses about the cause were wrong (descending writes; write-order bank
+conflicts) and a one-flash probe disproved each. The fix is to keep cutting
+the PEAK per-column cost, not the average -- the sprite bucketing above is
+the same lever the starfield already used, and it took the worst window from
+1420 to 366.
+
+### 81. Burger Time: a correct column renderer that was 2x too slow, and why
+
+**The transposition was right on the first try and the port still did not
+work.** All four rotations came back byte-identical against the old
+frame_pen path -- including `draw_background_col`, a scrolling 16x16 tile
+page with wraparound, subtractive x and flip on both axes, which is the
+fiddliest thing in this project to transpose. Then it was flashed and
+landscape ran at **render 9762us against the row path's 4950us**, on a game
+with about 1.1ms of headroom.
+
+**A correct renderer is not a working renderer.** The byte-compare proves
+the pixels; it says nothing about the cost, and on this game the cost is
+the whole question.
+
+**FIRST CORRECTION TO AN EARLIER CLAIM.** The previous commit called this
+"among the cheapest games here, so it can afford it". Wrong. Burger Time
+ships at `work_max` 15513us of 16660 -- CPU 6.9ms, sound 3.3ms, render
+4.9ms -- the tightest budget in the project after Donkey Kong. The
+"cheapest" impression came from #59's note that its renderer is 36% of the
+frame; 36% of a nearly-full frame is not cheap.
+
+**Why the transpose was slow, and it is not what the intuition says.** This
+renderer was optimised into `memcpy()`s -- a char row is an 8-byte copy, a
+background tile row a 16-byte copy -- and that is exactly what took it from
+red to 60fps in #59. Transposing turned every one of those copies into 256
+separate indexed byte reads. On this part SRAM is single-cycle and uniform,
+so **the stride is not what hurt**; replacing a handful of word-wide copies
+with 256 byte loads, each carrying its own three-level index arithmetic, is.
+
+Two fixes, both measured:
+
+| | render (yoko) |
+|---|---|
+| naive transpose | 9762us |
+| + column-major caches (`char_px_T`, `bg_px_T`, +80KB) | 7810us |
+| + palette and canvas mapping folded into one emit pass | **5017us** |
+
+The second was worth **2.8ms**, far more than the cache transpose and far
+more than expected. It removed one full pass over the column plus a
+320-pixel clear of every scanline: the obvious composition -- convert the
+pen column to RGB, then call the shared `av_emit_row_merge()` -- costs three
+passes where the row path takes two. **On a frame with 1.1ms to spare, an
+extra pass over 240 pixels is not a detail.**
+
+**AND THEN IT STILL SHOWED RED LINES, in one tate mode and one yoko mode.**
+Reported from the screen, after the numbers above said every rotation was
+clean. Both my per-rotation runs were only ~1000 frames of the quiet attract
+screens; the busy scenes come later, and there `render` swings from 3175us
+to 5516us. Over a longer window rotation 3 peaked at `work_max` 16131us and
+`starve` climbed in bursts of ~105 a frame exactly during those scenes.
+**A short run on a game with 1.1ms of headroom measures nothing.** Content
+varies the render by 2.3ms; the peak is the only number that matters.
+
+The cause was the same class of thing twice more, and both were mine:
+
+- `emit_tate_row`'s REVERSED branch was a plain per-pixel loop while the
+  forward branch used two pixels per 32-bit store, unrolled by four. Same
+  output, ~600us a frame apart -- which is why exactly ONE of the two tate
+  rotations showed red. A reversed read is still a sequential read; there
+  was never a reason for the slow path.
+- `emit_yoko_col` had no wide-store path at all, costing yoko ~400us more
+  than tate, and one of the two yoko rotations sat the wrong side of the
+  line.
+
+|  | before | after |
+|---|---|---|
+| rot 0 landscape | 14252us | **14795us** |
+| rot 1 tate CCW | 13455us | **15421us** |
+| rot 2 landscape | 15889us, starve 108751 | **14745us, starve 19** |
+| rot 3 tate CW | 16131us, starve 241757 | **15507us, starve 134** |
+
+(The rot 0/1 "before" figures are the misleadingly low short-run ones; the
+"after" column is a long run in every case.) All four are now stable with
+`starve` frozen rather than climbing, and **all four run at 60fps** -- the
+first time this game has had a working landscape at all. Yoko is now the
+CHEAPER pair, at ~14.75ms against tate's ~15.5ms.
+
+**SECOND CORRECTION: the aspect ratio stays wrong on this game.** It needs
+the correction more than any other -- a square 240x240 raster is 33.3% too
+wide for its height in BOTH orientations, against Pac-Man's 3.7% -- and it
+cannot afford it. Tate: render 4950us at 1:1 against 6624us corrected,
+`work_max` 17172us, starving ~240 times a frame. Yoko is marginal rather
+than broken (15783us, ~50 starves).
+
+That cost is structural. At 1:1 this renderer emits two pixels per 32-bit
+store, unrolled by four; a 240->320 upsample can use neither trick. Both
+the destination-driven and source-driven forms were measured and the
+source-driven one -- which ships, because it is better anyway -- is 635us
+faster and still 1.6ms short.
+
+So **Burger Time and Donkey Kong are now the two games that need the aspect
+correction and cannot afford it** (#78), for the same underlying reason: an
+upsampling emit cannot use the wide-store trick a 1:1 emit can. Whoever
+takes that on should fix it once, in a shared emit, and measure it on these
+two.
+
+RAM: 265,920 -> 293,664 bytes. The 57.6KB `frame_pen` went and the 80KB of
+column-major caches arrived, so this is the one game in the project where
+Phase 3 costs memory rather than saving it. Worth it for a working
+landscape; not worth it if the caches are ever needed elsewhere.
+
+### 80. Yoko does not thin thin lines, it DELETES them -- merge, do not sample
+
+**Symptom, reported from a photograph of the real screen:** with the aspect
+correction on, Pac-Man's landscape had the right proportions but "a lot of
+pixels are missing" -- maze walls patchy, some segments 2px, some 1px, some
+absent, "GAME OVER" with holes in the letters.
+
+**Not a bug in the correction. The arithmetic of yoko.** Landscape puts the
+raster's 288-sample long axis onto 240 canvas rows and its 224-sample short
+axis onto 180 canvas columns, so 67% of the native pixels is all that fits
+(DISPLAY_GEOMETRY.md section 5). The defect was in HOW the other 33% were
+given up.
+
+**Nearest-neighbour picks one sample per destination and discards the rest.**
+On photographic content that reads as slight softness. On 1-pixel line art it
+is destruction: measured on one Pac-Man frame, **33 of the 224 raster columns
+and 21 of the 288 rows contain picture and were never sampled at all.** A
+maze wall does not get thinner, it disappears, and the wall next to it stays
+2px -- which is exactly what "patchy" looks like.
+
+**Fix: merge instead of sample.** Every raster sample contributes, and a
+non-background sample never loses to a background one. Features are kept, at
+the cost of thickening some by a pixel.
+
+Measured on the same frame, fraction of the native lit pixels reaching the
+screen:
+
+| | kept | cost |
+|---|---|---|
+| nearest-neighbour (what shipped) | 58.2% | -- |
+| merge on the short axis only | 63.9% | free, it is just the emit rule |
+| merge on the long axis only | 75.0% | ~48 extra column renders a frame |
+| **both** | **82.3%** | both |
+
+**The long axis matters MORE than the short one, which is not the intuition.**
+The short axis is the one the aspect correction visibly narrows (224 -> 180),
+so it looks like the culprit; the long axis (288 -> 240) is quieter and
+costs more to fix, because merging there means actually RENDERING the
+collapsed columns rather than changing a write rule. Doing only the cheap
+half would have bought 6 points of the 24.
+
+Hardware, Pac-Man yoko with the correction on: `work_max` 10821us before,
+**11510us after**, `starve` 0/60 either way, `frame` pinned. The extra
+renders cost ~689us of a 16660us budget.
+
+**It improves UNSTRETCHED yoko too**, by +128 and +156 lit pixels in the two
+landscape rotations, because yoko's row axis maps 288 samples onto 240 canvas
+rows *regardless* of the aspect correction -- that axis was always
+downsampling and always deleting lines. Tate is untouched (it upsamples;
+nothing is ever dropped), and byte-identical.
+
+**Where this generalises:** any renderer whose destination is smaller than
+its raster on either axis. In this project that is every game in yoko, on
+the long axis, correction or no correction. `av_emit_row_merge()` handles
+the emit axis; the row axis needs the machine's own renderer to produce the
+collapsed lines, so it is per-game work.
+
+### 79. Pac-Man: a column primitive removes the landscape red entirely, and 129KB with it
+
+**The fix for #18/#75, on the first game.** A yoko scanline IS a native
+column, so a row-only renderer could not emit one until every row existed --
+which is what forced `frame_cache` and the whole-frame burst before the
+first `hal_video_acquire_scanline()`. `render_native_column()` removes the
+reason for both.
+
+It is a TRANSPOSITION of `render_native_row()`, not a reimplementation: the
+display column is un-flipped once into `x` and the display row is flipped
+per pixel; the tilemap walks 28 tile rows of one column instead of 36 tile
+columns of one row (224 pixels rather than 288); sprites keep the same
+descending 7..0 order and both tunnel-wraparound copies, with the overlap
+test changing axis. **Pac-Man draws all 8 sprites on every line with no
+per-line arbitration, and that is exactly what makes a straight
+transposition possible** -- Donkey Kong's 16-per-line buffer will not
+transpose this way (see DISPLAY_GEOMETRY.md section 7).
+
+**Done in two separable steps, so the renderer change and the timing change
+were verified independently.** Step 1 wired the column renderer in while the
+machine layer stayed sequential: all 8 dumps byte-identical, which proves
+the transposition is exact across both flip axes and both mirror states.
+Step 2 deleted `run_frame_sequential()` and the rotation gate. **Do this in
+one step and neither claim is checkable** -- a diff would be expected either
+way and you would not know which change caused it.
+
+**Measured on hardware, all four rotations, 60fps and no red anywhere:**
+
+| rotation | stretch | `work` | `work_max` | `starve`/60 |
+|---|---|---|---|---|
+| 0 landscape | off | 9.50ms | 10872us | **0** |
+| 0 landscape | **ON** | 9.49ms | 10845us | **0** |
+| 1 tate CCW | off | 8.34ms | 9726us | **0** |
+| 2 180 | off | 9.50ms | 10844us | **0** |
+| 3 tate CW (default) | off | 8.94ms | 10406us | **0** |
+| 3 tate CW | **ON** | 10.62ms | 12029us | **0** |
+
+`frame` pinned at 16664-16665us throughout.
+
+**Two results worth carrying to the other ports.**
+
+1. **Yoko now costs about the same as tate** (9.5ms against 8.9ms), where it
+   used to be a burst that starved the queue every frame. The column path is
+   not a compromise; it is the same order of work.
+2. **The aspect correction is FREE in yoko and costs +1.6ms in tate.** That
+   is not symmetric and it is not obvious: tate UPSAMPLES (288->320 columns,
+   224->240 rows, so more pixels emitted), while yoko NARROWS (224->180
+   columns, fewer pixels emitted). #78's measurement on Donkey Kong was tate
+   only -- the landscape half of the correction was never the expensive
+   half.
+
+**Pac-Man is therefore complete: all four rotations, correct aspect ratio,
+60fps, zero starvation.** It is the first game in the project for which that
+is true. RAM: sketch globals 252,920 -> 124,352 bytes, a 128,568-byte drop,
+because `frame_cache` was a static and had been costing its full size in
+every orientation including the tate default where it was never read.
+
+`pacman_fruitjam` also gained a serial heartbeat -- it had none at all, not
+even `Serial.begin()` -- plus `TEST_ROTATION`/`TEST_STRETCH` build flags.
+Without those, "is the red gone" is an impression rather than a number, and
+this entry would have been an opinion.
+
+### 78. The aspect-ratio correction is right, and Donkey Kong cannot afford it
+
+**What was built:** `arcade_video_geom.h`'s `av_geom_set_stretch()`, which
+retargets every game from the historical 1:1-plus-pillarbox layout onto the
+cabinet-correct one -- 320x240 filled in tate, 180x240 in yoko. Verified by
+`tools/geom_test/` and by measuring rendered dumps. **Default is OFF.**
+
+**Measured on hardware, Donkey Kong in tate with sound** (its default
+rotation, and the project's tightest frame budget):
+
+| | `work` | `work_max` | `starve`/60 | `frame` |
+|---|---|---|---|---|
+| stretch off | 12.2-14.5ms | 14809us | **0** | 16.66ms pinned |
+| stretch ON  | 15.0-17.2ms | **17543us** | **8448-11148** | 18.2-18.4ms |
+
+Over budget, ~150 starvation events per frame, and no longer 60fps. **The
+correction is geometrically right and currently unaffordable on this game.**
+
+**Where the cost is -- MEASURED, after two wrong guesses.** The first two
+attempts both targeted things that turned out not to matter, so the frame
+was instrumented instead (`-DDKONG_COST_TRACE=1`, `dkong_debug_take_render()`
+-- this game had no cost breakdown, unlike Burger Time in #59, which is why
+the guessing happened at all). Per frame, tate, with sound:
+
+| | rows rendered | `render_native_row` | **emit** | `work_max` | `starve`/60 |
+|---|---|---|---|---|---|
+| correction off | 224/224 | 4848-4984us | **687us** | 14751us | **0** |
+| correction ON | 224/240 | 4287-4952us | **2660us** | 16877-17010us | 5795-9717 |
+
+**The whole cost is the emit pass**: 687us at 1:1 against 2660us resampled.
+`render_native_row()` is unchanged between the two.
+
+What did NOT help, and why:
+
+1. **Row memoisation.** It works -- the `rows` column shows 224 renders for
+   240 canvas rows -- and it is worth ~0.15ms. It was the predicted cost and
+   it was never the problem.
+2. **The source-driven emit on its own.** `rep[]` is still a load, so the
+   loop is two loads and two stores against the old two loads and one store.
+   The dependent second load was removed and nothing measurable changed:
+   **on this core a dependent SRAM load was not what cost.**
+
+What did help: **hoisting `m->src_n`, `m->rep` and `m->x1` into locals
+before the loop** -- 3.75ms -> 2.66ms, -29%. `dst` is `uint16_t *` and the
+map holds `uint16_t`, so the compiler had to assume a store through `dst`
+could alias the map, and reloaded those fields on every iteration. **A
+`const` struct pointer plus a same-type output pointer is enough to defeat
+hoisting in a hot loop.**
+
+**The instrument perturbed the measurement, and that is worth its own note.**
+Two unconditional counter increments per scanline -- no detectable effect on
+`work` -- took the unstretched build from `starve` 0/60 to ~1000/60. Both
+the timers and the counters are now behind `DKONG_COST_TRACE`. `starve`
+tracks intra-frame DISTRIBUTION rather than totals (#35), so anything added
+to a path that runs 240 times a frame can move it while every other number
+stays put. Removing them again left `work_max` at 14751us, slightly better
+than the 14809us this started from.
+
+**Next, and it is a different shape from what was tried:** delete the second
+pass rather than speed it up. Have `render_native_row()` write through the
+column map straight into the scanline buffer, as `galaga_video.cpp`'s 1:1
+fast path already writes straight into `buf`. That removes the 687us copy
+from the DEFAULT path too, so it pays off with the correction off as well.
+It is invasive -- sprites overlay pixels, and a 1->2 expansion has to widen
+those writes -- which is why it was not attempted here.
+
+Still ~1.0ms short as it stands. Whether even that is enough for Donkey Kong
+is open: it sits at 14.75ms of 16.66ms before any correction at all. Every
+other game has more room, and enabling the correction per-game rather than
+globally is a legitimate outcome -- note that the three games needing it
+LEAST (Pac-Man, Ms. Pac-Man, Galaga at +3.7%) include two of the tightest
+budgets, while Burger Time needs it most (+33.3%) and is among the cheapest.
+
+A full audit of the display path -- what the canvas actually is, whether
+either orientation matches the original cabinet's aspect ratio, and why
+landscape goes red -- is in `DISPLAY_GEOMETRY.md`, together with a phased
+plan. The two entries below are the parts that belong in the problem record:
+a measurement that retracts an earlier claim, and the geometry facts that
+should stop being rediscovered.
+
+### 75. The landscape/180 red is real in DKong too -- the "yoko works" report is RETRACTED
+
+**The claim being retracted.** The "Confirmed working on real hardware"
+section said of Donkey Kong: *"unlike Pac-Man and Ms. Pac-Man, this game's
+yoko orientations were reported working rather than showing the red lines
+problems #18/#19/#20 predict for the sequential path -- consistent with its
+lighter per-frame budget."*
+
+**Why it was doubted.** It contradicts the code. `dkong_machine.cpp` gates
+`run_frame_interleaved()` on `rotation == 1 || rotation == 3`, and
+`dkong_video.cpp` builds the same full-frame `frame_cache` Pac-Man does, so
+structurally DKong in rotation 0/2 does exactly what #18 describes: a
+whole-frame CPU burst plus a whole-frame render burst, both before the
+frame's first `hal_video_acquire_scanline()`. And the "lighter budget"
+justification was backwards -- DKong is the *second-heaviest* game in the
+project, not a light one.
+
+**How it was settled.** `hal_video_take_starve_count()` had been declared in
+`arcade_hal_video.h` and implemented in `hal_video_fruitjam.cpp` since #35 --
+and **called from nowhere**. The project's only instrument for the one
+failure mode invisible to every other instrument was dead code. Wiring it
+into the sketch heartbeat, plus a `-DTEST_ROTATION=n` build flag so an
+orientation can be measured without a hand on the rotate button, made the
+question answerable in two flashes per game:
+
+```
+arduino-cli compile --build-property compiler.cpp.extra_flags=-DTEST_ROTATION=0 \
+    -u -p /dev/cu.usbmodem<...> dkong_fruitjam
+```
+
+**Measured on hardware:**
+
+| game / rotation | work | frame | starve / 60 frames |
+|---|---|---|---|
+| Lunar Rescue, rot 1 (tate) | 3.1-3.4ms | 17.3ms | **4-5** |
+| Lunar Rescue, rot 0 (landscape) | 4.9-5.3ms | 17.3ms | **5** |
+| DKong, rot 1 (tate) | 11.7-13.7ms | 16.66ms, pinned | **0** |
+| DKong, rot 0 (landscape) | 12.4-14.7ms | 15.6-17.9ms, jittery | **120-123** |
+
+**Verdict: the report was wrong.** DKong's landscape starves the DVI queue
+about **twice per frame, every frame**, while its tate path starves *zero*
+times. There is nothing special about DKong; #18 applies to it exactly as
+predicted from its source.
+
+**Read the counter correctly.** 2 events per frame is not "2 bad
+scanlines" -- it is the saturation value for *one burst per frame*. The
+counter increments on a submit that leaves the valid-scanline queue at or
+below one entry. During the 12.5ms burst there are no submits at all, so
+nothing is counted while the queue is empty and Core 1 is painting red;
+the two events are the first two submits *after* the burst, before the
+producer gets back ahead of Core 1. The red itself is the ~180 scanlines
+in between. **A starve count of ~2/frame means the queue bottomed out once
+that frame, not that two pixels were wrong.**
+
+**Lunar Rescue is the control, and it confirms the other half of #18's
+logic.** Its landscape is exactly as clean as its tate -- same 4-5/60 floor
+in *both* orientations, so that floor is the residual #16 bus-contention
+effect and not an orientation effect at all. Lunar Rescue and Space
+Invaders are exempt from the landscape red not because their rotation code
+is better but because their video hardware is a 1-bit column-major bitmap
+in CPU RAM: `vram[dx*32 + (col>>3)]` costs the same along either axis, so
+there is no compositing step, no frame cache, and no burst.
+
+**What generalises:** *"reported working"* is not a measurement, and on this
+project the difference is not academic -- a game can look plausible while
+starving the queue twice a frame. Where a structural argument from the
+source contradicts an observation, prefer the source and go get a number.
+The instrument for this one already existed and only needed calling.
+
+**Incidental, unrelated to geometry, recorded so it is not lost:** Lunar
+Rescue's `frame` sits at **17.27-17.35ms in both rotations**, i.e. ~57.9fps
+rather than the flat 60fps DKong and Galaga hold, and its own `gap=` counter
+drifts a steady **+3600 cycles per 60 frames** -- the emulated CPU falling
+progressively behind its target. Not investigated here.
+
+### 76. Reference: display geometry facts that should stop being rediscovered
+
+Derivations, the per-game aspect tables and the fix plan are in
+`DISPLAY_GEOMETRY.md`. These are the load-bearing facts.
+
+- **The board is a 320x240 canvas of square pixels, not a 640x480
+  framebuffer.** Vertical doubling by `dvi_vertical_repeat = 2` is
+  documented (#8-#10). Horizontal doubling is not: `DVI_SYMBOLS_PER_WORD`
+  defaults to 2 and `_dvi_prepare_scanline_16bpp()` passes `pixwidth / 2`,
+  so libdvi reads **only `scanbuf[0..319]`** and doubles it across the line.
+  Bytes 320..639 of every scanline buffer are read by nothing, ever.
+
+- **The HAL contract used to say otherwise, and now does not (fixed).**
+  `HAL_VIDEO_WIDTH` was 640 and `dvi_y` arrived in 0..479 with only even
+  values ever used, so the project carried **two coordinate systems for one
+  canvas** -- x in 320-space, y in 480-space -- and every rotation formula
+  silently bridged them with a x2 or /2. `HAL_VIDEO_WIDTH`/`HAL_VIDEO_HEIGHT`
+  are now the canvas (320x240), `dvi_y` runs 0..239, and the third constant
+  `HAL_VIDEO_SCANLINES_PER_FRAME` -- which existed only to paper over the
+  mismatch -- is gone. **Verified byte-identical**: 44 PPM dumps (6 games x
+  4 rotations) captured before the sweep were unchanged after it, which is
+  exactly what the phase 0 dumper was built to make checkable. It also
+  deleted the 640-wide `memset` for free: DKong's `work` fell from
+  11.65-13.75ms to 11.18-13.30ms and `work_max` from 15803us to 15481us,
+  ~2% of the frame budget, for stores nothing ever read.
+
+- **A change to the sample rate is not a change to the geometry.** #10's
+  summary -- *"preserved every existing TATE_BY/TATE_BX/LAND_BX calibration
+  constant unchanged"* -- was true of the border constants, which are
+  **positions**, and false of landscape's `/ HAL_VIDEO_HEIGHT` divisor,
+  which is a **resampling ratio**. The x1.875 stretch was a genuine,
+  hardware-measured fix in `invaders_pico` (canvas 320x480, real 2:1
+  pixels); after #10 it takes 240 samples of a 256- or 288-entry axis
+  instead of 480, turning a lossless upsample into a downsample that
+  silently drops 16 native lines (48 in the Namco games). It is the shared
+  formula in every game except Burger Time. **Positions transfer across a
+  sample-rate change; ratios do not.**
+
+- **Those dropped lines are EVENLY spaced -- do not describe this as ragged
+  sampling.** Because the submission count is exactly half the physical
+  height, the ratios are exact (256/240 = 16/15, 288/240 = 6/5), so the
+  drops land on a perfectly regular stride: every 16th source line for the
+  256-wide games, every 6th for the 288-wide ones, verified by enumerating
+  the formula over all 240 device samples. **The defect is not raggedness,
+  it is that 16 or 48 whole raster lines are never drawn at all** -- a
+  one-pixel-thin feature vanishes entirely when it lands on a dropped line
+  and reappears when it moves one pixel. #23's "irregular" test grid is a
+  *regular* drop beating against regularly spaced content: a grid whose
+  pitch is not coprime with 6 gets some cells narrowed and others not.
+
+- **No renderer scales to the screen.** `TATE_BX = (320 - 256) / 2` is a
+  *centring* constant. The only scale factor in the project is
+  `btime_video.cpp`'s `g_aspect_stretch`, and it is off by default. So we do
+  not match the original aspect ratio in either orientation: in tate the
+  picture is too wide for its height by +3.7% (Namco), +16.7%
+  (Invaders/LRescue/DKong) or +33.3% (Burger Time); in yoko by +24.4% for
+  every 224-tall game and +33.3% for Burger Time.
+
+- **Tate is the supported mode for a geometric reason, not a taste one.**
+  Rotated, the canvas offers 240 x 320 = **77k pixels** for a game with
+  57-64k: every native pixel survives and the picture is *upsampled*.
+  Un-rotated, the aspect-correct window is 180 x 240 = **43k pixels** for
+  the same game. **Yoko must discard 20-37% of the game's pixels, inherently,
+  at any quality of implementation.** Worth knowing before anyone
+  re-litigates it as a rendering-quality problem better code could fix.
+
+- **Landscape needs the picture NARROWER, not taller.** A 3:4 portrait image
+  inside a 4:3 landscape canvas at full height is **180 canvas columns
+  wide, not 224**. The current code draws it 224 wide, which is the whole of
+  yoko's +24.4%. This is the one most likely to be got backwards.
+
+- **Every scaling ratio in this project is exact at 320 columns**, so the
+  aspect fix needs no division in any inner loop: 240 -> x3/4, 256 -> x4/5,
+  288 -> x9/10. A 320-entry LUT built at init covers all seven games.
+
+- **The 8-buffer scanline queue is ~555us of cover and cannot be raised**
+  (#9 -- `dvi_init()` hardcodes 8). Any renderer that needs more slack than
+  that has to get it by **not bursting**, not by buffering. This is why the
+  landscape fix is a column-render primitive rather than a bigger queue or a
+  second frame buffer.
+
+- **The host harness could not see the dropped rows, and now can (fixed).**
+  Every `dump_ppm()` looped `y = 0 .. HAL_VIDEO_HEIGHT-1`, rendering **every**
+  physical row -- 480 samples, the *pre-#10* rate -- so it drew landscape the
+  lossless way (288 of 288 source columns, 0 dropped) while the device drops
+  48. It could not reproduce the defect at all, which makes it a wrong
+  instrument, and **a wrong instrument is worse than a wrong subject: it does
+  not look like a defect, it looks like evidence.** All six now share
+  `tools/host_common/host_ppm.cpp`, which samples at the device's rate and
+  reproduces both doublings; dumps stay 640x480 and are verifiably a 2x
+  blow-up of the 320x240 canvas (adjacent rows and columns identical in
+  pairs). **This invalidated every stored byte-compare baseline.** The
+  harness still cannot see red, but that part is deliberate and documented
+  in `hal_host.cpp` -- starvation is device-only, which is what #75 measured.
+
+### 84. Galaga is CPU-bound, not render-bound -- and `render_max` was measuring a stall
+
+#83 ended by saying the next step was per-layer timing on device rather than
+another hypothesis. It was, and it retracts the framing of both #82 and #83.
+
+Three `micros()` accumulators around the starfield, sprite and tilemap
+sections of `render_native_row()`, behind `-DGALAGA_LAYER_TRACE=1`, keeping
+the frame totals AND the breakdown of the single worst scanline
+(`galaga_debug_take_layers()`). Scripted worst case, rotation 3, first level,
+formation on screen, player firing:
+
+| | per frame | share of the 15.3ms frame |
+|---|---|---|
+| starfield | 345us | 2% |
+| sprites | 1047us | 7% |
+| tilemap | 2119us | 14% |
+| **all rendering** | **3511us** | **23%** |
+| **everything else** (3x Z80 + audio) | **11753us** | **77%** |
+
+**The renderer is under a quarter of Galaga's frame.** Averaged over the 240
+scanlines it is 14.6us against a 69us DVI line period -- it is not close to
+the line rate and never was. The CPU slice between scanline submissions is
+49us. Together, 63.6us of the 69us budget: **5.4us of margin per scanline**,
+which is why ordinary jitter starves the queue.
+
+The tilemap is twice the sprites, so even the layer ranking was backwards
+from the assumption in #82/#83 -- and the tilemap's cost is fixed at 36
+columns a line regardless of how many aliens are on screen.
+
+**And `render_max` 310us was never a scanline's work.** The worst-scanline
+breakdowns:
+
+```
+worst scanline 308us = 2+9+297      (tilemap)
+worst scanline 308us = 1+2+305      (tilemap)
+worst scanline 307us = 290+8+9      (STARFIELD)
+```
+
+The starfield costs **345us for the whole frame**. A single line at 290us
+would be 84% of the layer's entire frame time in one scanline, out of a layer
+that draws a handful of stars. That is impossible as work. It is a ~300us
+stall of Core 0 landing inside whichever layer happened to be timing, and it
+lands in the tilemap most often precisely because the tilemap is the layer
+that is running most of the time (60% of the average scanline; observed 3 of
+4 samples). Both `render_max` and `worst scanline` are maxima over a 60-frame
+window, so this is roughly a once-per-second event -- not a representative
+scanline, and far too rare to explain `starve` 3641 per window (61 a frame).
+
+**So five hypotheses in #83 were not merely wrong, they were aimed at the
+wrong 77% of the frame.** Every one of them tried to make the renderer
+faster. Even deleting the renderer outright would leave 11.8ms of CPU and a
+frame that is 71% full.
+
+Two lessons, both of which cost real time here:
+
+- **A max over a window is an outlier, not a cost.** `render_max` invited a
+  whole investigation into a once-per-second stall. Totals divided by count
+  would have said 14.6us on day one. Report both, and never start optimising
+  from a max alone.
+- **Attribute before optimising, and attribute to a layer, not a function.**
+  The per-layer split took one flash to produce and immediately said the
+  sprites -- the thing that visibly scales with the aliens on screen, and
+  therefore the intuitive culprit -- are 7% of the frame.
+
+What this means for the level-1 red: it is a CPU-budget problem. The levers
+are the Z80 interpreter and the 51XX/54XX/05XX helpers, or evening out the
+per-scanline CPU slice so the 5.4us margin is not spent unevenly. The video
+path is done; leave it alone.
+
+The stall itself is still unidentified (~300us, ~once a second, not the audio
+ISR -- that measures 87 calls a window at 92us avg, 95us worst). It is too
+rare to matter for starvation, so it is recorded here and not chased.
+
+### 85. Galaga's red lines were a runway problem: the scanline queue was never a hard ceiling
+
+#84 showed Galaga's renderer is 23% of its frame and pointed at the CPU. The
+CPU turned out to be innocent too. The fix was the pipeline.
+
+**The budget was being read against the wrong line period.** 640x480p60 here
+is 800x525 at a 25.2MHz pixel clock, so active video is 480 * 31.746us =
+**15,238us** and vblank is 1,429us. With `dvi_vertical_repeat` 2 a submitted
+scanline is **63.49us**, not the 69us you get by dividing the whole 16,667us
+frame by 240 -- that figure silently spends the vblank on every line and
+overstates the per-line budget by 8%.
+
+**Mean work is nowhere near the ceiling.** The heartbeat printed `work_MAX`
+(a 60-frame maximum) next to `blocked` (a single frame's value) and no mean
+at all, which made the frame look full. Adding totals beside the maxima:
+
+```
+work_MEAN 13,205us   work_MAX 15,264us   active-video window 15,238us
+blk_MEAN  ~1,800us   blk_MAX  ~2,900us
+```
+
+Core 0 **blocks 1.8-2.9ms every frame** waiting for a free buffer. It is
+ahead of the display most of the time and has ~2ms of average headroom, and
+it still starved 61 times a frame. A shortfall with that shape is a BURST,
+and a burst is bounded by runway, not by throughput.
+
+**Runway was 508us.** `N_SCANBUF` was 8, and 8 * 63.49us = 508us. Measured
+peak within-frame drawdown was 4-6 buffers, and the ~300us stall of #84 eats
+5 more on its own.
+
+**And 8 was never a hard ceiling.** The comment in `hal_video_fruitjam.cpp`
+said it was, citing `dvi_init()`'s hardcoded
+`queue_init_with_spinlock(..., 8, ...)`, and recorded a previous attempt to
+raise it to 24 that hung `setup()` with a black screen. That attempt raised
+`N_SCANBUF` **without raising the queues**, so the 9th
+`queue_add_blocking_u32()` blocked forever -- nothing drains the queue until
+Core 1 starts, and Core 1 never starts because `setup()` is stuck. The fix is
+to re-initialise `q_colour_valid`/`q_colour_free` after `dvi_init()`, which
+`hal_video_init()` now does. **The vendored libdvi is untouched**: the colour
+queues are a plain producer/consumer pair, nothing is in them yet, and Core 1
+has not started, so both cores pick up the new spinlock through the queue
+struct. (It leaks the two original 8-entry allocations: 64 bytes, once.)
+
+Measured on hardware, rotation 3, scripted first-level worst case, ~7 minutes
+of continuous play per depth:
+
+| N_SCANBUF | runway | worst runway left | starve / window |
+|---|---|---|---|
+| 8 | 508us | 0 | up to **7223** |
+| 16 | 1016us | 1 of 16 | max 5 |
+| **32** | **2032us** | **16 of 32** | **0** |
+
+At 32 the queue never fell below half across 435 windows. Cost is 30KB of
+SRAM (40,960 bytes of buffers); the largest sketch, Lunar Rescue, sits at 73%
+with 136KB free, and all seven sketches build. Shrinking the buffers to
+`HAL_VIDEO_WIDTH` (DISPLAY_GEOMETRY.md phase 5) would halve that.
+
+**The noblock-run starvation detector had to be retired.** It inferred
+starvation from a run of non-blocking acquires, which is sound ONLY at depth
+8, where free and valid are complementary and tight: "acquire did not block"
+then implies "valid is nearly empty". At 32 they decouple -- valid can sit at
+a healthy 20 while 11 buffers are free and acquire never blocks -- and the
+counter reads 200+ with zero starvation. It now prints as a rough "how often
+was Core 0 not ahead" figure only. `hal_video_take_min_valid_level()`
+replaces it: the lowest VALID-queue level seen, which is the actual runway
+remaining and is meaningful at any depth.
+
+**Where the CPU time goes**, for the record, since #84 left it open. Per-CPU
+host time in the same worst case: **main 4050us, sub 3595us, sub2 2603us**
+(10.2ms of the 11.8ms; the rest is the interleave loop, the audio ISR at
+~134us/frame, and the trace's own overhead). It is all Z80 interpretation --
+not port handlers, not the 51XX/54XX/06XX helpers, not audio mixing. Nothing
+needed to be optimised.
+
+**The lesson, which is the same one as #84 in a different costume.** Every
+number that mattered here was already being printed and was unreadable
+because maxima and single samples were mixed with no totals: `work_MAX` (a
+window max) sat beside `blocked` (one frame) beside no mean at all. Print a
+total and a count next to every maximum. The whole investigation from #82
+onward -- five failed optimisations, two abandoned rewrites -- would have
+started in the right place with one extra number.
+
+### 86. Pac-Man re-verified after the queue change, and measured in gameplay for the first time
+
+The #85 runway change (`N_SCANBUF` 8 -> 32, colour queues re-initialised)
+touches `ArcadeBoard_FruitJam`, so it touches every game. Pac-Man checked
+first, and checked the way the standing note in DISPLAY_GEOMETRY.md asks for
+-- **with a coin in**, not in attract. `-DTEST_AUTOSTART=1` on the sketch
+drops a credit and walks Pac-Man through the maze so the ghosts leave the
+house and chase. All four rotations, aspect correction on, ~4 minutes each:
+
+| rot | | work mean | work max | starve | worst runway |
+|---|---|---|---|---|---|
+| 0 | landscape, mirrored | 10,168us | 10,370us | 0 | 27/32 |
+| 1 | tate, mirrored | 10,942us | 11,234us | 0 | 27/32 |
+| 2 | landscape, upright | 10,150us | 10,281us | 0 | 27/32 |
+| 3 | tate, upright | 11,969us | 12,214us | 0 | 28/32 |
+
+Zero starvation everywhere, and the queue never dropped below 27 of 32 --
+more than five times the runway the whole pipeline used to have. Against a
+15,238us active-video window Pac-Man has 3-5ms of headroom in gameplay.
+
+Two things worth keeping:
+
+- **Gameplay costs about 1ms more than attract here**, not the 2-3x the
+  Galaga note warned about. The warning still stands -- it is game-specific,
+  and Galaga is the one with a formation of 45-64 sprites -- but Pac-Man's
+  sprite count barely moves between attract and play, so its attract numbers
+  were nearly honest. Ms. Pac-Man should behave the same; Burger Time is
+  still the one with the least headroom and the most to lose.
+- **The mirrored twins are not free.** rot 3 costs 980us more than rot 1, and
+  rot 0 costs 89us more than rot 2. The reversed emit paths do slightly
+  different work, which is the same asymmetry that hid two unoptimised
+  mirrored twins in Burger Time (#81). Small here, and harmless with this
+  much runway, but it is why every rotation gets measured rather than one.
+
+### 87. Ms. Pac-Man re-verified after the queue change, also in gameplay
+
+Same treatment as #86: `-DTEST_AUTOSTART=1` on the sketch, a credit in, the
+maze actually walked, all four rotations, aspect correction on, ~4 minutes
+each.
+
+| rot | | work mean | work max | starve | worst runway |
+|---|---|---|---|---|---|
+| 0 | landscape, mirrored | 11,099us | 11,321us | 0 | 27/32 |
+| 1 | tate, mirrored | 11,954us | 12,193us | 0 | 27/32 |
+| 2 | landscape, upright | 11,055us | 11,284us | 0 | 27/32 |
+| 3 | tate, upright | 12,899us | 13,124us | 0 | 26/32 |
+
+Zero starvation, never below 26 of 32 buffers, 2.1-4.2ms of headroom against
+the 15,238us active-video window.
+
+**Ms. Pac-Man costs consistently ~900us more than Pac-Man** in every rotation
+(12,899 vs 11,969 in tate-upright, 11,055 vs 10,150 in landscape-upright).
+That is expected -- it runs the larger ROM set with the extra board's banked
+decryption on top of the same Pac-Man hardware -- and it is worth having as a
+number, because it is the per-frame price of the Ms. Pac-Man daughterboard
+emulation and it is uniform across rotations rather than rendering-related.
+
+The same mirrored-twin asymmetry as #86 shows up identically: rot 3 costs
+945us more than rot 1, rot 0 costs 44us more than rot 2. Same cause, same
+harmlessness at this runway.
+
+### 88. Burger Time in gameplay, and a clean negative: the deeper queue does NOT buy the aspect correction
+
+Burger Time is the tightest game in the project and the one whose numbers
+were least trustworthy -- every figure it had ever produced came from attract
+mode, where the demo looks enough like real play that it was mistaken for it
+once already (#81). Measured with a credit in, chef walking and throwing
+pepper, all four rotations, ~3 minutes each:
+
+| rot | | work mean | work peak | worst runway |
+|---|---|---|---|---|
+| 0 | landscape, upright | 13,962us | 14,706us | 25/32 |
+| 1 | tate, upright | 14,483us | 15,290us | 24/32 |
+| 2 | landscape, mirrored | 14,025us | 14,825us | 23/32 |
+| 3 | tate, mirrored | 14,506us | 15,380us | 23/32 |
+
+`starve` reads 5 in every rotation -- it is a lifetime total in this sketch,
+and 5 identical across four independent runs is the boot transient before
+the pipeline fills, not gameplay starvation.
+
+**The tate peaks exceed the active-video window.** 15,290 and 15,380us
+against 15,238us. That used to be a red line and now is not: the queue never
+dropped below 23 of 32, i.e. it never spent more than 9 buffers of the 32
+available. This is the #85 runway doing exactly what it was added for.
+
+**And attract was NOT an underestimate here.** The previously recorded
+attract figure was `work_max` 15,513us, which is *higher* than any gameplay
+peak measured now. Burger Time's cost is dominated by its fixed tilemap and
+sprite layers rather than by how many enemies are alive, so the standing
+"measure in gameplay" warning -- which is real, and cost Galaga five failed
+optimisations -- simply does not bite on this game. Worth recording so the
+warning is applied with judgement rather than as a ritual.
+
+**The negative result, which is the useful part.** 32 buffers is 2032us of
+runway, more than the whole 1429us vblank, so the entire vblank is now
+bankable where 8 buffers could only hold 508us of it. That raises the
+SUSTAINABLE work ceiling from ~15,746us to the full 16,667us frame, and the
+obvious question was whether Burger Time could finally afford the aspect
+correction it has always needed most (33.3%, a square raster) and never been
+able to run. Measured, rotation 1, `-DTEST_STRETCH=1`:
+
+```
+work_MEAN 16,195us   work_max 17,489us   minq 0/32   starve 711,872   frame 16,981us
+```
+
+No. The correction costs ~1,712us a frame, which puts mean work over the
+16,667us frame budget outright -- frame time went to 16,981us, i.e. it stopped
+holding 60fps. The queue emptied completely and starvation went to six
+figures.
+
+**This is the burst-vs-sustained distinction of #85 confirmed from the other
+side.** Runway absorbs a burst; it does nothing whatsoever for a sustained
+deficit, because there is no surplus anywhere in the frame to refill it from.
+Galaga starved with 2ms of average headroom and was fixed by runway alone.
+Burger Time with the correction on has *negative* headroom and no amount of
+buffering can help it. The lever for Burger Time is still what
+DISPLAY_GEOMETRY.md says it is: a shared wide-store upsampling emit, so the
+correction costs less than 1.7ms in the first place.
+
+### 89. The shared wide-store upsampling emit: aspect correction goes from 1,712us to 66us
+
+#88 measured the aspect correction at 1,712us a frame on Burger Time and
+concluded it could not be afforded. The cost was not the resampling. It was
+the STORES.
+
+**The observation that unlocked it.** The scalar `av_emit_row()` writes two
+16-bit stores per source pixel -- 480 halfword stores a scanline at 240
+samples -- where a 1:1 path writes 120 word stores using the two-pixels-per-
+32-bit-store trick `btime_video.cpp` has used since #81. That trick was
+believed impossible for an upsample because the run pattern is irregular.
+
+**It is not irregular.** Every upsampling ratio in this project is the same
+shape: *every k-th source pixel is doubled, and it is the first of its
+group.* Verified against the maps' own `rep[]`, not assumed:
+
+```
+240 -> 320  k=3      256 -> 320  k=4
+288 -> 320  k=9      224 -> 240  k=14
+```
+
+That is forced by the geometry -- each is n -> n*(k+1)/k because the canvas
+is 320 -- so a group of k source pixels is exactly k+1 canvas pixels:
+
+```
+k=3   3 src -> 4 dst  = 2 words   (Burger Time)
+k=9   9 src -> 10 dst = 5 words   (the Namco games)
+k=4   8 src -> 10 dst = 5 words   (Invaders/LRescue/DKong; TWO groups,
+                                   because 4+1 is odd and one group would
+                                   leave the pointer half-word aligned)
+```
+
+`av_emit_row_wide()`, `_rev()`, `_pal()` and `_pal_rev()` in
+`arcade_video_geom.h`. Three group-body macros hold the pattern ONCE and all
+four emits instantiate them with a different fetch -- deliberate, because the
+reversed twin is exactly where this project has twice shipped something slow
+or wrong (#81, and `av_emit_row_rev()`'s own palindrome warning), and a macro
+cannot drift from its sibling.
+
+**The paletted variants are not a convenience.** Burger Time's row is 8-bit
+pen indices. Converting it to a uint16 row so a plain `av_emit_row_wide()`
+could be used would add a whole extra pass over the raster and cost more than
+the wide store saves (the #79 lesson). Passing `pen` + `pal` keeps the lookup
+inside the emit's own loop.
+
+**Safety.** `dbl_k` is 0 unless `build_dbl_k()` verified rep[] really has the
+shape AND x0 is even; the emit additionally checks the scanline buffer's own
+4-byte alignment once per row, and falls back to the scalar emit rather than
+making an unaligned word store. Every path is proved byte-identical to
+`dst[x] = src[col[x]]` by `tools/geom_test`, for all three rasters, both
+directions, direct and paletted. No hardware needed to catch a wrong index.
+
+**Measured, Burger Time, gameplay, all four rotations:**
+
+| rot | | stretch off | stretch ON (was) | stretch ON (now) | fps | runway |
+|---|---|---|---|---|---|---|
+| 0 | yoko | 13,962us | -- | 15,116us | 60.03 | 17/32 |
+| 1 | tate | 14,483us | **16,195us** | **14,549us** | 60.00 | 23/32 |
+| 2 | yoko, mir | 14,025us | -- | 15,364us | 60.03 | 13/32 |
+| 3 | tate, mir | 14,506us | -- | 14,610us | 60.01 | 23/32 |
+
+**The aspect correction now costs 66us a frame in tate, not 1,712us.** 26x
+cheaper, and Burger Time -- the game with the worst geometry error in the
+project, 33.3%, and the one that could never afford the fix -- runs
+aspect-correct in all four rotations at a flat 60fps.
+
+Yoko still costs ~1.2ms because it is a DOWNsample and goes through
+`av_emit_row_merge()`, which this work did not touch: a merge writes
+conditionally (a non-background sample must never lose to a background one,
+#80) and cannot blindly pair two pixels into one store. It holds 60fps with
+13-17 buffers in hand, so it is not urgent, but it is the obvious next
+target if yoko ever gets tight.
+
+**Wired into DKong, Galaga, Pac-Man and Ms. Pac-Man too** -- the tate emits
+have the same signature, so it is a one-line swap each, and the fallback
+makes it a no-op wherever stretch is off. Pac-Man and Ms. Pac-Man ship with
+stretch ON by default, so their tate rotations are now taking the new path
+and want a hardware look; both should also get slightly faster.
+
+### 90. Aspect correction is a runtime toggle on Button 1, because it is a property of the MONITOR
+
+#89 made the aspect correction cheap enough to ship. What it could not
+settle is whether it should be ON, and the reason is not about the games at
+all: **the right setting depends on the panel.**
+
+- A 16:9 HDMI monitor rotated for tate already stretches the picture on its
+  own, so the corrected image is over-corrected.
+- A wide panel that can be forced to 4:3 does not, so the correction is
+  needed.
+- A genuine 4:3 panel does not either.
+
+Only the person looking at the screen can say which they have. So it is a
+button, not a build flag and not a per-game default.
+
+**Button 1 (GPIO 0)**, joining ROTATE (Button 2, GPIO 4) and MIRROR
+(Button 3, GPIO 5). It was the last free button on the board -- GPIO 0 is
+UART0 TX by default, and is only available because this project's
+diagnostics go over USB CDC and nothing uses `Serial1`.
+
+The edge detection lives in `av_geom_toggle_on_edge()` in ArcadeHAL, **not**
+in the seven machines' `input_update()` where rotate and mirror live. That
+is deliberate and is the difference in kind: rotation and mirroring are
+per-cabinet game state held on each machine's `system` struct, while stretch
+is one global property of the display. One implementation, one behaviour,
+seven one-line call sites.
+
+Toggling rebuilds both maps mid-frame -- a few hundred microseconds, which
+the 32-buffer runway from #85 absorbs without a flicker. Before that change
+it would have cost a red line on the press, which is a small illustration of
+why the runway work had to come first.
+
+Verified on hardware: pressing Button 1 flips `stretch` in the heartbeat
+one step per press, with the picture snapping between letterboxed and
+full-height, at a steady 60fps either way. All seven sketches carry it and
+all seven READMEs document it.
+
+**Not persisted.** The setting resets to off on every boot, which for a
+fixed installation is the wrong default -- whoever owns the cabinet sets it
+once and wants it remembered.
+
+(An earlier version of this entry said `FlashStorage` was already a
+dependency and could be used. **That is wrong** -- `libraries/FlashStorage`
+is `architectures=samd` and cannot build for RP2350 at all. It is a stale
+vendored library that nothing in this project includes. The arduino-pico
+core's own `EEPROM` is the right vehicle; see #91 for what persisting these
+actually costs.)
+
+### 91. Persisting the three display settings: the design, and why it is not built yet
+
+Deliberately NOT implemented -- recorded so the analysis does not have to be
+redone. Asked for and deferred 2026-09-04.
+
+**What would be stored.** Rotation (0-3), mirror (bool), stretch (bool).
+Eight bytes with a magic number, a version byte and a checksum, so a corrupt
+or first-boot sector falls back to defaults rather than booting sideways.
+**One setting shared by all seven games**, decided deliberately: it is one
+cabinet with one monitor. (And the longer-term plan is a separate Fruit Jam
+per cabinet anyway, which makes the question moot.)
+
+**`libraries/FlashStorage` cannot be used.** It is `architectures=samd`. The
+arduino-pico core's own `EEPROM` -- a 4KB emulated flash sector -- is the
+vehicle.
+
+**The cost is the write, not the storage.** Erase + program of a 4KB sector
+is ~40-60ms. Core 0 runs the flash routines from RAM for that whole time and
+produces NO scanlines, so ~3 frames starve. The 32-buffer queue holds 2ms.
+A save therefore always costs a brief visible glitch. That is inherent.
+
+**The part that had to be checked, and is good news.** The stock
+`EEPROM.commit()` calls `rp2040.idleOtherCore()`, which would park Core 1 and
+drop the DVI SIGNAL -- a monitor re-sync, far worse than a few starved
+frames. That is unnecessary here, because Core 1 never touches flash:
+
+```
+hal_video_run()        __not_in_flash("dvi")
+libdvi's functions     __dvi_func      = __not_in_flash_func
+dvi_timing_*           __dvi_const     = __not_in_flash_func
+tmds_table             __scratch_x
+```
+
+A custom commit that SKIPS the idle keeps the signal alive and sync locked;
+the glitch becomes a couple of scrambled frames instead. **This invariant is
+load-bearing and silently breaks if anyone ever moves a DVI function back to
+flash** -- assert it in a comment at the commit site.
+
+**Design.**
+
+- Defer and coalesce: mark dirty on change, commit only after the settings
+  have been UNCHANGED for ~3 seconds. Cycling four rotations becomes one
+  write, and the glitch lands after the player stops pressing rather than
+  during play. In practice invisible.
+- Load at boot, after `av_geom_init()` and before Core 1 starts -- free, that
+  phase already blocks.
+- Custom `settings_commit()` in ArcadeBoard_FruitJam, no `idleOtherCore()`.
+
+**Falls out for free:** the sector is the last 4KB of a 16MB flash while
+sketches are ~300KB, so settings survive reflashing a new `.uf2`, and are
+shared across games automatically. Wear is a non-issue -- 100k cycles against
+a 3-second coalescing rule.
+
+**Effort:** ~80 lines in ArcadeHAL, ~40 board-specific, 3-4 lines per sketch
+(rotation and mirror live on each machine's `system` struct, stretch is
+global, so the apply step cannot be fully shared). The real time is hardware
+verification: seven card swaps.
+
+### 92. Donkey Kong's column renderer: the last whole-frame burst, and a flip-screen trap
+
+Both of Donkey Kong's landscape rotations were roughly 3/4 covered in red on
+a real screen. Confirmed on hardware first that it was NOT the aspect
+correction -- rotation 0 with stretch OFF already read `starve 120` a window,
+`minq 0/32` and frames stretching to 18,645us.
+
+**The cause, and it was structural.** Landscape took `run_frame_sequential()`,
+which ran a WHOLE frame of CPU and then rendered all 224 raster rows into a
+114KB `frame_cache` before submitting a single scanline. Two bursts back to
+back, against 2,032us of queue runway (#85). This is the same whole-frame
+shape phase 3 removed from Pac-Man, Ms. Pac-Man, Burger Time and Galaga;
+Donkey Kong was the one left, because of its sprite arbitration.
+
+**Why the arbitration looked like a blocker.** Real hardware evaluates
+sprites against a 64x9 line buffer and stops at 16 per scanline, and the game
+relies on it. That limit is decided by walking sprite RAM IN ORDER for one
+scanline, so a column renderer -- fixed x, every y -- cannot decide it
+per pixel.
+
+**The property that made it easy.** The coarse test is
+`((y + add_y + 1 + scanline_vf) & 0xF0) == 0xF0`. That sum moves by exactly 1
+per scanline, so it passes for exactly 16 CONSECUTIVE scanlines and
+`local_y = sum & 0x0F` walks 0..15 across them. A sprite is therefore always
+a contiguous 16-line band, and arbitration can only DROP lines inside it. So
+the arbitration is run once per frame -- the same work the row path did per
+scanline, just hoisted -- and each sprite becomes {y0, 16-bit line mask},
+bucketed by column. A column then visits 2-3 sprites instead of 128.
+
+**THE FLIP-SCREEN TRAP, and the reason the self-test exists.** With
+`flip_screen` set, `scanline_vfc` is XORed with 0xFF, so the sum DECREASES by
+one per scanline and `local_y` runs 15 -> 0 down the raster. The band is
+still 16 contiguous lines, but a given sprite line lands on `y0 - local_y`,
+not `y0 + local_y`. The first implementation assumed one direction. It was
+correct in every unflipped frame and scrambled the moment the game flipped
+the screen -- which it does for player 2, so this would have shipped and
+shown up as "landscape looks wrong sometimes".
+
+`dkong_video_selftest_column_vs_row()` caught it on frame 521 of the first
+run, and its instance dump named the cause (`flip=1`) immediately. **Render
+the native raster both ways and compare** -- it needs no reference image, no
+hardware and no historical baseline, and it is the only check that can see a
+divergence between two paths that are never on screen at the same time.
+
+Verified: 9,000 frames of scripted gameplay in rotation 0 and 6,000 in
+rotation 2, both with `flip_screen` active, zero mismatched pixels.
+
+**Caveat, stated because it is unexercised rather than proven:** the host run
+peaked at 11 sprites on a scanline and never hit the 16 limit, so the
+cap-and-drop path is transcribed but untested. It is a direct copy of the row
+path's loop, which is why it is trusted, but a run that provokes 16 would be
+worth having.
+
+**Also:** all four rotations now use `run_frame_interleaved()`;
+`run_frame_sequential()` is deleted rather than left as a second, diverging
+frame path. SRAM drops 318,644 -> 225,084 bytes, **94KB freed**, because the
+frame cache is gone and the column buckets cost 16KB.
+
+### 93. DKong landscape, part two: the column renderer turned a burst into a throughput problem
+
+#92 removed the whole-frame burst and landscape was still red. The failure
+mode had CHANGED, which is the useful part -- measured on hardware, rotation
+2, stretch off:
+
+```
+before #92 (burst):       work_MEAN 15,023   starve 2071   minq 0/32   frame 18,765us
+after  #92 (throughput):  work_MEAN 16,426   starve 8565   minq 0/32   work_max 17,990
+```
+
+Mean work now EXCEEDED the whole 16,667us frame. A burst is bounded by
+runway; this was a sustained deficit, which no queue depth fixes (#88). So
+the column path was simply slower than the row path it replaced, and the
+question became where.
+
+**Measured, not guessed** (`-DDKONG_COST_TRACE=1`, two new accumulators):
+
+```
+dkong_video_begin_frame()   1,414us a frame
+render_native_column()      5,600us a frame  (23.3us per column, ~26 cycles a pixel)
+```
+
+**begin_frame, 1,414us.** It asked "which sprites are on this line?" for all
+224 lines, and that scans all 128 sprite slots on every line -- 28,672
+iterations -- because the loop only exits early once 16 sprites have passed,
+which almost never happens. Inverted to "which lines is this sprite on?" it
+is 128 x 16 = 2,048. The band start is computed rather than searched for: the
+coarse test's sum is `(A + ny) & 0xFF` with A constant per sprite, so the band
+is the 16 rows starting where that hits 0xF0. **1,414us -> 54us, 26x.**
+
+**render_native_column(), 5,600us.** The tilemap inner loop recomputed the
+tile index, its code, its PROM colour (two divisions) and re-tested whether
+the tile row had changed -- per pixel. All of it is constant across a tile
+row. Hoisted, the inner loop is a palette lookup and a store. **5,600us ->
+3,432us.**
+
+Result: `work_MEAN` 16,426 -> **12,678us**, `work_max` 17,990 -> 13,942,
+`starve` 8565 -> 818, and `minq` never reaches 0 -- the queue dips to one
+buffer but does not empty, which is what red actually requires.
+
+**THE WRAPAROUND IS NOT SYMMETRIC**, and the self-test caught this too, at
+x=97 y=215. Unflipped a band ASCENDS from y0, so a y0 past the bottom can
+still have its tail on screen through the mod-256 wrap (y0=250 means rows
+0..9 carrying local_y 6..15) and must be shifted to a negative start.
+Flipped, the band DESCENDS, so a high y0 already reaches down into the
+visible rows and shifting it throws the band away. The first version shifted
+both and silently dropped flipped sprites near the bottom of the screen.
+
+That is the second direction bug in two entries, both flip-only, both
+invisible in the common case, both found by
+`dkong_video_selftest_column_vs_row()` within one run. Verified after the
+rewrite: 9,000 gameplay frames in rotation 0 and 6,000 in rotation 2, flip
+active, zero mismatches -- **and the state digest is byte-identical to the
+pre-optimisation run** (C710350436A8A3D9), so none of this changed the
+emulation.
+
+### 94. The last of DKong's landscape red: audio was running twice, and per-band QUEUE MINIMUM is what found it
+
+After #93 landscape was much better and still flashing red across the top
+sixth of the screen. Every total said it should be fine: `work_MEAN` 12,678us
+against a 15,238us active window, `work_max` 13,942, and per-band work flat at
+~1,280us against a 1,905us budget. Nothing was over budget anywhere.
+
+**The instrument that worked was the per-band QUEUE MINIMUM.** Eight bands of
+30 scanlines, recording the lowest `q_colour_valid` level reached in each:
+
+```
+landscape (red):   band_minq 0/0/7/17/29/31/31/31     band work 1278/1268/1255/...
+tate      (clean): band_minq 23/27/31/31/31/31/31/31  band work 1489/1505/1500/...
+```
+
+**Tate does MORE work per band and never drops below 23; landscape did less
+work and started at zero.** Less work with a worse queue is not a throughput
+problem, and that comparison is what turned the search around -- it says the
+cost is somewhere the per-scanline instruments cannot see.
+
+**The cause, and it was mine, from #92.** `dkong_run_frame()` ended with:
+
+```c
+// only the sequential (landscape/180) path needs a whole-frame call here.
+if (system->rotation != 1 && system->rotation != 3)
+    dkong_audio_run_frame(system);
+```
+
+That guard was correct while landscape used `run_frame_sequential()`. #92 put
+every rotation on the interleaved path and did not update it, so landscape
+ran its audio TWICE: once in per-scanline slices inside the loop, and again
+as a whole-frame burst here. Two consequences, one audible and one visible --
+the sound advanced at double rate, and ~2.5ms of work landed in a single lump
+at the frame boundary. Core 1 keeps draining at one buffer per 63.5us
+throughout, so it emptied ~40 buffers before the next frame's first scanline
+arrived: red across the top of the picture, and the top only.
+
+Deleted. Landscape now reads `band_minq 21/27/31/31/31/31/31/31`, `starve 0`,
+`minq 21/32`, `work_MEAN` 12,566us.
+
+**The lesson, and it is a new one.** Every measurement in #84, #85 and #93 was
+a COST -- how long something took. This bug was invisible to all of them
+because the expensive thing ran outside the loop being measured, and totals
+absorbed it. What exposed it was measuring the RESOURCE instead: how much
+runway was left, bucketed by position in the frame. When a pipeline starves
+with work to spare, measure the buffer, not the code -- and compare a broken
+configuration against a working one, because "less work, worse queue" is a
+contradiction that points straight at the thing you are not measuring.
+
+Verified: host self-test clean over 6,000 gameplay frames in rotation 0 with
+flip active, state digest 23D54F0A73E93BDA -- byte-identical to the run
+before this change, so the video path is untouched. The audio fix is a
+behaviour change by design: landscape sound was running at double speed.
+
+### 95. Space Invaders needed no port at all -- only a number
+
+DISPLAY_GEOMETRY.md listed "the two 8080bw games" as outstanding phase-3
+work, i.e. still needing the column primitive that Donkey Kong had just been
+given. **That was stale, and reading the code said so before any hardware
+was involved** -- `invaders_machine.cpp` already documented it:
+
+> Like Lunar Rescue and unlike Pac-Man, no second sequential path is needed
+> for any rotation: `render_scanline()` reads live VRAM on demand for all
+> four rotations and keeps no frame cache, so every rotation can interleave.
+
+The reason is structural and worth stating: this game's VRAM **is** a 1-bit
+framebuffer, so a landscape scanline reads a raster column straight out of
+memory. There is nothing to pre-render, so there was never a whole-frame
+burst to remove. Pac-Man, Galaga, Burger Time and Donkey Kong all needed a
+column primitive because their pictures are *computed* from tilemaps and
+sprites; Invaders' picture is already in RAM.
+
+What was actually missing was measurement. The sketch had **no starvation
+counter at all** and **no `TEST_ROTATION`**, so "is landscape clean here?"
+had never been a number. Both added, plus totals-beside-maxima and a
+scripted-play autostart so the figures are gameplay rather than attract.
+
+Measured on hardware, all four rotations and both aspect settings:
+
+| rot | | stretch off | stretch ON | starve | runway |
+|---|---|---|---|---|---|
+| 0 | landscape | 6,044us | **5,332us** | 0 | 28/32 |
+| 1 | tate | 5,622us | 6,744us | 0 | 28-29/32 |
+| 2 | landscape, mirrored | 6,042us | -- | 0 | 28/32 |
+| 3 | tate, mirrored | 5,839us | -- | 0 | 29/32 |
+
+Zero starvation everywhere and never below 28 of 32 buffers. Against a
+15,238us active-video window the worst case uses **45% of the budget** --
+by a wide margin the cheapest game in the project.
+
+**Landscape gets CHEAPER with the aspect correction on** (6,044 -> 5,332us),
+which looks backwards until you remember what yoko correction does: it
+NARROWS the picture from 224 canvas columns to 180 (arcade_video_geom.h's
+"yoko needs the picture narrower, not taller"). Fewer columns is less work.
+Tate widens 256 -> 320 and duly costs more. So the direction of the cost tells
+you which way the correction is resampling, and it is a cheap sanity check
+that the geometry is doing what it claims.
+
+**Space Invaders can therefore afford the aspect correction in every
+rotation**, fixing its 16.7% tate error and 24.4% landscape error with ~8ms
+of headroom to spare.
+
+### 96. Space Invaders' yoko text was being DELETED, not distorted -- and it was wrong with the correction off too
+
+Photographs of the real screen showed the score line reading
+
+```
+uncorrected yoko:  SC.NRF<1> HT-SC.NRF SC.NRF<?>
+corrected yoko:    SC7BF(1> 4|-SrnRF SrrRF(?)
+tate (either):     SCORE<1> HI-SCORE SCORE<2>      <- correct
+```
+
+That is not stretching distortion. Letters have lost whole STROKES -- O
+reads as C, E as F, H as 4 -- which only happens when pixels are removed.
+
+**Both yoko axes downsample, and this game sampled instead of merging.**
+Yoko maps the long axis 256 -> 240 canvas rows in BOTH aspect modes (see
+rebuild() in arcade_video_geom.cpp -- that asymmetry is deliberate and is
+why landscape was 24.4% off while tate was 16.7%), and with the correction
+on it also narrows the short axis 224 -> 180. The renderer was
+destination-driven nearest-neighbour: one source sample per canvas pixel,
+the rest never read. On 1-pixel-wide line art that does not thin a feature,
+it DELETES it.
+
+**This is DEVNOTES #80 again, on the one game that never got the fix.**
+Pac-Man, Ms. Pac-Man, Galaga and Burger Time were all converted to
+source-driven merging; Space Invaders and Lunar Rescue were skipped because
+they never needed the column primitive that the conversion came bundled
+with -- their VRAM is already a framebuffer (#95). The merge is a separate
+concern from the burst, and it got missed with it.
+
+Fixed by walking the SOURCE on both axes and letting a lit sample win. The
+game is 1-bit white-on-black, so merging is simply OR: OR the raster columns
+that collapse into one canvas row, and let a lit sample overwrite an unlit
+one along the other axis.
+
+Measured on the host, lit pixels on the same attract frame, against tate
+(which upsamples both axes and so loses nothing):
+
+| | lit | vs tate |
+|---|---|---|
+| tate | 4,196 | 100% |
+| yoko, before | 3,792 | 90.4% |
+| yoko, after | 4,152 | **98.9%** |
+
+The aggregate understates it: what gets deleted is exactly the thin strokes,
+so the visible effect on text is far larger than 9%.
+
+Cost on hardware, worst case (landscape, corrected, gameplay): `work_MEAN`
+7,541us of a 15,238us window, `starve` 0, runway 28/32. This game had ~9ms
+spare and the merge spends about 1.5ms of it.
+
+**The lesson: "it needs no port" is not the same as "it needs nothing."**
+#95 correctly concluded Invaders needed no column primitive and then stopped
+looking, when a second, independent fix from the same phase had also passed
+it by. When a game is skipped for one reason, check what else was bundled
+with the thing it was skipped from.
+
+### 97. Yoko's residual squashing is arithmetic -- and smoothing it was tried, measured, and REJECTED
+
+After the merge of #96 the yoko score lines were legible but visibly
+squashed. That part is not a bug and cannot be fixed where it appears:
+
+```
+yoko long axis: 256 raster rows -> 240 canvas rows
+  16 of 240 canvas rows carry TWO raster rows -- every 15th, exactly
+  an 8-row glyph loses a row whenever a merge point lands inside it: 53%
+yoko short axis, corrected: 224 -> 180, 44 of 180 columns doubled (24%)
+```
+
+256 does not fit in 240. **The only real fix is a taller canvas**, i.e.
+`dvi_vertical_repeat = 1` and a 320x480 canvas, where yoko's long axis
+becomes a 256 -> 480 UPSAMPLE and loses nothing. That is what the reference
+`invaders_pico` ran (DISPLAY_GEOMETRY.md section 3), and forcing it through
+this fork's low-level API produced a solid red screen on real hardware --
+see hal_video_fruitjam.cpp. It would also double the scanlines Core 0
+produces per frame and would rework every geometry constant, so it is a
+project-sized change, not a fix.
+
+What CAN change is how the loss reads. The plain merge is a hard OR, so a
+doubled row is fully lit and a glyph becomes 7 rows of solid white -- it
+looks like a dropped scanline. Weighting each canvas pixel by how much of it
+the lit source covers turns the same geometry into what a scaler or a CRT
+shows: the compressed row is dimmer rather than missing.
+
+Added as `-DINVADERS_SMOOTH=1`, opt-in, and **measured before recommending
+it**: landscape corrected in gameplay went from `work_MEAN` 7,541us to
+**12,925us**. 5.4ms for a cosmetic change, because every scanline now clears
+and re-scans its 180-224 canvas columns for the weighting pass.
+
+It fits on this game and only this game -- Invaders is the cheapest in the
+project with ~9ms spare (#95); the same 5.4ms would put Burger Time and
+Donkey Kong straight over the frame budget. So it stays a flag, off by
+default, and would need the accumulator pass folded into the emit (the way
+#89 folded the palette lookup in) before it could be offered anywhere else.
+
+**Worth stating plainly: this is a taste call on 1-bit pixel art, not a
+correctness fix.** The geometry is identical either way.
+
+**REJECTED ON THE DISPLAY, and the code is deleted.** Shown side by side
+against the crisp version on real hardware, the verdict was immediate: the
+dimmed row reads as blur, and crisp-but-squashed is preferred to
+soft-and-proportional on this artwork. So the flag is gone rather than left
+off-by-default -- a rejected rendering path that nobody will ever enable is
+just a second way for the two to diverge, the same reason
+`run_frame_sequential()` was deleted in #92 rather than kept.
+
+Recorded here so it is not re-attempted: the smoothing works, it costs
+5.4ms, and it is not wanted. If the squashing is ever to be genuinely fixed
+it needs the taller canvas above, not filtering.
+
+### 98. Lunar Rescue: the same yoko merge, with colour
+
+Last game. Same 8080bw VRAM layout as Space Invaders, same
+destination-driven nearest-neighbour yoko loop, therefore the same pixel
+DELETION (#96) -- found by reading the code rather than by looking at a
+screen, because #96 had just established the pattern.
+
+Two differences, both from this game having colour where Invaders is 1-bit:
+
+- The colour comes from `block_color(dx, chi)` and `chi` derives from the
+  raster row, so **each merged row carries its own colour**. The merge has to
+  fetch the colour for whichever row actually won, not for the row the old
+  loop happened to pick.
+- **Ties go to the FIRST lit sample, not the last.** That keeps the pixel the
+  old nearest-neighbour loop would have chosen whenever it was lit, so the
+  merge only ever ADDS back what was being dropped instead of also
+  reshuffling colours. `buf` is cleared at the top of `render_scanline()`, so
+  "already written" is just non-zero.
+
+Measured on hardware, all four rotations, aspect correction ON (there is no
+`lrescue_host`, so this one is hardware-only):
+
+| rot | | work mean | work max | starve | runway |
+|---|---|---|---|---|---|
+| 0 | landscape | 8,176us | 9,058us | 0 | 16/32 |
+| 1 | tate | 6,039us | 6,774us | 0 | 17/32 |
+| 2 | landscape, mirrored | 8,066us | 8,764us | 0 | 17/32 |
+| 3 | tate, mirrored | 6,306us | 7,023us | 0 | 17/32 |
+
+Landscape costs ~2ms more than tate, which is the merge doing real work on
+the downsampled axes; tate upsamples both and skips it entirely. Runway sits
+at 16-17 of 32 rather than Invaders' 28 -- this game carries more CPU and
+audio per frame -- but `starve` is 0 everywhere and half the queue is in hand.
+
+**With this, all seven games are clean in all four rotations.**
+
+(This entry originally added "and the aspect correction is affordable
+everywhere except Burger Time's yoko and Donkey Kong's yoko". **That was
+wrong about Donkey Kong and overstated for Burger Time** -- both run at
+60fps with the correction on. See #99 for the measurements. The correction
+is affordable everywhere; what differs is the runway left, and only Burger
+Time's rotation 2 is genuinely tight.)
+
+### 99. Donkey Kong's yoko correction, measured at last -- it fits, with room
+
+#98 left this as the one open prediction: DKong's landscape aspect correction
+had never been measured since the landscape renderer was rewritten (#92-#94),
+so the only figures on record came from the old bursty build and were
+meaningless. Predicted ~+1.2ms by analogy with Burger Time. Measured, in
+gameplay:
+
+| rot | | correction off | correction on | cost | starve | runway |
+|---|---|---|---|---|---|---|
+| 0 | landscape | 12,038us | 13,454us | **+1,416us** | 0 | 20/32 |
+| 2 | landscape, mirrored | 12,778us | 13,440us | **+662us** | 0 | 20/32 |
+| 1 | tate (from #93) | -- | -- | +262us | 0 | 26/32 |
+
+The prediction was the right order of magnitude and the spread between the
+two landscape rotations (1,416 vs 662us) is wider than expected -- the same
+mirrored-twin asymmetry seen on Pac-Man (#86) and Ms. Pac-Man (#87), where
+the reversed emit path does slightly different work.
+
+**Donkey Kong can afford its landscape correction comfortably**: `starve` 0
+and 20 of 32 buffers in hand either way, against a 15,238us active-video
+window it uses 13.4ms of. That is a materially better position than Burger
+Time, which holds 60fps in the same configuration but with only 13 of 32
+buffers (#89).
+
+So the standing summary in #98 -- "affordable everywhere except Burger Time's
+yoko and Donkey Kong's yoko" -- was **wrong about Donkey Kong**, and only
+half right about Burger Time, which does run, just with the least margin in
+the project.
+
+> **AND THIS ENTRY'S OWN CORRECTION WAS THEN OVERCORRECTED.** It concluded
+> "the aspect correction is affordable in every game and every rotation".
+> #101 found one place it is not: Galaga's yoko, which had never been
+> measured because a rendering bug (#100) was making it look cheap by
+> skipping work. Accurate statement: affordable everywhere EXCEPT Galaga's
+> landscape, which is pinned to 1:1.
+
+The wide-store merge that would fix that remains unbuilt and is now the one
+piece of known-worthwhile optimisation left in the display work. It is
+optional: nothing is broken without it.
+
+### 100. Galaga's corrected yoko was tiled garbage: a conditional emit onto an uncleared buffer
+
+A photograph showed Galaga's landscape-with-correction picture repeating
+across the screen in wrong colours -- coherent content, tiled roughly fifteen
+times. Coherent-but-repeated is an ADDRESSING failure, never a resampling
+one, which narrowed it before any code was read.
+
+**Cause, and it was introduced by this session's own optimisation.** Galaga's
+yoko path had been changed to clear only the pillarbox:
+
+```c
+// render_native_column() writes every pixel of the picture itself, so
+// clearing the full width here would write 224 of the 320 columns twice
+if (sys->rotation == 0 || sys->rotation == 2) { clear borders only }
+```
+
+That reasoning is correct **only on the 1:1 branch**, where the column is
+written straight into `buf + av_yoko.x0` and every pixel really is written.
+With the aspect correction ON, yoko narrows 224 raster columns onto 180
+canvas columns and the picture goes through `av_emit_row_merge()`, which
+stores CONDITIONALLY -- `if (v) dst[x] = v`, so a background sample never
+overwrites a lit one (#80). Conditional stores mean the background is never
+written at all, so the buffer must already be black. It wasn't:
+`hal_video_acquire_scanline()` hands back a recycled buffer still holding an
+older frame, and that is what tiled across the screen.
+
+`av_emit_row_merge()`'s own header says "requires `dst` to be pre-cleared,
+which every renderer here already does". One of them had quietly stopped.
+
+**Why no test caught it, and the fix for that.** `tools/host_common/host_ppm.cpp`
+zeroed the scanline buffer before every render call. The board does no such
+thing -- each renderer is required to clear what it does not write -- so the
+harness was silently doing the renderer's job and the bug was invisible in
+every host dump. It now fills with **magenta poison (0xF81F)** instead, a
+colour no game here uses, so any pixel a renderer fails to write is
+unmissable.
+
+Measured immediately, corrected yoko, frame 0:
+
+| | unwritten pixels |
+|---|---|
+| Galaga, before the fix | **101,428 of 307,200 (33.0%)** |
+| Galaga, after | 0 |
+
+Then swept every other harness with the correction on -- Donkey Kong, Burger
+Time, Pac-Man, Ms. Pac-Man, Space Invaders: **0 unwritten in all of them.**
+Galaga was the only game with the border-only clear; the rest memset the full
+width unconditionally.
+
+**The lesson: a harness that is more forgiving than the hardware is worse
+than no harness**, because it converts a whole bug class into "works here,
+broken there". This one had been zeroing buffers since it was written, and
+the moment a renderer relied on the board doing the same, the dumps kept
+looking perfect. Poisoning costs nothing and models the real contract.
+
+### 101. Galaga cannot afford the aspect correction in yoko, and now says so
+
+#100 fixed the tiled-garbage picture by restoring the full-width clear. The
+picture became correct and the screen went red instead, which was the more
+honest failure: the border-only clear had been making the corrected path look
+affordable by SKIPPING WORK -- it was fast because it was wrong.
+
+Measured properly, rotation 0, gameplay with 64 sprites:
+
+| | work_MAX peak | starve | runway |
+|---|---|---|---|
+| correction off | 15,025us | 0 | 13/32 |
+| correction on | **17,601us** | mean 6,601 | **0/32** |
+
+**+2,576us, and past the whole 16,667us frame** -- not merely past the
+15,238us active-video window. A sustained deficit, the one shape a deeper
+queue cannot help (#88). The restored memset is ~600us of that; the rest is
+the correction itself.
+
+It costs Galaga more than any other game for two compounding reasons: this is
+the most expensive machine here (three Z80s, 77% of the frame is CPU, #84),
+and yoko-corrected also loses the `col_1to1` shortcut, so the column can no
+longer be written straight into the scanline buffer -- it goes to scratch and
+back through an emit.
+
+**Yoko is now pinned to the 1:1 layout on this game**, so Button 1 does
+nothing in rotations 0 and 2. Verified: rotation 0 with the correction ON now
+peaks at 14,999us, `starve` 0, runway 13/32 -- identical to the correction-off
+baseline, which is the point. The landscape picture stays 24.4% too wide,
+which is the layout every game shipped with before the correction existed.
+
+**Tate still honours it, and there the wide-store emit earns its keep.**
+But it is TIGHT, and this is the first time it has been measured in gameplay
+rather than attract: rotation 3 corrected peaks at **16,309us with runway
+4/32**. `starve` is 0 across 60 windows at 64 sprites, so it works, but 4 of
+32 buffers is the thinnest margin measured anywhere in this project -- thinner
+than Burger Time's 13/32. Worth re-measuring if anything in Galaga's frame
+ever gets more expensive.
+
+**The general lesson, and it is uncomfortable: a rendering bug can masquerade
+as performance headroom.** The corrected yoko path looked affordable for as
+long as it was skipping the clear. Any time an optimisation makes something
+newly affordable, check that it still produces the right pixels -- the host
+poison of #100 is exactly that check, and it is why that change matters more
+than this one.

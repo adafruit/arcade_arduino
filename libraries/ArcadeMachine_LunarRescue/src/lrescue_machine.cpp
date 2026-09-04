@@ -17,6 +17,7 @@
 #include "lrescue_audio.h"
 #include "lrescue_assets.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 #include "arcade_hal_audio.h"
 #include "arcade_hal_storage.h"
 #include "arcade_hal_input.h"
@@ -55,6 +56,13 @@
 
 void lrescue_init(arcade_system *system) {
     memset(&system->state, 0, sizeof(system->state));
+
+    // Build the canvas mapping for this raster (arcade_video_geom.h). Must
+    // happen before the first frame -- the renderer reads av_tate/av_yoko on
+    // every scanline and they are all zeroes until this runs. LONG axis
+    // first (GAME_WIDTH), then SHORT (GAME_HEIGHT).
+    av_geom_init(LRESCUE_GAME_WIDTH, LRESCUE_GAME_HEIGHT);
+
 
     // IMPORTANT: leave state.mirror_2000_at_4000 false (its memset default).
     // Space Invaders' PCB incompletely decodes its address bus and aliases
@@ -193,10 +201,9 @@ void lrescue_run_frame(arcade_system *system) {
     // the same change on Pac-Man produced no visible tearing.
     const int cyc_start = cyc;
     const int cyc_total = (int)CYCLES_PER_FRAME - cyc_start;
-    const uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
     uint32_t render_sum = 0, block_sum = 0;
 
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         // Exact proportional target (not repeated addition) so the final
         // slice lands precisely on CYCLES_PER_FRAME however that divides by
         // the scanline count -- same shape as pacman_machine.cpp's
@@ -207,7 +214,7 @@ void lrescue_run_frame(arcade_system *system) {
         // 240 times per frame -- precisely the cost DEVNOTES.md problem #17
         // warns about.
         int target = cyc_start +
-            (cyc_total * (int)(i + 1)) / (int)HAL_VIDEO_SCANLINES_PER_FRAME;
+            (cyc_total * (int)(i + 1)) / (int)HAL_VIDEO_HEIGHT;
         while (int_state != 2 && cyc < target) {
             step_cpu(system, &cyc, &int_state);
         }
@@ -230,7 +237,7 @@ void lrescue_run_frame(arcade_system *system) {
         uint32_t a = micros();
         uint16_t *buf = hal_video_acquire_scanline();
         uint32_t b = micros();
-        lrescue_video_render_scanline(i * step, buf, system);
+        lrescue_video_render_scanline(i, buf, system);
         uint32_t c = micros();
         hal_video_submit_scanline(buf);
         uint32_t d = micros();

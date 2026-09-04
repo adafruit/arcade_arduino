@@ -39,6 +39,7 @@
 #include "btime_ports.h"
 #include "btime_audio.h"
 #include "arcade_hal_video.h"
+#include "host_ppm.h"
 #include "m6502.h"
 
 extern "C" void host_storage_set_rom_dir(const char *dir);
@@ -110,28 +111,17 @@ static uint64_t digest_state(void) {
     return h;
 }
 
-// Only the first half of each scanline buffer is displayed -- libdvi's
-// 16bpp path encodes h_active_pixels/2 source pixels across the full line.
-// See tools/README.md; this doubles so the dump looks like the monitor.
-#define VISIBLE_SRC_WIDTH (HAL_VIDEO_WIDTH / 2u)
+// Sampling and pixel-doubling live in host_ppm.cpp -- read its header
+// before trusting a dump. Burger Time is the one game whose landscape
+// sampling was already 1:1 (240 raster columns onto 240 submitted
+// scanlines), so this change moves its dumps least.
+static void ppm_render(void *ctx, uint32_t dvi_y, uint16_t *buf) {
+    btime_video_render_scanline((const btime_system *)ctx, dvi_y, buf);
+}
 
 static void dump_ppm(const char *path) {
-    static uint16_t row[4096];
-    FILE *fp = fopen(path, "wb");
-    if (!fp) { fprintf(stderr, "cannot write %s\n", path); return; }
-    fprintf(fp, "P6\n%u %u\n255\n", HAL_VIDEO_WIDTH, HAL_VIDEO_HEIGHT);
-    for (uint32_t y = 0; y < HAL_VIDEO_HEIGHT; y++) {
-        memset(row, 0, sizeof(uint16_t) * HAL_VIDEO_WIDTH);
-        btime_video_render_scanline(&g_system, y, row);
-        for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) {
-            uint16_t c = row[x / 2u < VISIBLE_SRC_WIDTH ? x / 2u : VISIBLE_SRC_WIDTH - 1u];
-            fputc((int)(((c >> 11) & 0x1F) * 255 / 31), fp);
-            fputc((int)(((c >>  5) & 0x3F) * 255 / 63), fp);
-            fputc((int)(( c        & 0x1F) * 255 / 31), fp);
-        }
-    }
-    fclose(fp);
-    printf("[wrote %s at frame %ld]\n", path, g_frame);
+    if (host_ppm_write(path, ppm_render, &g_system))
+        printf("[wrote %s at frame %ld]\n", path, g_frame);
 }
 
 static void print_state(const char *tag) {
@@ -307,7 +297,7 @@ int main(int argc, char **argv) {
     long counters_every = 0;
     long digest_every = 0;
     int rotation = -1;
-    bool stretch = false;
+    int stretch = -1; // -1 = leave the machine's own default alone
     long sprites_every = 0;
     bool want_sprites = false;
     press coin, start1, up, down, left, right, pepper;
@@ -329,7 +319,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--counters-every") && i + 1 < argc) counters_every = atol(argv[++i]);
         else if (!strcmp(argv[i], "--digest-every") && i + 1 < argc) digest_every = atol(argv[++i]);
         else if (!strcmp(argv[i], "--rotation") && i + 1 < argc) rotation = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--stretch")) stretch = true;
+        else if (!strcmp(argv[i], "--stretch")) stretch = 1;
+        else if (!strcmp(argv[i], "--no-stretch")) stretch = 0;
         else if (!strcmp(argv[i], "--coin-at") && i + 1 < argc) coin.at = atol(argv[++i]);
         else if (!strcmp(argv[i], "--start-at") && i + 1 < argc) start1.at = atol(argv[++i]);
         else if (!strcmp(argv[i], "--up-at") && i + 1 < argc) up.at = atol(argv[++i]);
@@ -357,7 +348,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--sprites-every") && i + 1 < argc) sprites_every = atol(argv[++i]);
         else {
             fprintf(stderr,
-                "usage: %s [--frames N] [--rom DIR] [--rotation 0..3] [--stretch]\n"
+                "usage: %s [--frames N] [--rom DIR] [--rotation 0..3]\n"
+                "       [--stretch | --no-stretch]   (the machine now defaults it ON)\n"
                 "          [--ppm FILE] [--ppm-at N] [--state] [--counters]\n"
                 "          [--counters-every N] [--digest-every N]\n"
                 "          [--sprites] [--sprites-every N]\n"
@@ -375,7 +367,7 @@ int main(int argc, char **argv) {
 
     btime_init(&g_system);
     if (rotation >= 0) g_system.rotation = (uint8_t)(rotation & 3);
-    btime_video_set_aspect_stretch(stretch);
+    if (stretch >= 0) btime_video_set_aspect_stretch(stretch != 0);
 
     uint16_t err = 0;
     if (!btime_load_assets(&g_system, &err)) {

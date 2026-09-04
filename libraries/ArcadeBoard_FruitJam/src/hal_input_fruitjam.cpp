@@ -32,6 +32,7 @@ static const uint8_t pins[] = {
     [HAL_BTN_SHOOT]  = 10,
     [HAL_BTN_UP]     = 43,
     [HAL_BTN_DOWN]   = 44,
+    [HAL_BTN_STRETCH] = 0,
 };
 
 const uint8_t HAL_INPUT_BUTTON_COUNT = sizeof(pins) / sizeof(pins[0]);

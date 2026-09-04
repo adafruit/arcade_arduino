@@ -12,6 +12,7 @@
 #include "invaders_audio.h"
 #include "invaders_assets.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 #include "arcade_hal_audio.h"
 #include "arcade_hal_storage.h"
 #include "arcade_hal_input.h"
@@ -21,6 +22,13 @@
 
 void invaders_init(arcade_system *system) {
     memset(&system->state, 0, sizeof(system->state));
+
+    // Build the canvas mapping for this raster (arcade_video_geom.h). Must
+    // happen before the first frame -- the renderer reads av_tate/av_yoko on
+    // every scanline and they are all zeroes until this runs. LONG axis
+    // first (GAME_WIDTH), then SHORT (GAME_HEIGHT).
+    av_geom_init(INVADERS_GAME_WIDTH, INVADERS_GAME_HEIGHT);
+
 
     // Space Invaders' original PCB incompletely decodes its address bus,
     // aliasing RAM at 0x2000-0x3fff onto 0x4000-0x5fff; the self-test code
@@ -129,9 +137,8 @@ void invaders_run_frame(arcade_system *system) {
     // tearing.
     const int cyc_start = cyc;
     const int cyc_total = (int)CYCLES_PER_FRAME - cyc_start;
-    const uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
 
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         // Exact proportional target (not repeated addition) so the final
         // slice lands precisely on CYCLES_PER_FRAME however that divides by
         // the scanline count -- same shape as lrescue_machine.cpp's and
@@ -143,13 +150,13 @@ void invaders_run_frame(arcade_system *system) {
         // warns about, measured at ~700us/frame when it was written that way
         // in Lunar Rescue first (problem #34).
         int target = cyc_start +
-            (cyc_total * (int)(i + 1)) / (int)HAL_VIDEO_SCANLINES_PER_FRAME;
+            (cyc_total * (int)(i + 1)) / (int)HAL_VIDEO_HEIGHT;
         while (int_state != 2 && cyc < target) {
             step_cpu(system, &cyc, &int_state);
         }
 
         uint16_t *buf = hal_video_acquire_scanline();
-        invaders_video_render_scanline(i * step, buf, system);
+        invaders_video_render_scanline(i, buf, system);
         hal_video_submit_scanline(buf);
     }
 

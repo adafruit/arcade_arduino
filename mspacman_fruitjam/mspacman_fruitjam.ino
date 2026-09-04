@@ -16,6 +16,7 @@
 // Core 0: game emulation, input polling, board-to-game input mapping.
 // Core 1: hal_video_run() -- drives the DVI signal; never returns.
 #include <arcade_hal_video.h>
+#include <arcade_video_geom.h>
 #include <arcade_hal_input.h>
 #include <mspacman_machine.h>
 #include <mspacman_video.h>
@@ -44,6 +45,23 @@ void setup() {
     // and calls hal_video_init() (struct/queue setup only -- does not start
     // the physical DVI signal, does not touch storage).
     mspacman_init(&g_system);
+
+    // Boot straight into a chosen rotation, for measuring one orientation
+    // without a hand on the rotate button:
+    //   arduino-cli compile --build-property compiler.cpp.extra_flags=-DTEST_ROTATION=2
+    // 0 = landscape, 1 = 90 CCW tate, 2 = 180, 3 = 90 CW tate (this game's
+    // default). NOTE rotation 2 is the UPRIGHT landscape for this family and
+    // 0 is upside-down, matching the tate default being 3 rather than 1 --
+    // see DEVNOTES #33.
+#ifdef TEST_ROTATION
+    g_system.rotation = (uint8_t)(TEST_ROTATION);
+#endif
+    // Aspect-ratio correction, which mspacman_init() turns on by default:
+    //   --build-property compiler.cpp.extra_flags=-DTEST_STRETCH=0
+    // forces it off for an A/B against the historical 1:1 layout.
+#ifdef TEST_STRETCH
+    av_geom_set_stretch(TEST_STRETCH != 0);
+#endif
 
     // Storage/ROM/PROM loading -- blocking, can be slow (SD card retries).
     // For this game it also builds the aux board's decrypted ROM bank out of
@@ -94,19 +112,44 @@ void loop() {
     bool right  = hal_input_read(HAL_BTN_RIGHT);
     bool rotate = hal_input_read(HAL_BTN_ROTATE);
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
+    // Button 1: aspect correction on/off. Edge-detected inside
+    // av_geom_toggle_on_edge(); the right setting depends on the monitor,
+    // not the game, so it is a runtime toggle rather than a build flag.
+    av_geom_toggle_on_edge(hal_input_read(HAL_BTN_STRETCH));
+
+    // Scripted play, opt-in: -DTEST_AUTOSTART=1. Same rationale as the
+    // Pac-Man sketch (DEVNOTES #86): attract mode is a lower bound, and the
+    // budget has to be measured with a coin in.
+#ifdef TEST_AUTOSTART
+    {
+        static uint32_t autof = 0;
+        autof++;
+        const uint32_t f = autof % 6000u;
+        if (f > 600u && f < 660u)  coin   = true;
+        if (f > 780u && f < 840u)  start1 = true;
+        if (f > 1000u) {
+            const uint32_t d = (f / 90u) & 3u;
+            left  = (d == 0); up = (d == 1); right = (d == 2); down = (d == 3);
+        }
+    }
+#endif
 
     mspacman_input_update(&g_system, coin, start1, start2, up, down, left, right, rotate, mirror);
 
     // Frame-budget heartbeat, and proof of life: if this prints, the game is
     // running and any red on screen is DVI starvation, not an asset failure.
     static uint32_t frame_count = 0;
-    static uint32_t work_max = 0;
+    // Totals beside every maximum -- see DEVNOTES #84/#85.
+    static uint32_t work_max = 0, work_sum = 0, work_n = 0;
+    static uint32_t blk_sum = 0, blk_max = 0;
     uint32_t t0 = micros();
     mspacman_run_frame(&g_system);
     uint32_t frame_us   = micros() - t0;
     uint32_t blocked_us = hal_video_take_blocked_us();
     uint32_t work_us    = (frame_us > blocked_us) ? (frame_us - blocked_us) : 0;
     if (work_us > work_max) work_max = work_us;
+    if (blocked_us > blk_max) blk_max = blocked_us;
+    work_sum += work_us; blk_sum += blocked_us; work_n++;
 
     if ((++frame_count % 60u) == 0) {
         Serial.print("[mspacman] frame ");
@@ -117,9 +160,30 @@ void loop() {
         Serial.print(work_us);
         Serial.print("us, blocked ");
         Serial.print(blocked_us);
-        Serial.print("us), work_max ");
+        Serial.print("us), work_MEAN ");
+        Serial.print(work_n ? work_sum / work_n : 0);
+        Serial.print("us, work_max ");
         Serial.print(work_max);
-        Serial.println("us");
+        Serial.print("us, blk_MEAN ");
+        Serial.print(work_n ? blk_sum / work_n : 0);
+        Serial.print("us, blk_MAX ");
+        Serial.print(blk_max);
+        // rot/stretch/starve: "is the red gone" has to be a number per
+        // rotation, not an impression (DEVNOTES #35/#79).
+        Serial.print("us, rot ");
+        Serial.print((int)g_system.rotation);
+        Serial.print(", stretch ");
+        Serial.print((int)av_geom_get_stretch());
+        Serial.print(", starve ");
+        Serial.print(hal_video_take_starve_count());
+        // Runway left at the worst moment -- meaningful at any queue depth,
+        // unlike a starve threshold. See DEVNOTES #85.
+        Serial.print(", minq ");
+        Serial.print(hal_video_take_min_valid_level());
+        Serial.print("/");
+        Serial.print(hal_video_scanbuf_count());
+        Serial.println(" /60");
+        work_sum = blk_sum = work_n = 0; work_max = 0; blk_max = 0;
     }
 }
 

@@ -31,6 +31,8 @@
 #include "invaders_assets.h"
 #include "invaders_input.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
+#include "host_ppm.h"
 
 extern "C" void host_storage_set_rom_dir(const char *dir);
 extern "C" void host_storage_set_samples_dir(const char *dir);
@@ -64,40 +66,18 @@ static uint64_t digest_state(void) {
     return h;
 }
 
-// Only the first half of each scanline buffer is ever displayed. The
-// vendored libdvi's 16bpp path encodes `h_active_pixels / 2` source pixels
-// across the full 640-pixel line -- _dvi_prepare_scanline_16bpp() in
-// PicoDVI - Adafruit Fork/src/libdvi/dvi.c passes `pixwidth / 2` to
-// tmds_encode_data_channel_16bpp() -- i.e. it doubles horizontally, exactly
-// as dvi_vertical_repeat=2 doubles vertically. That is why every renderer in
-// this project (all four games) lays its picture out against a 320-wide
-// visible axis while HAL_VIDEO_WIDTH is 640: see invaders_video.cpp's
-// TATE_BX/LAND_BX, whose comments are all written as "(320 - N) / 2".
-//
-// So a raw 640-wide dump of the buffer looks like the game is squeezed into
-// the left half of a half-black screen, which is a dump artifact and NOT
-// what the monitor shows. Doubling here reproduces the real picture.
-#define VISIBLE_SRC_WIDTH (HAL_VIDEO_WIDTH / 2u)
-
 // Renders a full frame through the REAL renderer and writes it as a PPM, so
 // screen content can be inspected with no hardware and no camera.
+// Sampling and pixel-doubling live in host_ppm.cpp -- read its header
+// before trusting a dump. Note this renderer takes its system pointer
+// LAST, unlike its siblings.
+static void ppm_render(void *ctx, uint32_t dvi_y, uint16_t *buf) {
+    invaders_video_render_scanline(dvi_y, buf, (const arcade_system *)ctx);
+}
+
 static void dump_ppm(const char *path) {
-    static uint16_t row[4096];
-    FILE *fp = fopen(path, "wb");
-    if (!fp) { fprintf(stderr, "cannot write %s\n", path); return; }
-    fprintf(fp, "P6\n%u %u\n255\n", HAL_VIDEO_WIDTH, HAL_VIDEO_HEIGHT);
-    for (uint32_t y = 0; y < HAL_VIDEO_HEIGHT; y++) {
-        memset(row, 0, sizeof(uint16_t) * HAL_VIDEO_WIDTH);
-        invaders_video_render_scanline(y, row, &g_system);
-        for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) {
-            uint16_t c = row[x / 2u < VISIBLE_SRC_WIDTH ? x / 2u : VISIBLE_SRC_WIDTH - 1u];
-            fputc((int)(((c >> 11) & 0x1F) * 255 / 31), fp);
-            fputc((int)(((c >>  5) & 0x3F) * 255 / 63), fp);
-            fputc((int)(( c        & 0x1F) * 255 / 31), fp);
-        }
-    }
-    fclose(fp);
-    printf("[wrote %s at frame %ld]\n", path, g_frame);
+    if (host_ppm_write(path, ppm_render, &g_system))
+        printf("[wrote %s at frame %ld]\n", path, g_frame);
 }
 
 static void print_state(const char *tag) {
@@ -191,10 +171,12 @@ int main(int argc, char **argv) {
     const char *asset_arg = NULL, *ppm_prefix = "frame";
     long frames = 3000, every = 0, digest_every = 0, ppm_every = 0;
     long rotation = -1;
+    bool stretch = false;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--assets") && i + 1 < argc)             asset_arg = argv[++i];
         else if (!strcmp(argv[i], "--rotation") && i + 1 < argc)      rotation = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--stretch"))                   stretch = true;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)        frames = atol(argv[++i]);
         else if (!strcmp(argv[i], "--every") && i + 1 < argc)         every = atol(argv[++i]);
         else if (!strcmp(argv[i], "--digest-every") && i + 1 < argc)  digest_every = atol(argv[++i]);
@@ -227,6 +209,9 @@ int main(int argc, char **argv) {
     // (invaders_init: rotation 1, tate). Lets an orientation be checked in
     // the harness rather than by flashing and physically turning a monitor.
     if (rotation >= 0 && rotation <= 3) g_system.rotation = (uint8_t)rotation;
+    // Aspect-ratio correction (arcade_video_geom.h), applied after the
+    // machine init that built the maps.
+    if (stretch) av_geom_set_stretch(true);
 
     uint16_t err = 0;
     if (!invaders_load_assets(&g_system, &err)) {

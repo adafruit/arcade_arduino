@@ -15,6 +15,7 @@
 #include "mspacman_audio.h"
 #include "mspacman_assets.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 #include "arcade_hal_audio.h"
 #include "arcade_hal_storage.h"
 #include "arcade_hal_input.h"
@@ -32,6 +33,20 @@ void mspacman_init(mspacman_system *system) {
     memset(system, 0, sizeof(*system));
 
     z80_init(&system->cpu);
+
+    // Build the canvas mapping for this raster (arcade_video_geom.h). Must
+    // happen before the first frame -- the renderer reads av_tate/av_yoko on
+    // every scanline and they are all zeroes until this runs. LONG axis
+    // first (GAME_WIDTH), then SHORT (GAME_HEIGHT).
+    av_geom_init(MSPACMAN_GAME_WIDTH, MSPACMAN_GAME_HEIGHT);
+
+    // Aspect-ratio correction on, per-game and measured (see
+    // pacman_machine.cpp for the same call and DEVNOTES #79). Ms. Pac-Man
+    // shares Pac-Man's raster and renderer, so it inherits the same
+    // arithmetic: yoko is 24.4% too wide without it, and the correction is
+    // free there because it NARROWS that axis.
+    av_geom_set_stretch(true);
+
     mspacman_ports_wire(system);
 
     // The aux board powers up with the decrypted bank selected -- MAME's
@@ -85,50 +100,8 @@ bool mspacman_load_assets(mspacman_system *system, uint16_t *out_error_color) {
     return true;
 }
 
-// Runs the frame's cycles then renders -- the straightforward, fully
-// sequential approach. Used for landscape/180-degree rotation, which
-// structurally need the whole frame's final VRAM state before their
-// renderer can emit even one physical scanline (see mspacman_video.cpp's
-// frame_cache comment) -- there's no way to interleave those two modes'
-// rendering with CPU execution the way mspacman_run_frame() does for
-// tate/CW below. Known, confirmed-real stall risk for these two
-// orientations (arcade_arduino/DEVNOTES.md problems #18/#19) -- not yet
-// fixed, since tate is this project's supported orientation for this game
-// (a real Pac-Man cabinet is always portrait).
-//
-// `system->cpu.cyc` (the z80 core's own field) is a running total of
-// every T-state executed since boot -- it is NEVER reset, by this file or
-// by the core itself, and it's a `uint32_t` (pinned to that exact width
-// in z80.h -- it used to be `unsigned long`, which is 32-bit on this
-// target but 64-bit on a typical host, and that difference once hid a
-// wraparound bug from a host-side test harness; see z80.h's comment).
-// The locals below are uint32_t to MATCH it: mixing a 32-bit counter with
-// a 64-bit local silently defeats the wraparound-safe subtraction this
-// whole comment is about. At Pac-Man's real 3.072MHz clock, real-time-paced play
-// advances it by ~3,072,000 per second, so it wraps roughly every 23
-// minutes (2^32 / 3,072,000 ~= 1398s) -- see DEVNOTES.md problem #22 for
-// the real symptom this caused (a permanent hang after leaving the
-// attract loop running idle). Comparing ELAPSED CYCLES (a subtraction,
-// `system->cpu.cyc - start`) rather than comparing `system->cpu.cyc`
-// directly against a precomputed absolute target is what makes this safe
-// indefinitely: unsigned subtraction wraps modulo 2^32 exactly like the
-// counter itself does, so the computed delta is still correct even if
-// `cyc` wrapped past 0 partway through this frame -- as long as the real
-// elapsed delta never approaches half of 2^32, which a single frame's
-// ~50,688-cycle budget never remotely does.
-static void run_frame_sequential(mspacman_system *system) {
-    uint32_t start = system->cpu.cyc;
-    while ((uint32_t)(system->cpu.cyc - start) < MSPACMAN_CYCLES_PER_FRAME) {
-        z80_step(&system->cpu);
-    }
-    if (system->interrupt_enable) {
-        z80_gen_int(&system->cpu, system->interrupt_vector);
-    }
-    mspacman_draw_frame(system);
-}
-
 // Runs the frame's cycles INTERLEAVED with scanline submission, evenly
-// spreading MSPACMAN_CYCLES_PER_FRAME across the HAL_VIDEO_SCANLINES_PER_FRAME
+// spreading MSPACMAN_CYCLES_PER_FRAME across the HAL_VIDEO_HEIGHT
 // acquire/submit calls instead of running them all in one uninterrupted
 // burst before the first call. Fixes arcade_arduino/DEVNOTES.md problem
 // #19: even after fixing the renderer itself (problem #18), a real,
@@ -154,34 +127,32 @@ static void run_frame_sequential(mspacman_system *system) {
 // explanation (arcade_arduino/DEVNOTES.md problem #22).
 static void run_frame_interleaved(mspacman_system *system) {
     uint32_t start = system->cpu.cyc;
-    uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
 
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         // Exact proportional target delta (not repeated addition) so the
         // final slice lands exactly on MSPACMAN_CYCLES_PER_FRAME elapsed
         // regardless of how that divides by the scanline count.
         uint32_t target_delta =
-            (uint32_t)((uint64_t)MSPACMAN_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_SCANLINES_PER_FRAME);
+            (uint32_t)((uint64_t)MSPACMAN_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_HEIGHT);
         while ((uint32_t)(system->cpu.cyc - start) < target_delta) {
             z80_step(&system->cpu);
         }
 
         uint16_t *buf = hal_video_acquire_scanline();
-        mspacman_video_render_scanline(system, i * step, buf);
+        mspacman_video_render_scanline(system, i, buf);
         hal_video_submit_scanline(buf);
     }
 
-    // Same interrupt semantics/placement as run_frame_sequential() -- see
-    // its sibling comment for why this fires once, at the end.
+    // One vblank interrupt per frame, fired at the end -- unchanged from
+    // when this shared the job with a sequential path.
     if (system->interrupt_enable) {
         z80_gen_int(&system->cpu, system->interrupt_vector);
     }
 }
 
 void mspacman_run_frame(mspacman_system *system) {
-    if (system->rotation == 1 || system->rotation == 3) {
-        run_frame_interleaved(system);
-    } else {
-        run_frame_sequential(system);
-    }
+    // Every rotation, one path: mspacman_video.cpp's
+    // render_native_column() removed the reason landscape/180 ever needed a
+    // whole-frame burst (DEVNOTES #79).
+    run_frame_interleaved(system);
 }

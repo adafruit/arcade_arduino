@@ -30,6 +30,8 @@
 #include "dkong_input.h"
 #include "dkong_audio.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
+#include "host_ppm.h"
 #include "z80.h"
 
 extern "C" void host_storage_set_rom_dir(const char *dir);
@@ -78,28 +80,15 @@ static uint64_t digest_state(void) {
     return h;
 }
 
-// Only the first half of each scanline buffer is displayed -- libdvi's
-// 16bpp path encodes h_active_pixels/2 source pixels across the full line.
-// See tools/README.md; this doubles so the dump looks like the monitor.
-#define VISIBLE_SRC_WIDTH (HAL_VIDEO_WIDTH / 2u)
+// Sampling and pixel-doubling live in host_ppm.cpp -- read its header
+// before trusting a dump.
+static void ppm_render(void *ctx, uint32_t dvi_y, uint16_t *buf) {
+    dkong_video_render_scanline((const dkong_system *)ctx, dvi_y, buf);
+}
 
 static void dump_ppm(const char *path) {
-    static uint16_t row[4096];
-    FILE *fp = fopen(path, "wb");
-    if (!fp) { fprintf(stderr, "cannot write %s\n", path); return; }
-    fprintf(fp, "P6\n%u %u\n255\n", HAL_VIDEO_WIDTH, HAL_VIDEO_HEIGHT);
-    for (uint32_t y = 0; y < HAL_VIDEO_HEIGHT; y++) {
-        memset(row, 0, sizeof(uint16_t) * HAL_VIDEO_WIDTH);
-        dkong_video_render_scanline(&g_system, y, row);
-        for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) {
-            uint16_t c = row[x / 2u < VISIBLE_SRC_WIDTH ? x / 2u : VISIBLE_SRC_WIDTH - 1u];
-            fputc((int)(((c >> 11) & 0x1F) * 255 / 31), fp);
-            fputc((int)(((c >>  5) & 0x3F) * 255 / 63), fp);
-            fputc((int)(( c        & 0x1F) * 255 / 31), fp);
-        }
-    }
-    fclose(fp);
-    printf("[wrote %s at frame %ld]\n", path, g_frame);
+    if (host_ppm_write(path, ppm_render, &g_system))
+        printf("[wrote %s at frame %ld]\n", path, g_frame);
 }
 
 static void print_state(const char *tag) {
@@ -277,6 +266,10 @@ static const char *find_rom_dir(const char *explicit_dir) {
     return NULL;
 }
 
+#if defined(DKONG_HOST_SELFTEST)
+int dkong_video_selftest_column_vs_row(const dkong_system *sys);
+#endif
+
 static void usage(const char *argv0) {
     printf("usage: %s [options]\n"
            "  --rom DIR       ROM directory (default: search for dkong_assets/rom,\n"
@@ -311,6 +304,7 @@ int main(int argc, char **argv) {
     const char *rom_arg = NULL, *ppm_prefix = "frame";
     long frames = 3000, every = 0, digest_every = 0, ppm_every = 0, stall_lim = 0;
     long rotation = -1;
+    bool stretch = false;
     unsigned long long seed_cyc = 0;
     bool do_seed = false, want_dma = false, want_audio = false;
     const char *wav_path = NULL;
@@ -318,6 +312,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc)               rom_arg = argv[++i];
         else if (!strcmp(argv[i], "--rotation") && i + 1 < argc)     rotation = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--stretch"))                   stretch = true;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)       frames = atol(argv[++i]);
         else if (!strcmp(argv[i], "--every") && i + 1 < argc)        every = atol(argv[++i]);
         else if (!strcmp(argv[i], "--digest-every") && i + 1 < argc) digest_every = atol(argv[++i]);
@@ -346,6 +341,9 @@ int main(int argc, char **argv) {
 
     dkong_init(&g_system);
     if (rotation >= 0 && rotation <= 3) g_system.rotation = (uint8_t)rotation;
+    // Aspect-ratio correction (arcade_video_geom.h), applied after the
+    // machine init that built the maps.
+    if (stretch) av_geom_set_stretch(true);
 
     uint16_t err = 0;
     if (!dkong_load_assets(&g_system, &err)) {
@@ -381,6 +379,19 @@ int main(int argc, char **argv) {
                            btn_active(7, g_frame),  // jump
                            false, false);           // rotate/mirror meta
         dkong_run_frame(&g_system);
+#if defined(DKONG_HOST_SELFTEST)
+        // Compare the two native-raster paths on every frame. Cheap enough
+        // here and it catches a divergence on the exact frame it appears,
+        // including ones that only show up with sprites at the 16-per-line
+        // limit or straddling the wraparound edge.
+        {
+            const int bad = dkong_video_selftest_column_vs_row(&g_system);
+            if (bad) {
+                printf("SELFTEST FAIL: frame %ld, %d mismatched pixels\n", g_frame, bad);
+                return 1;
+            }
+        }
+#endif
         if (g_wav) wav_pump();
 
         if (every > 0 && (g_frame % every) == 0) {

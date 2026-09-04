@@ -19,6 +19,7 @@
 // Core 0: game emulation, input polling, board-to-game input mapping.
 // Core 1: hal_video_run() -- drives the DVI signal; never returns.
 #include <arcade_hal_video.h>
+#include <arcade_video_geom.h>
 #include <arcade_hal_input.h>
 #include <galaga_machine.h>
 #include <galaga_video.h>
@@ -49,6 +50,20 @@ void setup() {
     // hal_video_init() (struct/queue setup only -- does not start the
     // physical DVI signal, does not touch storage).
     galaga_init(&g_system);
+
+    // Boot straight into a chosen rotation, for measuring one orientation
+    // without a hand on the rotate button:
+    //   arduino-cli compile --build-property compiler.cpp.extra_flags=-DTEST_ROTATION=0
+    // 0 = landscape, 1 = 90 CCW tate, 2 = 180, 3 = 90 CW tate (this game's
+    // default -- see galaga_init() and DEVNOTES #33).
+#ifdef TEST_ROTATION
+    g_system.rotation = (uint8_t)(TEST_ROTATION);
+#endif
+    // Aspect-ratio correction (arcade_video_geom.h); -DTEST_STRETCH=1 to
+    // A/B it against the historical 1:1 layout.
+#ifdef TEST_STRETCH
+    av_geom_set_stretch(TEST_STRETCH != 0);
+#endif
     Serial.println("[galaga] galaga_init() done (hal_video_init() called)");
 
     // Storage/ROM/PROM loading -- blocking, can be slow (SD card
@@ -95,6 +110,35 @@ void loop() {
     bool fire   = hal_input_read(HAL_BTN_SHOOT);
     bool rotate = hal_input_read(HAL_BTN_ROTATE);
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
+    // Button 1: aspect correction on/off. Edge-detected inside
+    // av_geom_toggle_on_edge(); the right setting depends on the monitor,
+    // not the game, so it is a runtime toggle rather than a build flag.
+    av_geom_toggle_on_edge(hal_input_read(HAL_BTN_STRETCH));
+
+    // Scripted play, so this game's WORST case is reachable without a hand
+    // on the buttons and lands on the same frame every run:
+    //   --build-property compiler.cpp.extra_flags=-DTEST_AUTOSTART=1
+    //
+    // Coin, start, then move right and keep shooting once the formation is
+    // in. The worst case is the full alien formation PLUS player bullets
+    // PLUS an explosion sprite -- the formation on its own does not red-line
+    // (DEVNOTES #82).
+    //
+    // Two things this got wrong first time. The coin was pressed at frame
+    // 300, before the boot RAM test finished, so the 51XX never saw a
+    // credit -- hence the second-long holds well past it. And fire is a
+    // ONE-SHOT pulse (#32): holding it fires once, so it has to be toggled.
+#ifdef TEST_AUTOSTART
+    {
+        static uint32_t autof = 0;
+        autof++;
+        const uint32_t f = autof % 6000u;   // repeats, so a game over re-enters
+        if (f > 900u  && f < 960u)  coin   = true;
+        if (f > 1080u && f < 1140u) start1 = true;
+        if (f > 1500u && f < 1600u) right  = true;   // slide off centre
+        if (f > 1500u)              fire   = ((f / 12u) & 1u) != 0;
+    }
+#endif
 
     galaga_input_update(&g_system, coin, start1, start2, left, right, fire, rotate, mirror);
 
@@ -136,8 +180,18 @@ void loop() {
     // alongside it because the suspected trigger is a full enemy formation
     // (far more sprites than attract mode ever shows) combined with the
     // audio of the player firing.
+    // A MAX ALONE IS NOT A COST. render_max sent five optimisation attempts
+    // at the wrong 77% of this frame because a max over a 60-frame window
+    // reports the worst event a second, not the typical scanline
+    // (DEVNOTES #84). Totals are kept beside every maximum from here on:
+    // work_sum/60 is the mean, and mean-vs-max is what says whether a
+    // budget problem is throughput (grind the work down) or burst (give
+    // the pipeline runway).
     static uint32_t work_max = 0, sprites_max = 0;
+    static uint32_t work_sum = 0, blocked_sum = 0, blocked_max = 0, work_n = 0;
     if (work_us > work_max) work_max = work_us;
+    if (blocked_us > blocked_max) blocked_max = blocked_us;
+    work_sum += work_us; blocked_sum += blocked_us; work_n++;
     uint32_t nspr = galaga_video_debug_sprite_count();
     if (nspr > sprites_max) sprites_max = nspr;
 
@@ -165,12 +219,18 @@ void loop() {
         Serial.print(frame_us / 1000);
         Serial.print("ms (work ");
         Serial.print(work_us);
+        Serial.print("us, work_MEAN ");
+        Serial.print(work_n ? work_sum / work_n : 0);
         Serial.print("us, work_MAX ");
         Serial.print(work_max);
         Serial.print("us, sprites_max ");
         Serial.print(sprites_max);
         Serial.print(", blocked ");
         Serial.print(blocked_us);
+        Serial.print("us, blk_MEAN ");
+        Serial.print(work_n ? blocked_sum / work_n : 0);
+        Serial.print("us, blk_MAX ");
+        Serial.print(blocked_max);
         {   // starvation detector -- see galaga_machine.h. noblock_run >= 8
             // (the DVI queue depth) means Core 1 ran dry: a red line.
             uint32_t rmax = 0, nbrun = 0;
@@ -179,10 +239,54 @@ void loop() {
             Serial.print(rmax);
             Serial.print("us, noblock_run ");
             Serial.print(nbrun);
-            if (nbrun >= 8) Serial.print(" *** STARVED");
+            // NOT a starvation signal any more -- see
+            // hal_video_take_min_valid_level(). Kept only as a rough
+            // "how often was Core 0 not ahead" figure.
         }
-        Serial.print("us_x");
-        Serial.print("us), ");
+        {   // per-layer render split -- see galaga_video.h / DEVNOTES #83
+            uint32_t st=0, sp=0, ti=0, wt=0, ws=0, wp=0, wl=0;
+            galaga_debug_take_layers(&st, &sp, &ti, &wt, &ws, &wp, &wl);
+            Serial.print("us, layers star/spr/tile ");
+            Serial.print(st/60); Serial.print("/");
+            Serial.print(sp/60); Serial.print("/");
+            Serial.print(ti/60);
+            Serial.print("us_pf, worst scanline ");
+            Serial.print(wt); Serial.print("us = ");
+            Serial.print(ws); Serial.print("+");
+            Serial.print(wp); Serial.print("+");
+            Serial.print(wl);
+        }
+        {   // frame cost split + peak drawdown -- see galaga_machine.h
+            uint32_t cm=0, cs=0, c2=0, cc=0, cr=0, cb=0, dmax=0;
+            galaga_debug_take_frame_costs(&cm, &cs, &c2, &cc, &cr, &cb, &dmax);
+            Serial.print("us, cpu main/sub/sub2 ");
+            Serial.print(cm/60); Serial.print("/");
+            Serial.print(cs/60); Serial.print("/");
+            Serial.print(c2/60);
+            Serial.print("us_pf (cpu_tot ");
+            Serial.print(cc/60);
+            Serial.print(" rend ");
+            Serial.print(cr/60);
+            Serial.print(" begin ");
+            Serial.print(cb/60);
+            Serial.print("), DEFICIT_MAX ");
+            Serial.print(dmax);
+            Serial.print("us = ");
+            Serial.print(dmax / 63);
+            Serial.print(" buffers (have 8)");
+        }
+        Serial.print(", rot ");
+        Serial.print((int)g_system.rotation);
+        Serial.print(" stretch ");
+        Serial.print((int)av_geom_get_stretch());
+        Serial.print(" starve ");
+        Serial.print(hal_video_take_starve_count());
+        Serial.print(" minq ");
+        Serial.print(hal_video_take_min_valid_level());
+        Serial.print("/");
+        Serial.print(hal_video_scanbuf_count());
+        Serial.print("/60), ");
+        work_sum = blocked_sum = work_n = 0; blocked_max = 0; // work_max/sprites_max reset below
         Serial.print(frame_count * 1000UL / (millis() - loop_start_ms + 1));
         Serial.print(", isr ");
         { uint32_t iu=0, ic=0, im=0;

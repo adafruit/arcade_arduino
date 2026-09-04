@@ -14,12 +14,12 @@
 // unmodified on a Mac against this file.
 //
 // Video geometry is copied from ArcadeBoard_FruitJam's real values
-// (hal_video_fruitjam.cpp: 640x480, DVI_VERTICAL_REPEAT_USED 2 ->
-// 240 scanlines/frame) so the machine layer's per-frame CPU/scanline
-// interleaving executes with the SAME shape it does on hardware. Changing
-// these would change how run_frame_interleaved() slices CPU time, which is
-// exactly the behaviour under investigation -- keep them in sync with the
-// board if the board's ever change.
+// (hal_video_fruitjam.cpp: a 320x240 logical canvas, both axes doubled to
+// the 640x480 physical output) so the machine layer's per-frame
+// CPU/scanline interleaving executes with the SAME shape it does on
+// hardware. Changing these would change how run_frame_interleaved() slices
+// CPU time, which is exactly the behaviour under investigation -- keep them
+// in sync with the board if the board's ever change.
 #include "arcade_hal_video.h"
 #include "arcade_hal_input.h"
 #include "arcade_hal_storage.h"
@@ -35,10 +35,12 @@ HostSerial Serial;
 
 // --- video ---------------------------------------------------------------
 
-const uint32_t HAL_VIDEO_WIDTH               = 640u;
-const uint32_t HAL_VIDEO_HEIGHT              = 480u;
-const uint32_t HAL_VIDEO_SCANLINES_PER_FRAME = 240u; // 480 / vertical repeat 2
+const uint32_t HAL_VIDEO_WIDTH  = 320u; // 640 physical / horizontal repeat 2
+const uint32_t HAL_VIDEO_HEIGHT = 240u; // 480 physical / vertical repeat 2
 
+// Matches the board's own deliberate slack (see hal_video_fruitjam.cpp):
+// twice the canvas width, so a renderer that has not been converted to
+// canvas coordinates overruns into unused space rather than off the end.
 static uint16_t host_scanbuf[640];
 
 bool hal_video_init(void) { return true; }

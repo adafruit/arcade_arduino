@@ -15,6 +15,7 @@
 #include "galaga_assets.h"
 #include "galaga_audio.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 #include "arcade_hal_audio.h"
 #include "arcade_hal_input.h"
 #include "arcade_hal_storage.h"
@@ -64,6 +65,78 @@
 // of never-reset running counter), but never more than one quantum slice
 // past its current position -- this is what makes the interleave actually
 // interleave instead of finishing one CPU before starting the next.
+// FRAME COST TRACE, opt-in: -DGALAGA_FRAME_TRACE=1
+//
+// #84 established that rendering is 23% of Galaga's frame. This splits the
+// other 77% (the three Z80s) and, more importantly, measures the PEAK
+// CUMULATIVE DEFICIT -- the number that says how deep the scanline queue
+// has to be.
+//
+// Why a deficit and not a total: mean per-frame work is 13.2ms against a
+// 15.24ms active-video window, and Core 0 blocks 1.8-2.9ms every frame
+// waiting for a free buffer. Galaga has ~2ms of average headroom and still
+// starves 61 times a frame, so the shortfall is a BURST, not a throughput
+// gap (DEVNOTES #85). A burst is bounded by runway, and runway is
+// N_SCANBUF * 63.49us -- 508us today.
+//
+// The model: each submitted scanline earns 63.49us (the active-video line
+// period at 800x525 / 25.2MHz with vertical repeat 2) and spends what it
+// actually costs. Blocking in acquire is excluded on purpose -- blocking
+// means the queue was FULL, i.e. Core 0 was ahead. Clamped at zero, so a
+// long catch-up cannot bank credit the real queue could not hold; that
+// makes the result a conservative LOWER bound on the runway needed.
+#if defined(GALAGA_FRAME_TRACE) && (defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE))
+#include <Arduino.h> // micros(); the starvation detector below includes it too
+#define FT_NOW() micros()
+#define FT_ADD(acc, t0) do { (acc) += micros() - (t0); } while (0)
+#define FT_SET(v, t0)  do { (v) = micros() - (t0); } while (0)
+#define FT_ACC(acc, v) do { (acc) += (v); } while (0)
+#define FT_LINE_US 63u  // 63.49us, truncated -- micros() quantises to 1us anyway
+static uint32_t g_ft_main, g_ft_sub, g_ft_sub2;   // per-CPU, per window
+static uint32_t g_ft_cpu, g_ft_render, g_ft_begin;
+static uint32_t g_ft_defmax;                       // peak drawdown, us
+static uint32_t g_ft_def;                          // running drawdown
+#define FT_DEFICIT_RESET() do { g_ft_def = 0; } while (0)
+#define FT_DEFICIT_LINE(t_line) do {                                       \
+    const uint32_t _t = (t_line);                                          \
+    if (_t > FT_LINE_US) {                                                 \
+        g_ft_def += _t - FT_LINE_US;                                       \
+        if (g_ft_def > g_ft_defmax) g_ft_defmax = g_ft_def;                \
+    } else {                                                               \
+        const uint32_t _c = FT_LINE_US - _t;                               \
+        g_ft_def = (g_ft_def > _c) ? (g_ft_def - _c) : 0u;                 \
+    }                                                                      \
+} while (0)
+#else
+#define FT_NOW() 0u
+#define FT_ADD(acc, t0) do { (void)(t0); } while (0)
+#define FT_SET(v, t0)  do { (void)(t0); } while (0)
+#define FT_ACC(acc, v) do { (void)(v); } while (0)
+#define FT_DEFICIT_RESET() do { } while (0)
+#define FT_DEFICIT_LINE(t_line) do { (void)(t_line); } while (0)
+#endif
+
+// Per-CPU host time, the render/begin-frame totals, and the peak cumulative
+// scanline deficit. All reset on read. Device-only and opt-in; zeros
+// otherwise. `cpu_us` includes the interleave loop's own overhead, so
+// cpu_us - (main+sub+sub2) is that overhead plus this trace's own micros()
+// calls. See DEVNOTES #85.
+void galaga_debug_take_frame_costs(uint32_t *main_us, uint32_t *sub_us, uint32_t *sub2_us,
+                                   uint32_t *cpu_us, uint32_t *render_us,
+                                   uint32_t *begin_us, uint32_t *deficit_max_us) {
+#if defined(GALAGA_FRAME_TRACE) && (defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE))
+    *main_us = g_ft_main; *sub_us = g_ft_sub; *sub2_us = g_ft_sub2;
+    *cpu_us = g_ft_cpu; *render_us = g_ft_render; *begin_us = g_ft_begin;
+    *deficit_max_us = g_ft_defmax;
+    g_ft_main = g_ft_sub = g_ft_sub2 = 0;
+    g_ft_cpu = g_ft_render = g_ft_begin = 0;
+    g_ft_defmax = 0;
+#else
+    *main_us = *sub_us = *sub2_us = 0;
+    *cpu_us = *render_us = *begin_us = *deficit_max_us = 0;
+#endif
+}
+
 GALAGA_M_RAMFUNC static void step_cpu_slice(z80 *cpu, uint32_t start, uint32_t target) {
     uint32_t elapsed = (uint32_t)(cpu->cyc - start);
     if (elapsed >= target) return;
@@ -145,7 +218,9 @@ GALAGA_M_RAMFUNC static void interleave_to_target(galaga_system *sys, uint32_t s
                           (uint32_t)(sys->cpu_sub2.cyc - start_sub2) < sub_target;
         if (!main_more && !sub_more && !sub2_more) break;
         if (main_more) {
+            const uint32_t ft_m = FT_NOW();
             step_cpu_slice(&sys->cpu_main, start_main, target);
+            FT_ADD(g_ft_main, ft_m);
             // DEBUG: see galaga_machine.h's debug_checksum_pass/_fail
             // field comment -- red-screen investigation instrumentation.
             if (sys->cpu_main.pc == 0x34C9) sys->debug_checksum_pass++;
@@ -160,9 +235,15 @@ GALAGA_M_RAMFUNC static void interleave_to_target(galaga_system *sys, uint32_t s
                 sys->io06_nmi_next += sys->io06_nmi_period;
             }
         }
-        if (sub_more)  step_cpu_slice(&sys->cpu_sub,  start_sub,  sub_target);
+        if (sub_more) {
+            const uint32_t ft_s = FT_NOW();
+            step_cpu_slice(&sys->cpu_sub,  start_sub,  sub_target);
+            FT_ADD(g_ft_sub, ft_s);
+        }
         if (sub2_more) {
+            const uint32_t ft_s2 = FT_NOW();
             step_cpu_slice(&sys->cpu_sub2, start_sub2, sub_target);
+            FT_ADD(g_ft_sub2, ft_s2);
             // Sub2's twice-per-frame NMI -- see galaga_machine.h's
             // nmi2_fired_a/_b field comment for the citation.
             if (!sys->nmi2_fired_a && (int32_t)(sys->cpu_sub2.cyc - nmi2_mark_a) >= 0) {
@@ -193,33 +274,13 @@ static void fire_interrupts(galaga_system *sys) {
     if (sys->irq2_enable) z80_gen_int(&sys->cpu_sub, 0);
 }
 
-// Landscape/180-degree rotation: same reasoning as
-// pacman_machine.cpp's run_frame_sequential() -- those orientations need
-// the whole frame's final VRAM state before galaga_draw_frame()'s
-// frame_cache can render even one scanline, so there's no benefit to
-// interleaving CPU execution with scanline submission here.
 // Peak per-scanline render cost and the longest run of non-blocking scanline
 // acquires -- the starvation detector described at the loop that feeds it.
 #include <Arduino.h> // micros() for that detector
 static uint32_t g_render_max_us = 0, g_noblock_run = 0, g_noblock_run_max = 0;
 
-static void run_frame_sequential(galaga_system *system) {
-    uint32_t start_main = system->cpu_main.cyc;
-    uint32_t start_sub  = system->cpu_sub.cyc;
-    uint32_t start_sub2 = system->cpu_sub2.cyc;
-    system->nmi2_fired_a = false;
-    system->nmi2_fired_b = false;
-    galaga_video_begin_frame(system); // latch this frame's sprites (see galaga_video.h)
-
-    interleave_to_target(system, start_main, start_sub, start_sub2, GALAGA_CYCLES_PER_FRAME,
-                          start_sub2 + GALAGA_CYCLES_PER_FRAME / 4,
-                          start_sub2 + 3UL * GALAGA_CYCLES_PER_FRAME / 4);
-    fire_interrupts(system);
-    galaga_draw_frame(system);
-}
-
-// Tate/CW rotation: interleaves the 3-CPU stepping WITH per-scanline
-// rendering, evenly spread across HAL_VIDEO_SCANLINES_PER_FRAME calls --
+// EVERY rotation: interleaves the 3-CPU stepping WITH per-scanline
+// rendering, evenly spread across HAL_VIDEO_HEIGHT calls --
 // same DEVNOTES.md problem #19 rationale pacman_machine.cpp's
 // run_frame_interleaved() documents in full (never run a whole frame's
 // CPU cycles before the first hal_video_acquire_scanline() call).
@@ -227,18 +288,26 @@ GALAGA_M_RAMFUNC static void run_frame_interleaved(galaga_system *system) {
     uint32_t start_main = system->cpu_main.cyc;
     uint32_t start_sub  = system->cpu_sub.cyc;
     uint32_t start_sub2 = system->cpu_sub2.cyc;
-    uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
     system->nmi2_fired_a = false;
     system->nmi2_fired_b = false;
+    const uint32_t ft_b = FT_NOW();
     galaga_video_begin_frame(system); // latch this frame's sprites (see galaga_video.h)
+    FT_ADD(g_ft_begin, ft_b);
+    // Core 1 frees all N_SCANBUF buffers at frame end, so each frame starts
+    // with a full runway -- the drawdown is a within-frame quantity.
+    FT_DEFICIT_RESET();
     uint32_t nmi2_mark_a = start_sub2 + GALAGA_CYCLES_PER_FRAME / 4;
     uint32_t nmi2_mark_b = start_sub2 + 3UL * GALAGA_CYCLES_PER_FRAME / 4;
 
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint32_t target_delta =
-            (uint32_t)((uint64_t)GALAGA_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_SCANLINES_PER_FRAME);
+            (uint32_t)((uint64_t)GALAGA_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_HEIGHT);
+        uint32_t ft_cpu_line = 0;
+        const uint32_t ft_c = FT_NOW();
         interleave_to_target(system, start_main, start_sub, start_sub2, target_delta,
                               nmi2_mark_a, nmi2_mark_b);
+        FT_SET(ft_cpu_line, ft_c);
+        FT_ACC(g_ft_cpu, ft_cpu_line);
 
         // Starvation detector. A red line means Core 1's VALID scanline
         // queue emptied. That cannot be seen directly from here, but its
@@ -247,8 +316,10 @@ GALAGA_M_RAMFUNC static void run_frame_interleaved(galaga_system *system) {
         // buffer. When Core 0 falls behind, free buffers are plentiful and
         // acquire stops blocking. So a RUN of consecutive non-blocking
         // acquires is Core 0 losing ground, and a run approaching the
-        // queue depth (8, a hard libdvi ceiling) means the valid queue has
-        // drained and a red line is imminent.
+        // queue depth (N_SCANBUF -- 16 since the runway change of
+        // DEVNOTES #85, not the 8 this comment used to call a hard libdvi
+        // ceiling) means the valid queue has drained and a red line is
+        // imminent.
         //
         // This exists because per-frame `work` was misleading here: it
         // peaked at 14946us of 16660 -- 90%, never over -- while red lines
@@ -272,10 +343,15 @@ GALAGA_M_RAMFUNC static void run_frame_interleaved(galaga_system *system) {
             g_noblock_run = 0;
         }
         uint32_t r0 = micros();
-        galaga_video_render_scanline(system, i * step, buf);
+        galaga_video_render_scanline(system, i, buf);
         uint32_t r_us = micros() - r0;
         if (r_us > g_render_max_us) g_render_max_us = r_us;
+        FT_ACC(g_ft_render, r_us);
         hal_video_submit_scanline(buf);
+        // This scanline's cost EXCLUDING the acquire wait: CPU slice +
+        // render. The wait is omitted deliberately -- blocking there means
+        // the queue was FULL, which is Core 0 ahead, not behind.
+        FT_DEFICIT_LINE(ft_cpu_line + r_us);
     }
 
     fire_interrupts(system);
@@ -295,6 +371,13 @@ void galaga_init(galaga_system *system) {
     z80_init(&system->cpu_sub);
     z80_init(&system->cpu_sub2);
     galaga_ports_wire(system);
+
+    // Build the canvas mapping for this raster (arcade_video_geom.h). Must
+    // happen before the first frame -- the renderer reads av_tate/av_yoko on
+    // every scanline and they are all zeroes until this runs. LONG axis
+    // first (GAME_WIDTH), then SHORT (GAME_HEIGHT).
+    av_geom_init(GALAGA_GAME_WIDTH, GALAGA_GAME_HEIGHT);
+
 
     galaga_51xx_init(&system->io51);
     galaga_54xx_init(&system->io54);
@@ -345,9 +428,9 @@ bool galaga_load_assets(galaga_system *system, uint16_t *out_error_color) {
 }
 
 void galaga_run_frame(galaga_system *system) {
-    if (system->rotation == 1 || system->rotation == 3) {
-        run_frame_interleaved(system);
-    } else {
-        run_frame_sequential(system);
-    }
+    // One path for every rotation. galaga_video.cpp's
+    // render_native_column() removed the reason landscape/180 ever needed a
+    // whole-frame burst (DEVNOTES #79), and with it the 129KB frame_cache
+    // and the sequential loop that fed it.
+    run_frame_interleaved(system);
 }

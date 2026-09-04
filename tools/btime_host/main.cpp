@@ -39,6 +39,7 @@
 #include "btime_ports.h"
 #include "btime_audio.h"
 #include "arcade_hal_video.h"
+#include "host_ppm.h"
 #include "m6502.h"
 
 extern "C" void host_storage_set_rom_dir(const char *dir);
@@ -110,28 +111,17 @@ static uint64_t digest_state(void) {
     return h;
 }
 
-// Only the first half of each scanline buffer is displayed -- libdvi's
-// 16bpp path encodes h_active_pixels/2 source pixels across the full line.
-// See tools/README.md; this doubles so the dump looks like the monitor.
-#define VISIBLE_SRC_WIDTH (HAL_VIDEO_WIDTH / 2u)
+// Sampling and pixel-doubling live in host_ppm.cpp -- read its header
+// before trusting a dump. Burger Time is the one game whose landscape
+// sampling was already 1:1 (240 raster columns onto 240 submitted
+// scanlines), so this change moves its dumps least.
+static void ppm_render(void *ctx, uint32_t dvi_y, uint16_t *buf) {
+    btime_video_render_scanline((const btime_system *)ctx, dvi_y, buf);
+}
 
 static void dump_ppm(const char *path) {
-    static uint16_t row[4096];
-    FILE *fp = fopen(path, "wb");
-    if (!fp) { fprintf(stderr, "cannot write %s\n", path); return; }
-    fprintf(fp, "P6\n%u %u\n255\n", HAL_VIDEO_WIDTH, HAL_VIDEO_HEIGHT);
-    for (uint32_t y = 0; y < HAL_VIDEO_HEIGHT; y++) {
-        memset(row, 0, sizeof(uint16_t) * HAL_VIDEO_WIDTH);
-        btime_video_render_scanline(&g_system, y, row);
-        for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) {
-            uint16_t c = row[x / 2u < VISIBLE_SRC_WIDTH ? x / 2u : VISIBLE_SRC_WIDTH - 1u];
-            fputc((int)(((c >> 11) & 0x1F) * 255 / 31), fp);
-            fputc((int)(((c >>  5) & 0x3F) * 255 / 63), fp);
-            fputc((int)(( c        & 0x1F) * 255 / 31), fp);
-        }
-    }
-    fclose(fp);
-    printf("[wrote %s at frame %ld]\n", path, g_frame);
+    if (host_ppm_write(path, ppm_render, &g_system))
+        printf("[wrote %s at frame %ld]\n", path, g_frame);
 }
 
 static void print_state(const char *tag) {

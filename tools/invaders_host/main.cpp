@@ -31,6 +31,7 @@
 #include "invaders_assets.h"
 #include "invaders_input.h"
 #include "arcade_hal_video.h"
+#include "host_ppm.h"
 
 extern "C" void host_storage_set_rom_dir(const char *dir);
 extern "C" void host_storage_set_samples_dir(const char *dir);
@@ -64,40 +65,18 @@ static uint64_t digest_state(void) {
     return h;
 }
 
-// Only the first half of each scanline buffer is ever displayed. The
-// vendored libdvi's 16bpp path encodes `h_active_pixels / 2` source pixels
-// across the full 640-pixel line -- _dvi_prepare_scanline_16bpp() in
-// PicoDVI - Adafruit Fork/src/libdvi/dvi.c passes `pixwidth / 2` to
-// tmds_encode_data_channel_16bpp() -- i.e. it doubles horizontally, exactly
-// as dvi_vertical_repeat=2 doubles vertically. That is why every renderer in
-// this project (all four games) lays its picture out against a 320-wide
-// visible axis while HAL_VIDEO_WIDTH is 640: see invaders_video.cpp's
-// TATE_BX/LAND_BX, whose comments are all written as "(320 - N) / 2".
-//
-// So a raw 640-wide dump of the buffer looks like the game is squeezed into
-// the left half of a half-black screen, which is a dump artifact and NOT
-// what the monitor shows. Doubling here reproduces the real picture.
-#define VISIBLE_SRC_WIDTH (HAL_VIDEO_WIDTH / 2u)
-
 // Renders a full frame through the REAL renderer and writes it as a PPM, so
 // screen content can be inspected with no hardware and no camera.
+// Sampling and pixel-doubling live in host_ppm.cpp -- read its header
+// before trusting a dump. Note this renderer takes its system pointer
+// LAST, unlike its siblings.
+static void ppm_render(void *ctx, uint32_t dvi_y, uint16_t *buf) {
+    invaders_video_render_scanline(dvi_y, buf, (const arcade_system *)ctx);
+}
+
 static void dump_ppm(const char *path) {
-    static uint16_t row[4096];
-    FILE *fp = fopen(path, "wb");
-    if (!fp) { fprintf(stderr, "cannot write %s\n", path); return; }
-    fprintf(fp, "P6\n%u %u\n255\n", HAL_VIDEO_WIDTH, HAL_VIDEO_HEIGHT);
-    for (uint32_t y = 0; y < HAL_VIDEO_HEIGHT; y++) {
-        memset(row, 0, sizeof(uint16_t) * HAL_VIDEO_WIDTH);
-        invaders_video_render_scanline(y, row, &g_system);
-        for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) {
-            uint16_t c = row[x / 2u < VISIBLE_SRC_WIDTH ? x / 2u : VISIBLE_SRC_WIDTH - 1u];
-            fputc((int)(((c >> 11) & 0x1F) * 255 / 31), fp);
-            fputc((int)(((c >>  5) & 0x3F) * 255 / 63), fp);
-            fputc((int)(( c        & 0x1F) * 255 / 31), fp);
-        }
-    }
-    fclose(fp);
-    printf("[wrote %s at frame %ld]\n", path, g_frame);
+    if (host_ppm_write(path, ppm_render, &g_system))
+        printf("[wrote %s at frame %ld]\n", path, g_frame);
 }
 
 static void print_state(const char *tag) {

@@ -29,6 +29,7 @@
 #include "pacman_assets.h"
 #include "pacman_input.h"
 #include "arcade_hal_video.h"
+#include "host_ppm.h"
 #include "z80.h"
 
 extern "C" void host_storage_set_rom_dir(const char *dir);
@@ -38,24 +39,17 @@ pacman_system g_system;
 static long g_frame = 0;
 
 // Renders a full frame through the REAL renderer and writes it as a PPM,
-// so screen content can be inspected with no hardware and no camera.
+// so screen content can be inspected with no hardware and no camera. The
+// sampling and pixel-doubling live in host_ppm.cpp -- read its header
+// before trusting a dump, because the private copy this replaced rendered
+// landscape at a sample rate the device does not use.
+static void ppm_render(void *ctx, uint32_t dvi_y, uint16_t *buf) {
+    pacman_video_render_scanline((const pacman_system *)ctx, dvi_y, buf);
+}
+
 static void dump_ppm(const char *path) {
-    static uint16_t row[4096];
-    FILE *fp = fopen(path, "wb");
-    if (!fp) { fprintf(stderr, "cannot write %s\n", path); return; }
-    fprintf(fp, "P6\n%u %u\n255\n", HAL_VIDEO_WIDTH, HAL_VIDEO_HEIGHT);
-    for (uint32_t y = 0; y < HAL_VIDEO_HEIGHT; y++) {
-        memset(row, 0, sizeof(uint16_t) * HAL_VIDEO_WIDTH);
-        pacman_video_render_scanline(&g_system, y, row);
-        for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) {
-            uint16_t c = row[x];
-            fputc((int)(((c >> 11) & 0x1F) * 255 / 31), fp);
-            fputc((int)(((c >>  5) & 0x3F) * 255 / 63), fp);
-            fputc((int)(( c        & 0x1F) * 255 / 31), fp);
-        }
-    }
-    fclose(fp);
-    printf("[wrote %s at frame %ld]\n", path, g_frame);
+    if (host_ppm_write(path, ppm_render, &g_system))
+        printf("[wrote %s at frame %ld]\n", path, g_frame);
 }
 
 static void print_state(const char *tag) {

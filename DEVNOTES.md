@@ -3403,10 +3403,21 @@ Derivations, the per-game aspect tables and the fix plan are in
   hardware-measured fix in `invaders_pico` (canvas 320x480, real 2:1
   pixels); after #10 it takes 240 samples of a 256- or 288-entry axis
   instead of 480, turning a lossless upsample into a downsample that
-  silently drops 16 native lines (48 in the Namco games) on an uneven
-  truncating-division schedule. That is #23's irregular grid, and it is the
-  shared formula in every game except Burger Time. **Positions transfer
-  across a sample-rate change; ratios do not.**
+  silently drops 16 native lines (48 in the Namco games). It is the shared
+  formula in every game except Burger Time. **Positions transfer across a
+  sample-rate change; ratios do not.**
+
+- **Those dropped lines are EVENLY spaced -- do not describe this as ragged
+  sampling.** Because the submission count is exactly half the physical
+  height, the ratios are exact (256/240 = 16/15, 288/240 = 6/5), so the
+  drops land on a perfectly regular stride: every 16th source line for the
+  256-wide games, every 6th for the 288-wide ones, verified by enumerating
+  the formula over all 240 device samples. **The defect is not raggedness,
+  it is that 16 or 48 whole raster lines are never drawn at all** -- a
+  one-pixel-thin feature vanishes entirely when it lands on a dropped line
+  and reappears when it moves one pixel. #23's "irregular" test grid is a
+  *regular* drop beating against regularly spaced content: a grid whose
+  pitch is not coprime with 6 gets some cells narrowed and others not.
 
 - **No renderer scales to the screen.** `TATE_BX = (320 - 256) / 2` is a
   *centring* constant. The only scale factor in the project is
@@ -3439,11 +3450,16 @@ Derivations, the per-game aspect tables and the fix plan are in
   landscape fix is a column-render primitive rather than a bigger queue or a
   second frame buffer.
 
-- **The host harness cannot see either failure.** `dump_ppm()` loops
-  `y = 0 .. HAL_VIDEO_HEIGHT-1`, rendering **every** physical row -- 480
-  samples, the *pre-#10* rate. It renders landscape the lossless way and so
-  structurally cannot reproduce the dropped-row bug at all. (It cannot see
-  red either, but that part is deliberate and documented in `hal_host.cpp`.)
-  **Fix `dump_ppm()` before changing any renderer**, or the change is
-  validated against a model that does not contain the defect -- and expect
-  to regenerate every byte-compare baseline when you do.
+- **The host harness could not see the dropped rows, and now can (fixed).**
+  Every `dump_ppm()` looped `y = 0 .. HAL_VIDEO_HEIGHT-1`, rendering **every**
+  physical row -- 480 samples, the *pre-#10* rate -- so it drew landscape the
+  lossless way (288 of 288 source columns, 0 dropped) while the device drops
+  48. It could not reproduce the defect at all, which makes it a wrong
+  instrument, and **a wrong instrument is worse than a wrong subject: it does
+  not look like a defect, it looks like evidence.** All six now share
+  `tools/host_common/host_ppm.cpp`, which samples at the device's rate and
+  reproduces both doublings; dumps stay 640x480 and are verifiably a 2x
+  blow-up of the 320x240 canvas (adjacent rows and columns identical in
+  pairs). **This invalidated every stored byte-compare baseline.** The
+  harness still cannot see red, but that part is deliberate and documented
+  in `hal_host.cpp` -- starvation is device-only, which is what #75 measured.

@@ -19,6 +19,7 @@ MACHINE_SRC="${MACHINE_SRC:-$LIBS/ArcadeMachine_Invaders/src}"
 OUT="${OUT:-$HERE/invaders_host}"
 
 INC="-I$HERE/../host_common/shim \
+     -I$HERE/../host_common \
      -I$LIBS/ArcadeHAL/src \
      -I$LIBS/ArcadeCPU_i8080/src \
      -I$MACHINE_SRC"
@@ -33,6 +34,7 @@ cc -O2 -g -std=c11 -Wall $INC -c "$LIBS/ArcadeCPU_i8080/src/i8080.c" -o "$OBJ/i8
 c++ -O2 -g -std=c++17 -Wall -Wno-unused-parameter $INC \
     "$MACHINE_SRC"/*.cpp \
     "$HERE/../host_common/hal_host.cpp" \
+    "$HERE/../host_common/host_ppm.cpp" \
     "$HERE/main.cpp" \
     "$OBJ/i8080.o" \
     -o "$OUT"

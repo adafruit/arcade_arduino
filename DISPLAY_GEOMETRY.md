@@ -142,16 +142,31 @@ samples of a 256- or 288-entry axis instead of 480**:
 dy = dvi_y * GAME_WIDTH / HAL_VIDEO_HEIGHT     with dvi_y in {0,2,4,...,478}
 ```
 
-| game | source cols | canvas rows | dropped | pattern |
+| game | source cols | canvas rows | dropped | spacing of the drops |
 |---|---|---|---|---|
-| Invaders / Lunar Rescue / DKong | 256 | 240 | 16 | every 16th |
-| Pac-Man / Ms. Pac-Man / Galaga | 288 | 240 | 48 | every 6th |
-| Burger Time | 240 | 240 | 0 | 1:1 |
+| Invaders / Lunar Rescue / DKong | 256 | 240 | 16 | exactly every 16th |
+| Pac-Man / Ms. Pac-Man / Galaga | 288 | 240 | 48 | exactly every 6th |
+| Burger Time | 240 | 240 | 0 | 1:1, nothing dropped |
 
 A lossless 1.875x **upsample** became a lossy 0.9375x **downsample** that
-silently drops whole native lines on an uneven truncating-division schedule.
-That is DEVNOTES #23's irregular test grid, and it is not Pac-Man-specific —
-it is the shared formula, in every game except Burger Time.
+silently drops whole native lines. It is not Pac-Man-specific — it is the
+shared formula, in every game except Burger Time.
+
+**The drops are evenly spaced, and that is worth being precise about**,
+because it is tempting (and wrong) to describe truncating division as
+producing a ragged pattern. Because the submission count is exactly half the
+physical height, the ratios come out exact — 256/240 = 16/15 and
+288/240 = 6/5 — so the dropped lines land on a perfectly regular stride,
+verified by enumerating the formula over all 240 device samples. As a
+nearest-neighbour downscale this is the best-behaved case there is.
+
+**The defect is not raggedness, it is that 16 or 48 whole raster lines are
+never drawn at all.** Any feature one pixel thin — a maze wall, a bullet, a
+character's outline — vanishes completely when it lands on a dropped line,
+and reappears when it moves one pixel. What #23 saw as an "irregular" test
+grid is a *regular* drop beating against regularly spaced content: a grid
+whose pitch is not coprime with 6 has some cells narrowed and others not,
+which reads as irregularity even though the sampling is uniform.
 
 **#10's own summary is the smoking gun:** *"This preserved every existing
 TATE_BY/TATE_BX/LAND_BX calibration constant unchanged."* True of the border
@@ -289,23 +304,51 @@ than that has to get it by *not bursting*, not by buffering.
 
 ---
 
-## 6. What the host harness cannot see
+## 6. What the host harness could not see — FIXED (Phase 0)
 
-`dump_ppm()` in every `tools/*_host/main.cpp` loops `y = 0 .. HAL_VIDEO_HEIGHT-1`
-and renders at **every** physical row — 480 samples per frame. The device
-submits 240. So the harness renders landscape at the *pre-#10* sample rate,
-which is the lossless one.
+`dump_ppm()` in every `tools/*_host/main.cpp` looped
+`y = 0 .. HAL_VIDEO_HEIGHT-1` and rendered at **every** physical row — 480
+samples per frame. The device submits 240. So the harness rendered landscape
+at the *pre-#10* sample rate, which is the lossless one:
 
-**The harness renders landscape the good way and structurally cannot
-reproduce the dropped-row bug at all.** Any geometry work validated against
-current PPM dumps is validated against a model that does not contain the
-defect. This must be fixed before, not after, the renderers change — and
-fixing it invalidates every stored byte-compare baseline, which will need
-regenerating.
+```
+480 samples (old dumper):  288 of 288 source columns drawn,   0 dropped
+240 samples (real device): 240 of 288 source columns drawn,  48 dropped
+```
 
-(The harness also cannot see red: `hal_host.cpp` returns 0 from
-`hal_video_take_starve_count()` by design, and says so. That part is
-already documented and correct — starvation is device-only.)
+**The harness rendered landscape the good way and structurally could not
+reproduce the dropped-row bug at all.** Anything validated against those
+dumps was validated against a model that did not contain the defect.
+
+**Fixed.** All six harnesses now share `tools/host_common/host_ppm.cpp`,
+which renders exactly `HAL_VIDEO_SCANLINES_PER_FRAME` times at the
+coordinate the board backend passes, then reproduces both the vertical
+repeat and the horizontal doubling on the way out. Output stays 640x480 and
+looks like the monitor. Verified on real dumps: adjacent output rows are
+identical in pairs and adjacent output columns are identical in pairs, so
+the file is provably a faithful 2x blow-up of the 320x240 canvas. Neither
+property held before.
+
+Measured off those dumps, Pac-Man at frame 3000 — and note how exactly this
+reproduces section 2's table:
+
+| rotation | picture occupies | should be |
+|---|---|---|
+| 0 (landscape) | logical cols 48..271 = **224** wide x 240 rows | 180 x 240 |
+| 1 (tate) | 288-wide field, **224** of 240 rows used | 320 x 240 |
+
+Landscape is 224/180 = **1.244x too wide**, the +24.4% predicted. Tate's
+224-of-240 rows against 288-of-320 columns is the +3.7% predicted for
+Pac-Man.
+
+This change invalidates every stored byte-compare baseline; `galaga_host`
+and `pacman_host` move most, since their old dumps did not horizontal-double
+at all.
+
+(The harness still cannot see red: `hal_host.cpp` returns 0 from
+`hal_video_take_starve_count()` by design, and says so. That part is correct
+— starvation is device-only, which is what section 4's hardware measurement
+was for.)
 
 Separately: `hal_video_take_starve_count()` was **declared in the HAL,
 implemented in the board backend, and called from nowhere** — the project's
@@ -320,9 +363,10 @@ DKong question answerable.
 Ordered by leverage. Phases 0 and 1 are what make everything after them
 verifiable.
 
-**Phase 0 — make the harness honest.** Change `dump_ppm()` to loop
-`HAL_VIDEO_SCANLINES_PER_FRAME` and emit what the monitor actually shows.
-Regenerate the byte-compare baselines.
+**Phase 0 — make the harness honest. DONE.** All six `dump_ppm()` bodies
+replaced by the shared `tools/host_common/host_ppm.cpp`; see section 6 for
+what it fixes and the dumps that verify it. Byte-compare baselines need
+regenerating.
 
 **Phase 1 — one coordinate space.** `HAL_VIDEO_WIDTH` -> 320,
 `HAL_VIDEO_HEIGHT` -> 240, `dvi_y` becomes 0..239, and every x2 and /2

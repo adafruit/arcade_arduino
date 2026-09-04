@@ -13,7 +13,7 @@ Status, newest first — the plan is section 7, the remaining work section 8:
 | 1 — one coordinate space (320x240 canvas) | **done**, verified byte-identical |
 | 2 — shared geometry module + aspect correction | **done**, correction OFF by default |
 | 2b — making the correction affordable | **partly**; DKong ~1.0ms and Burger Time ~1.6ms short in tate |
-| 3 — column primitive, kills the landscape red | **Pac-Man, Ms. Pac-Man, Burger Time, Galaga, Donkey Kong**; the two 8080bw games (Space Invaders, Lunar Rescue) left |
+| 3 — column primitive, kills the landscape red | **Pac-Man, Ms. Pac-Man, Burger Time, Galaga, Donkey Kong**. Space Invaders and Lunar Rescue need NO conversion: their VRAM is a 1-bit framebuffer, so a landscape scanline reads a raster column straight out of memory and there is no whole-frame burst to remove (DEVNOTES #95). Invaders is measured and clean; Lunar Rescue still wants the same confirmation |
 | 4 — collapse the rotation cases | not started |
 | 5 — cleanups | not started |
 

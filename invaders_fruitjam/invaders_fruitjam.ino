@@ -53,6 +53,22 @@ void setup() {
     // storage).
     invaders_init(&g_system);
 
+    // Rotation / aspect overrides for measurement, matching the other six
+    // sketches. This one never had them, which is why its landscape
+    // rotations had never been given a number.
+    //   --build-property compiler.cpp.extra_flags=-DTEST_ROTATION=0
+    //   --build-property compiler.cpp.extra_flags=-DTEST_STRETCH=1
+#ifdef TEST_ROTATION
+    g_system.rotation = (uint8_t)(TEST_ROTATION);
+    Serial.print("[invaders] TEST_ROTATION override -> ");
+    Serial.println((int)g_system.rotation);
+#endif
+#ifdef TEST_STRETCH
+    av_geom_set_stretch((TEST_STRETCH) != 0);
+    Serial.print("[invaders] TEST_STRETCH -> ");
+    Serial.println((int)av_geom_get_stretch());
+#endif
+
     // Storage/ROM/WAV loading -- blocking, can be slow (SD card retries).
     // Deliberately finishes before Core 1 is allowed to start the DVI pump
     // (see g_video_ready below).
@@ -82,6 +98,23 @@ void loop() {
     bool shoot  = hal_input_read(HAL_BTN_SHOOT);
     bool rotate = hal_input_read(HAL_BTN_ROTATE);
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
+    // Scripted play, opt-in: -DTEST_AUTOSTART=1. Attract is a lower bound
+    // (DEVNOTES #82); this puts a coin in and keeps firing so the frame
+    // carries shots, explosions and a full invader formation.
+#ifdef TEST_AUTOSTART
+    {
+        static uint32_t autof = 0;
+        autof++;
+        const uint32_t f = autof % 6000u;
+        if (f > 600u && f < 660u)  coin   = true;
+        if (f > 780u && f < 840u)  start1 = true;
+        if (f > 1000u) {
+            const uint32_t d = (f / 70u) & 1u;
+            left = (d == 0); right = (d == 1);
+            shoot = ((f / 10u) & 1u) != 0;
+        }
+    }
+#endif
     // Button 1: aspect correction on/off. Edge-detected inside
     // av_geom_toggle_on_edge(); the right setting depends on the monitor,
     // not the game, so it is a runtime toggle rather than a build flag.
@@ -104,14 +137,20 @@ void loop() {
     // Rescue's first attempt did, via an int64 divide in the 240-iteration
     // loop -- ~700us/frame). Safe to delete once that is on record in
     // DEVNOTES.md.
+    // Totals beside every maximum, plus the queue-runway figure -- this
+    // sketch had NO starvation counter at all, so "is landscape clean" had
+    // never been a number here. See DEVNOTES #84/#85/#94.
     static uint32_t frame_count = 0;
-    static uint32_t work_max = 0;
+    static uint32_t work_max = 0, work_sum = 0, work_n = 0;
+    static uint32_t blk_sum = 0, blk_max = 0;
     uint32_t t0 = micros();
     invaders_run_frame(&g_system);
     uint32_t frame_us   = micros() - t0;
     uint32_t blocked_us = hal_video_take_blocked_us();
     uint32_t work_us    = (frame_us > blocked_us) ? (frame_us - blocked_us) : 0;
     if (work_us > work_max) work_max = work_us;
+    if (blocked_us > blk_max) blk_max = blocked_us;
+    work_sum += work_us; blk_sum += blocked_us; work_n++;
 
     if ((++frame_count % 60u) == 0) {
         Serial.print("[invaders] frame ");
@@ -122,9 +161,24 @@ void loop() {
         Serial.print(work_us);
         Serial.print("us, blocked ");
         Serial.print(blocked_us);
-        Serial.print("us), work_max ");
+        Serial.print("us), work_MEAN ");
+        Serial.print(work_n ? work_sum / work_n : 0);
+        Serial.print("us, work_max ");
         Serial.print(work_max);
-        Serial.println("us");
+        Serial.print("us, blk_MEAN ");
+        Serial.print(work_n ? blk_sum / work_n : 0);
+        Serial.print("us, rot ");
+        Serial.print((int)g_system.rotation);
+        Serial.print(", stretch ");
+        Serial.print((int)av_geom_get_stretch());
+        Serial.print(", starve ");
+        Serial.print(hal_video_take_starve_count());
+        Serial.print(", minq ");
+        Serial.print(hal_video_take_min_valid_level());
+        Serial.print("/");
+        Serial.print(hal_video_scanbuf_count());
+        Serial.println();
+        work_sum = blk_sum = work_n = 0; work_max = 0; blk_max = 0;
     }
 }
 

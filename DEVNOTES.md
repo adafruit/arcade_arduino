@@ -4646,3 +4646,51 @@ Verified: host self-test clean over 6,000 gameplay frames in rotation 0 with
 flip active, state digest 23D54F0A73E93BDA -- byte-identical to the run
 before this change, so the video path is untouched. The audio fix is a
 behaviour change by design: landscape sound was running at double speed.
+
+### 95. Space Invaders needed no port at all -- only a number
+
+DISPLAY_GEOMETRY.md listed "the two 8080bw games" as outstanding phase-3
+work, i.e. still needing the column primitive that Donkey Kong had just been
+given. **That was stale, and reading the code said so before any hardware
+was involved** -- `invaders_machine.cpp` already documented it:
+
+> Like Lunar Rescue and unlike Pac-Man, no second sequential path is needed
+> for any rotation: `render_scanline()` reads live VRAM on demand for all
+> four rotations and keeps no frame cache, so every rotation can interleave.
+
+The reason is structural and worth stating: this game's VRAM **is** a 1-bit
+framebuffer, so a landscape scanline reads a raster column straight out of
+memory. There is nothing to pre-render, so there was never a whole-frame
+burst to remove. Pac-Man, Galaga, Burger Time and Donkey Kong all needed a
+column primitive because their pictures are *computed* from tilemaps and
+sprites; Invaders' picture is already in RAM.
+
+What was actually missing was measurement. The sketch had **no starvation
+counter at all** and **no `TEST_ROTATION`**, so "is landscape clean here?"
+had never been a number. Both added, plus totals-beside-maxima and a
+scripted-play autostart so the figures are gameplay rather than attract.
+
+Measured on hardware, all four rotations and both aspect settings:
+
+| rot | | stretch off | stretch ON | starve | runway |
+|---|---|---|---|---|---|
+| 0 | landscape | 6,044us | **5,332us** | 0 | 28/32 |
+| 1 | tate | 5,622us | 6,744us | 0 | 28-29/32 |
+| 2 | landscape, mirrored | 6,042us | -- | 0 | 28/32 |
+| 3 | tate, mirrored | 5,839us | -- | 0 | 29/32 |
+
+Zero starvation everywhere and never below 28 of 32 buffers. Against a
+15,238us active-video window the worst case uses **45% of the budget** --
+by a wide margin the cheapest game in the project.
+
+**Landscape gets CHEAPER with the aspect correction on** (6,044 -> 5,332us),
+which looks backwards until you remember what yoko correction does: it
+NARROWS the picture from 224 canvas columns to 180 (arcade_video_geom.h's
+"yoko needs the picture narrower, not taller"). Fewer columns is less work.
+Tate widens 256 -> 320 and duly costs more. So the direction of the cost tells
+you which way the correction is resampling, and it is a cheap sanity check
+that the geometry is doing what it claims.
+
+**Space Invaders can therefore afford the aspect correction in every
+rotation**, fixing its 16.7% tate error and 24.4% landscape error with ~8ms
+of headroom to spare.

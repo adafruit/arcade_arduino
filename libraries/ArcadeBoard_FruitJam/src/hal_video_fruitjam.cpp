@@ -183,6 +183,12 @@ void hal_video_submit_scanline(uint16_t *buf) {
     if (lvl < s_min_valid) s_min_valid = lvl;
 }
 
+// Instantaneous VALID-queue depth. For callers that want to know WHERE in
+// the frame the pipeline runs thin, which a per-frame minimum cannot say.
+uint32_t hal_video_valid_level(void) {
+    return queue_get_level_unsafe(&dvi.q_colour_valid);
+}
+
 uint32_t hal_video_take_min_valid_level(void) {
     uint32_t v = s_min_valid;
     s_min_valid = 0xFFFFFFFFu;

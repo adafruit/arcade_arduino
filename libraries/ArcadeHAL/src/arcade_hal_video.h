@@ -103,6 +103,7 @@ uint32_t hal_video_take_starve_count(void);
 // the buffer count means the queue never came close. Prefer this over any
 // run-of-non-blocking-acquires heuristic, which is only meaningful when the
 // free and valid queues are complementary -- see DEVNOTES #85.
+uint32_t hal_video_valid_level(void);
 uint32_t hal_video_take_min_valid_level(void);
 uint32_t hal_video_scanbuf_count(void);
 

@@ -172,9 +172,24 @@ void loop() {
     // Totals beside every maximum -- see DEVNOTES #84/#85.
     static uint32_t work_max = 0, work_sum = 0, work_n = 0;
     static uint32_t blk_sum = 0, blk_max = 0;
+    // THE INTER-FRAME GAP. Everything loop() does between the last submitted
+    // scanline of one frame and the first of the next: the vblank NMI, the
+    // button reads, the heartbeat itself. Core 1 keeps draining the queue
+    // throughout, at one buffer per 63.5us, so this gap is the ONE cost that
+    // shows up as red at the TOP of the picture rather than spread through
+    // it -- and no per-frame total or per-band figure can see it, because it
+    // happens outside the scanline loop entirely. See DEVNOTES #94.
+    static uint32_t s_prev_end = 0;
+    static uint32_t s_gap_sum = 0, s_gap_max = 0, s_gap_n = 0;
     uint32_t t0 = micros();
+    if (s_prev_end) {
+        const uint32_t gap = t0 - s_prev_end;
+        s_gap_sum += gap; s_gap_n++;
+        if (gap > s_gap_max) s_gap_max = gap;
+    }
     dkong_run_frame(&g_system);
-    uint32_t frame_us   = micros() - t0;
+    s_prev_end = micros();
+    uint32_t frame_us   = s_prev_end - t0;
     uint32_t blocked_us = hal_video_take_blocked_us();
     uint32_t work_us    = (frame_us > blocked_us) ? (frame_us - blocked_us) : 0;
     if (work_us > work_max) work_max = work_us;
@@ -219,6 +234,30 @@ void loop() {
         // Where the render half of `work` actually goes -- see
         // dkong_video.h. `rows` below `lines` means the duplicate-row
         // memoisation is firing.
+        {   // per-scanline-band cost -- see dkong_machine.h / DEVNOTES #94
+            uint32_t b[8];
+            dkong_debug_take_bands(b);
+            Serial.print(", bands ");
+            for (int bi = 0; bi < 8; bi++) { Serial.print(b[bi] / 60u); if (bi < 7) Serial.print("/"); }
+            Serial.print("us");
+            uint32_t q[8];
+            dkong_debug_take_band_minq(q);
+            Serial.print(", band_minq ");
+            for (int bi = 0; bi < 8; bi++) {
+                if (q[bi] == 0xFFFFFFFFu) Serial.print("-"); else Serial.print(q[bi]);
+                if (bi < 7) Serial.print("/");
+            }
+        }
+        {
+            Serial.print(", gap ");
+            Serial.print(s_gap_n ? s_gap_sum / s_gap_n : 0);
+            Serial.print("us avg / ");
+            Serial.print(s_gap_max);
+            Serial.print("us max = ");
+            Serial.print(s_gap_max / 63u);
+            Serial.print(" lines drained");
+            s_gap_sum = 0; s_gap_n = 0; s_gap_max = 0;
+        }
         {   // landscape split -- see dkong_video.h / DEVNOTES #93
             uint32_t b_us = 0, c_us = 0, c_n = 0;
             dkong_debug_take_landscape(&b_us, &c_us, &c_n);

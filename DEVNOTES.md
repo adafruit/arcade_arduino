@@ -4592,3 +4592,57 @@ rewrite: 9,000 gameplay frames in rotation 0 and 6,000 in rotation 2, flip
 active, zero mismatches -- **and the state digest is byte-identical to the
 pre-optimisation run** (C710350436A8A3D9), so none of this changed the
 emulation.
+
+### 94. The last of DKong's landscape red: audio was running twice, and per-band QUEUE MINIMUM is what found it
+
+After #93 landscape was much better and still flashing red across the top
+sixth of the screen. Every total said it should be fine: `work_MEAN` 12,678us
+against a 15,238us active window, `work_max` 13,942, and per-band work flat at
+~1,280us against a 1,905us budget. Nothing was over budget anywhere.
+
+**The instrument that worked was the per-band QUEUE MINIMUM.** Eight bands of
+30 scanlines, recording the lowest `q_colour_valid` level reached in each:
+
+```
+landscape (red):   band_minq 0/0/7/17/29/31/31/31     band work 1278/1268/1255/...
+tate      (clean): band_minq 23/27/31/31/31/31/31/31  band work 1489/1505/1500/...
+```
+
+**Tate does MORE work per band and never drops below 23; landscape did less
+work and started at zero.** Less work with a worse queue is not a throughput
+problem, and that comparison is what turned the search around -- it says the
+cost is somewhere the per-scanline instruments cannot see.
+
+**The cause, and it was mine, from #92.** `dkong_run_frame()` ended with:
+
+```c
+// only the sequential (landscape/180) path needs a whole-frame call here.
+if (system->rotation != 1 && system->rotation != 3)
+    dkong_audio_run_frame(system);
+```
+
+That guard was correct while landscape used `run_frame_sequential()`. #92 put
+every rotation on the interleaved path and did not update it, so landscape
+ran its audio TWICE: once in per-scanline slices inside the loop, and again
+as a whole-frame burst here. Two consequences, one audible and one visible --
+the sound advanced at double rate, and ~2.5ms of work landed in a single lump
+at the frame boundary. Core 1 keeps draining at one buffer per 63.5us
+throughout, so it emptied ~40 buffers before the next frame's first scanline
+arrived: red across the top of the picture, and the top only.
+
+Deleted. Landscape now reads `band_minq 21/27/31/31/31/31/31/31`, `starve 0`,
+`minq 21/32`, `work_MEAN` 12,566us.
+
+**The lesson, and it is a new one.** Every measurement in #84, #85 and #93 was
+a COST -- how long something took. This bug was invisible to all of them
+because the expensive thing ran outside the loop being measured, and totals
+absorbed it. What exposed it was measuring the RESOURCE instead: how much
+runway was left, bucketed by position in the frame. When a pipeline starves
+with work to spare, measure the buffer, not the code -- and compare a broken
+configuration against a working one, because "less work, worse queue" is a
+contradiction that points straight at the thing you are not measuring.
+
+Verified: host self-test clean over 6,000 gameplay frames in rotation 0 with
+flip active, state digest 23D54F0A73E93BDA -- byte-identical to the run
+before this change, so the video path is untouched. The audio fix is a
+behaviour change by design: landscape sound was running at double speed.

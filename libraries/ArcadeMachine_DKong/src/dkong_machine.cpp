@@ -125,6 +125,35 @@ bool dkong_load_assets(dkong_system *system, uint16_t *out_error_color) {
 // counter does. DEVNOTES.md problem #22 is a real permanent hang caused by
 // getting this wrong, and #26/#27 are why every local here is uint32_t and
 // not `long`.
+// WHERE IN THE FRAME the work falls, in eight bands of 30 scanlines.
+//
+// "Red across the top 1/6th of the screen" is not a totals problem -- mean
+// work is 12,678us against a 15,238us active window. It says the deficit is
+// concentrated at the START of the frame, and a total cannot see that. This
+// buckets each scanline's own cost (CPU slice + render, EXCLUDING the
+// acquire wait, since blocking there means Core 0 was ahead).
+#if defined(DKONG_BAND_TRACE) && (defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE))
+#include <Arduino.h>
+static uint32_t g_band_us[8];
+static uint32_t g_band_minq[8];
+void dkong_debug_take_bands(uint32_t *out8) {
+    for (int i = 0; i < 8; i++) { out8[i] = g_band_us[i]; g_band_us[i] = 0; }
+}
+void dkong_debug_take_band_minq(uint32_t *out8) {
+    for (int i = 0; i < 8; i++) { out8[i] = g_band_minq[i]; g_band_minq[i] = 0xFFFFFFFFu; }
+}
+#define BAND_Q(i) do { const uint32_t l_ = hal_video_valid_level(); \
+    if (l_ < g_band_minq[(i) / 30u]) g_band_minq[(i) / 30u] = l_; } while (0)
+#define BAND_NOW() micros()
+#define BAND_ADD(i, t0) do { g_band_us[(i) / 30u] += micros() - (t0); } while (0)
+#else
+void dkong_debug_take_bands(uint32_t *out8) { for (int i = 0; i < 8; i++) out8[i] = 0; }
+void dkong_debug_take_band_minq(uint32_t *out8) { for (int i = 0; i < 8; i++) out8[i] = 0; }
+#define BAND_Q(i) do { } while (0)
+#define BAND_NOW() 0u
+#define BAND_ADD(i, t0) do { (void)(t0); } while (0)
+#endif
+
 static void run_frame_interleaved(dkong_system *system) {
     uint32_t start = system->cpu.cyc;
 
@@ -137,18 +166,28 @@ static void run_frame_interleaved(dkong_system *system) {
     for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint32_t target_delta =
             (uint32_t)((uint64_t)DKONG_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_HEIGHT);
+        const uint32_t t_cpu = BAND_NOW();
         while ((uint32_t)(system->cpu.cyc - start) < target_delta) {
             z80_step(&system->cpu);
         }
+        BAND_ADD(i, t_cpu);
 
         uint16_t *buf = hal_video_acquire_scanline();
+        const uint32_t t_rnd = BAND_NOW();
         dkong_video_render_scanline(system, i, buf);
         hal_video_submit_scanline(buf);
+        BAND_ADD(i, t_rnd);
+        BAND_Q(i);
+        const uint32_t t_aud = BAND_NOW();
 
         // A slice of this frame's sound, here rather than after the loop:
         // see dkong_audio_run_slice()'s comment for what running it all at
         // the end does to the DVI queue.
         dkong_audio_run_slice(i, HAL_VIDEO_HEIGHT);
+        // Audio is inside the band now: it is ~3ms a frame and was the only
+        // per-scanline cost NOT being measured, which made the bands look
+        // flat while the queue emptied across the top of the picture.
+        BAND_ADD(i, t_aud);
     }
 }
 
@@ -189,12 +228,28 @@ void dkong_run_frame(dkong_system *system) {
     // 16.66ms budget and broke frame pacing; attributing that to the 8035
     // without measuring it would be exactly the mistake this project keeps
     // paying for.
-    // The interleaved path has already produced this frame's audio inside
-    // the scanline loop; only the sequential (landscape/180) path needs a
-    // whole-frame call here.
-    if (system->rotation != 1 && system->rotation != 3) {
-        dkong_audio_run_frame(system);
-    }
+    // NO whole-frame audio call. run_frame_interleaved() has already
+    // produced this frame's sound in per-scanline slices, for EVERY
+    // rotation, since the column renderer removed the sequential path
+    // (#92).
+    //
+    // This used to read `if (rotation != 1 && rotation != 3)
+    // dkong_audio_run_frame(system);`, guarding a call that only the old
+    // sequential landscape path needed. Leaving it behind meant landscape
+    // ran its audio TWICE -- once in slices and once as a whole-frame burst
+    // here -- which was both wrong (sound advancing at double rate) and
+    // ~2.5ms of work landing in one lump at the frame boundary. Core 1
+    // keeps draining the queue through it at one buffer per 63.5us, so it
+    // emptied ~40 buffers before the next frame's first scanline arrived
+    // and showed up as red across the TOP of the picture.
+    //
+    // What made it hard to see: per-frame totals looked fine (12.7ms of a
+    // 15.2ms window) and per-band work looked flat, because the burst is
+    // outside the scanline loop entirely. What found it was comparing the
+    // per-band QUEUE MINIMUM against tate: tate does MORE work per band
+    // (1,489us vs 1,278us) and never drops below 23 buffers, while
+    // landscape did less work and started at 0. Less work and a worse
+    // queue is not a throughput problem -- see DEVNOTES #94.
 }
 
 uint32_t dkong_debug_audio_us(void) { return dkong_audio_debug_cost_us(); }

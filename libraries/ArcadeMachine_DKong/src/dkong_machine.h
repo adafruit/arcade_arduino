@@ -115,6 +115,11 @@ bool dkong_load_assets(dkong_system *system, uint16_t *out_error_color);
 // Runs exactly one video frame: executes this frame's Z80 cycles
 // interleaved with scanline output, and fires the vblank NMI if nmi_mask is
 // set. Call in a tight loop from the sketch after dkong_input_update().
+// Per-scanline work in eight bands of 30, reset on read. Answers "where in
+// the frame does the deficit fall", which no total can. See DEVNOTES #94.
+void dkong_debug_take_bands(uint32_t *out8);
+void dkong_debug_take_band_minq(uint32_t *out8);
+
 void dkong_run_frame(dkong_system *system);
 
 // DEBUG: total DMA transfers and bytes moved since the last call, then

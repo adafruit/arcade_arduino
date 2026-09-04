@@ -4535,3 +4535,60 @@ worth having.
 `run_frame_sequential()` is deleted rather than left as a second, diverging
 frame path. SRAM drops 318,644 -> 225,084 bytes, **94KB freed**, because the
 frame cache is gone and the column buckets cost 16KB.
+
+### 93. DKong landscape, part two: the column renderer turned a burst into a throughput problem
+
+#92 removed the whole-frame burst and landscape was still red. The failure
+mode had CHANGED, which is the useful part -- measured on hardware, rotation
+2, stretch off:
+
+```
+before #92 (burst):       work_MEAN 15,023   starve 2071   minq 0/32   frame 18,765us
+after  #92 (throughput):  work_MEAN 16,426   starve 8565   minq 0/32   work_max 17,990
+```
+
+Mean work now EXCEEDED the whole 16,667us frame. A burst is bounded by
+runway; this was a sustained deficit, which no queue depth fixes (#88). So
+the column path was simply slower than the row path it replaced, and the
+question became where.
+
+**Measured, not guessed** (`-DDKONG_COST_TRACE=1`, two new accumulators):
+
+```
+dkong_video_begin_frame()   1,414us a frame
+render_native_column()      5,600us a frame  (23.3us per column, ~26 cycles a pixel)
+```
+
+**begin_frame, 1,414us.** It asked "which sprites are on this line?" for all
+224 lines, and that scans all 128 sprite slots on every line -- 28,672
+iterations -- because the loop only exits early once 16 sprites have passed,
+which almost never happens. Inverted to "which lines is this sprite on?" it
+is 128 x 16 = 2,048. The band start is computed rather than searched for: the
+coarse test's sum is `(A + ny) & 0xFF` with A constant per sprite, so the band
+is the 16 rows starting where that hits 0xF0. **1,414us -> 54us, 26x.**
+
+**render_native_column(), 5,600us.** The tilemap inner loop recomputed the
+tile index, its code, its PROM colour (two divisions) and re-tested whether
+the tile row had changed -- per pixel. All of it is constant across a tile
+row. Hoisted, the inner loop is a palette lookup and a store. **5,600us ->
+3,432us.**
+
+Result: `work_MEAN` 16,426 -> **12,678us**, `work_max` 17,990 -> 13,942,
+`starve` 8565 -> 818, and `minq` never reaches 0 -- the queue dips to one
+buffer but does not empty, which is what red actually requires.
+
+**THE WRAPAROUND IS NOT SYMMETRIC**, and the self-test caught this too, at
+x=97 y=215. Unflipped a band ASCENDS from y0, so a y0 past the bottom can
+still have its tail on screen through the mod-256 wrap (y0=250 means rows
+0..9 carrying local_y 6..15) and must be shifted to a negative start.
+Flipped, the band DESCENDS, so a high y0 already reaches down into the
+visible rows and shifting it throws the band away. The first version shifted
+both and silently dropped flipped sprites near the bottom of the screen.
+
+That is the second direction bug in two entries, both flip-only, both
+invisible in the common case, both found by
+`dkong_video_selftest_column_vs_row()` within one run. Verified after the
+rewrite: 9,000 gameplay frames in rotation 0 and 6,000 in rotation 2, flip
+active, zero mismatches -- **and the state digest is byte-identical to the
+pre-optimisation run** (C710350436A8A3D9), so none of this changed the
+emulation.

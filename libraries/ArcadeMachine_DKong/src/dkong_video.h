@@ -61,6 +61,11 @@ void dkong_draw_frame(dkong_system *system);
 // See dkong_video.cpp's COLUMN RENDERING comment and DEVNOTES #92.
 void dkong_video_begin_frame(const dkong_system *system);
 
+// Landscape's two costs, reset on read: the once-per-frame sprite
+// arbitration walk and the total time in render_native_column(). Device
+// only, behind DKONG_COST_TRACE. See DEVNOTES #93.
+void dkong_debug_take_landscape(uint32_t *begin_us, uint32_t *cols_us, uint32_t *cols_n);
+
 void dkong_video_render_scanline(const dkong_system *system, uint32_t dvi_y, uint16_t *buf);
 
 // Per-frame render cost split, reset on read. `rows_us`/`rows` cover

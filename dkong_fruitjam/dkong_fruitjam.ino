@@ -219,6 +219,16 @@ void loop() {
         // Where the render half of `work` actually goes -- see
         // dkong_video.h. `rows` below `lines` means the duplicate-row
         // memoisation is firing.
+        {   // landscape split -- see dkong_video.h / DEVNOTES #93
+            uint32_t b_us = 0, c_us = 0, c_n = 0;
+            dkong_debug_take_landscape(&b_us, &c_us, &c_n);
+            Serial.print(", begin ");
+            Serial.print(b_us / 60u);
+            Serial.print("us/f, cols ");
+            Serial.print(c_us / 60u);
+            Serial.print("us/f x");
+            Serial.print(c_n / 60u);
+        }
         uint32_t r_us, e_us, rows, lines;
         dkong_debug_take_render(&r_us, &e_us, &rows, &lines);
         Serial.print("/60, rows ");

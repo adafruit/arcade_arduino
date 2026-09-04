@@ -3333,6 +3333,68 @@ known-good baseline, not a review of the constant** -- the constant reads
 plausibly, and its comment even shows the arithmetic, which is right for the
 number it computes and wrong for the axis it is used on.
 
+### 79. Pac-Man: a column primitive removes the landscape red entirely, and 129KB with it
+
+**The fix for #18/#75, on the first game.** A yoko scanline IS a native
+column, so a row-only renderer could not emit one until every row existed --
+which is what forced `frame_cache` and the whole-frame burst before the
+first `hal_video_acquire_scanline()`. `render_native_column()` removes the
+reason for both.
+
+It is a TRANSPOSITION of `render_native_row()`, not a reimplementation: the
+display column is un-flipped once into `x` and the display row is flipped
+per pixel; the tilemap walks 28 tile rows of one column instead of 36 tile
+columns of one row (224 pixels rather than 288); sprites keep the same
+descending 7..0 order and both tunnel-wraparound copies, with the overlap
+test changing axis. **Pac-Man draws all 8 sprites on every line with no
+per-line arbitration, and that is exactly what makes a straight
+transposition possible** -- Donkey Kong's 16-per-line buffer will not
+transpose this way (see DISPLAY_GEOMETRY.md section 7).
+
+**Done in two separable steps, so the renderer change and the timing change
+were verified independently.** Step 1 wired the column renderer in while the
+machine layer stayed sequential: all 8 dumps byte-identical, which proves
+the transposition is exact across both flip axes and both mirror states.
+Step 2 deleted `run_frame_sequential()` and the rotation gate. **Do this in
+one step and neither claim is checkable** -- a diff would be expected either
+way and you would not know which change caused it.
+
+**Measured on hardware, all four rotations, 60fps and no red anywhere:**
+
+| rotation | stretch | `work` | `work_max` | `starve`/60 |
+|---|---|---|---|---|
+| 0 landscape | off | 9.50ms | 10872us | **0** |
+| 0 landscape | **ON** | 9.49ms | 10845us | **0** |
+| 1 tate CCW | off | 8.34ms | 9726us | **0** |
+| 2 180 | off | 9.50ms | 10844us | **0** |
+| 3 tate CW (default) | off | 8.94ms | 10406us | **0** |
+| 3 tate CW | **ON** | 10.62ms | 12029us | **0** |
+
+`frame` pinned at 16664-16665us throughout.
+
+**Two results worth carrying to the other ports.**
+
+1. **Yoko now costs about the same as tate** (9.5ms against 8.9ms), where it
+   used to be a burst that starved the queue every frame. The column path is
+   not a compromise; it is the same order of work.
+2. **The aspect correction is FREE in yoko and costs +1.6ms in tate.** That
+   is not symmetric and it is not obvious: tate UPSAMPLES (288->320 columns,
+   224->240 rows, so more pixels emitted), while yoko NARROWS (224->180
+   columns, fewer pixels emitted). #78's measurement on Donkey Kong was tate
+   only -- the landscape half of the correction was never the expensive
+   half.
+
+**Pac-Man is therefore complete: all four rotations, correct aspect ratio,
+60fps, zero starvation.** It is the first game in the project for which that
+is true. RAM: sketch globals 252,920 -> 124,352 bytes, a 128,568-byte drop,
+because `frame_cache` was a static and had been costing its full size in
+every orientation including the tate default where it was never read.
+
+`pacman_fruitjam` also gained a serial heartbeat -- it had none at all, not
+even `Serial.begin()` -- plus `TEST_ROTATION`/`TEST_STRETCH` build flags.
+Without those, "is the red gone" is an impression rather than a number, and
+this entry would have been an opinion.
+
 ### 78. The aspect-ratio correction is right, and Donkey Kong cannot afford it
 
 **What was built:** `arcade_video_geom.h`'s `av_geom_set_stretch()`, which

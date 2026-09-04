@@ -5,10 +5,25 @@ SPDX-License-Identifier: MIT
 
 # Display geometry: aspect ratio, rotation, and the landscape red screen
 
-Status: **analysis only — no renderer has been changed yet.** Written after
-auditing `hal_video_fruitjam.cpp`, `arcade_hal_video.h`, all seven
-`*_video.cpp` renderers, the vendored `libdvi`, the `tools/*_host`
-harnesses, and both DEVNOTES files (this one and `invaders_pico`'s).
+Status, newest first — the plan is section 7, the remaining work section 8:
+
+| phase | state |
+|---|---|
+| 0 — honest host dumps | **done** |
+| 1 — one coordinate space (320x240 canvas) | **done**, verified byte-identical |
+| 2 — shared geometry module + aspect correction | **done**, correction OFF by default |
+| 2b — making the correction affordable | **partly**; DKong still ~1.0ms short in tate |
+| 3 — column primitive, kills the landscape red | **Pac-Man done**; 6 games to go |
+| 4 — collapse the rotation cases | not started |
+| 5 — cleanups | not started |
+
+**Pac-Man is complete**: all four rotations, correct aspect ratio available,
+60fps, zero starvation (DEVNOTES #79).
+
+Originally written as an audit of `hal_video_fruitjam.cpp`,
+`arcade_hal_video.h`, all seven `*_video.cpp` renderers, the vendored
+`libdvi`, the `tools/*_host` harnesses, and both DEVNOTES files (this one
+and `invaders_pico`'s).
 
 Every claim below was checked against source, not inferred. Where this
 document contradicts an existing comment in the tree, the contradiction is
@@ -485,7 +500,27 @@ attempted here.
 > (#35); anything added to a path that runs 240 times a frame can move it
 > while leaving every other number alone.
 
-**Phase 3 — `render_native_column()`, which deletes the red at its source.**
+**Phase 3 — `render_native_column()`, which deletes the red at its source.
+PAC-MAN DONE (DEVNOTES #79); six games to go.**
+
+Pac-Man now runs all four rotations at 60fps with `starve 0/60`, and its
+sketch globals fell 252,920 -> 124,352 bytes. Two results from it that
+change the plan for the rest:
+
+- **Yoko costs about what tate costs** (9.5ms against 8.9ms). The column
+  path is not a compromise for landscape; it is the same order of work.
+- **The aspect correction is FREE in yoko and costs +1.6ms in tate**, because
+  tate upsamples (more pixels emitted) while yoko narrows 224 -> 180 (fewer).
+  Phase 2b measured Donkey Kong in tate only, so the landscape half of the
+  correction was never the expensive half. Pac-Man affords both:
+  `work_max` 12029us stretched in tate, 10845us stretched in yoko, against a
+  16660us budget.
+
+Also worth copying: do it in TWO steps -- column renderer first with the
+machine layer still sequential (output must be byte-identical, which proves
+the transposition), then delete the sequential path. Done as one step,
+neither claim is checkable.
+
 Landscape and 180 then interleave exactly like tate; `frame_cache` and
 `run_frame_sequential()` both go away. Much cheaper than the
 double-buffering redesign #20 floats, which is off the table anyway at 129KB

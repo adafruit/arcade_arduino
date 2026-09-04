@@ -194,32 +194,12 @@ static void fire_interrupts(galaga_system *sys) {
     if (sys->irq2_enable) z80_gen_int(&sys->cpu_sub, 0);
 }
 
-// Landscape/180-degree rotation: same reasoning as
-// pacman_machine.cpp's run_frame_sequential() -- those orientations need
-// the whole frame's final VRAM state before galaga_draw_frame()'s
-// frame_cache can render even one scanline, so there's no benefit to
-// interleaving CPU execution with scanline submission here.
 // Peak per-scanline render cost and the longest run of non-blocking scanline
 // acquires -- the starvation detector described at the loop that feeds it.
 #include <Arduino.h> // micros() for that detector
 static uint32_t g_render_max_us = 0, g_noblock_run = 0, g_noblock_run_max = 0;
 
-static void run_frame_sequential(galaga_system *system) {
-    uint32_t start_main = system->cpu_main.cyc;
-    uint32_t start_sub  = system->cpu_sub.cyc;
-    uint32_t start_sub2 = system->cpu_sub2.cyc;
-    system->nmi2_fired_a = false;
-    system->nmi2_fired_b = false;
-    galaga_video_begin_frame(system); // latch this frame's sprites (see galaga_video.h)
-
-    interleave_to_target(system, start_main, start_sub, start_sub2, GALAGA_CYCLES_PER_FRAME,
-                          start_sub2 + GALAGA_CYCLES_PER_FRAME / 4,
-                          start_sub2 + 3UL * GALAGA_CYCLES_PER_FRAME / 4);
-    fire_interrupts(system);
-    galaga_draw_frame(system);
-}
-
-// Tate/CW rotation: interleaves the 3-CPU stepping WITH per-scanline
+// EVERY rotation: interleaves the 3-CPU stepping WITH per-scanline
 // rendering, evenly spread across HAL_VIDEO_HEIGHT calls --
 // same DEVNOTES.md problem #19 rationale pacman_machine.cpp's
 // run_frame_interleaved() documents in full (never run a whole frame's
@@ -352,9 +332,9 @@ bool galaga_load_assets(galaga_system *system, uint16_t *out_error_color) {
 }
 
 void galaga_run_frame(galaga_system *system) {
-    if (system->rotation == 1 || system->rotation == 3) {
-        run_frame_interleaved(system);
-    } else {
-        run_frame_sequential(system);
-    }
+    // One path for every rotation. galaga_video.cpp's
+    // render_native_column() removed the reason landscape/180 ever needed a
+    // whole-frame burst (DEVNOTES #79), and with it the 129KB frame_cache
+    // and the sequential loop that fed it.
+    run_frame_interleaved(system);
 }

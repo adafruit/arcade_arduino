@@ -67,14 +67,6 @@ void galaga_video_build_caches(void);
 // register changes).
 void galaga_video_begin_frame(const galaga_system *system);
 
-// Renders and submits one full frame (HAL_VIDEO_HEIGHT scanlines). Used
-// directly only for landscape/180-degree rotation -- see
-// pacman_video.h's identical convention (this file's rotation math is
-// ported from pacman_video.cpp near-verbatim, since it's purely geometric
-// and already real-hardware-verified there; only the game-content parts
-// -- tile/sprite decode, palette -- are Galaga-specific).
-void galaga_draw_frame(galaga_system *system);
-
 // Renders one physical scanline (dvi_y). Exposed so galaga_machine.cpp's
 // galaga_run_frame() can call it once per scanline, interleaved with CPU
 // execution, same rationale pacman_machine.cpp documents (DEVNOTES.md

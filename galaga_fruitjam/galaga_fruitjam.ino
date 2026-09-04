@@ -19,6 +19,7 @@
 // Core 0: game emulation, input polling, board-to-game input mapping.
 // Core 1: hal_video_run() -- drives the DVI signal; never returns.
 #include <arcade_hal_video.h>
+#include <arcade_video_geom.h>
 #include <arcade_hal_input.h>
 #include <galaga_machine.h>
 #include <galaga_video.h>
@@ -49,6 +50,20 @@ void setup() {
     // hal_video_init() (struct/queue setup only -- does not start the
     // physical DVI signal, does not touch storage).
     galaga_init(&g_system);
+
+    // Boot straight into a chosen rotation, for measuring one orientation
+    // without a hand on the rotate button:
+    //   arduino-cli compile --build-property compiler.cpp.extra_flags=-DTEST_ROTATION=0
+    // 0 = landscape, 1 = 90 CCW tate, 2 = 180, 3 = 90 CW tate (this game's
+    // default -- see galaga_init() and DEVNOTES #33).
+#ifdef TEST_ROTATION
+    g_system.rotation = (uint8_t)(TEST_ROTATION);
+#endif
+    // Aspect-ratio correction (arcade_video_geom.h); -DTEST_STRETCH=1 to
+    // A/B it against the historical 1:1 layout.
+#ifdef TEST_STRETCH
+    av_geom_set_stretch(TEST_STRETCH != 0);
+#endif
     Serial.println("[galaga] galaga_init() done (hal_video_init() called)");
 
     // Storage/ROM/PROM loading -- blocking, can be slow (SD card
@@ -181,8 +196,13 @@ void loop() {
             Serial.print(nbrun);
             if (nbrun >= 8) Serial.print(" *** STARVED");
         }
-        Serial.print("us_x");
-        Serial.print("us), ");
+        Serial.print("us, rot ");
+        Serial.print((int)g_system.rotation);
+        Serial.print(" stretch ");
+        Serial.print((int)av_geom_get_stretch());
+        Serial.print(" starve ");
+        Serial.print(hal_video_take_starve_count());
+        Serial.print("/60), ");
         Serial.print(frame_count * 1000UL / (millis() - loop_start_ms + 1));
         Serial.print(", isr ");
         { uint32_t iu=0, ic=0, im=0;

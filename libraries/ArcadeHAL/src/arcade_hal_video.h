@@ -23,24 +23,32 @@
 extern "C" {
 #endif
 
-// Output geometry, defined by the board backend (e.g. 640x480 for Fruit
-// Jam's DVI output). Machine renderers read these rather than hardcoding a
-// resolution, so the same renderer file at least *compiles* against a board
-// with different geometry (the rotation/scaling math itself is still tuned
-// per physical display -- see invaders_video.c's border constants).
+// The DRAWABLE CANVAS, in logical pixels: how many pixels a caller fills
+// per scanline, and how many scanlines make up one frame. On Fruit Jam this
+// is 320x240, and one logical pixel is displayed as a 2x2 block of physical
+// pixels -- but that is the board's business, not the renderer's. A machine
+// renderer only ever works in canvas coordinates: x in 0..HAL_VIDEO_WIDTH-1,
+// scanline index in 0..HAL_VIDEO_HEIGHT-1.
+//
+// THESE USED TO BE THE PHYSICAL RESOLUTION (640x480), WITH A SEPARATE
+// `HAL_VIDEO_SCANLINES_PER_FRAME` (240) FOR THE SUBMISSION COUNT -- a third
+// constant, now removed, that existed only to paper over the mismatch.
+// That mismatch caused a real, long-lived bug. Renderers were handed a y in
+// 0..479 of which only even values ever arrived, while x ran 0..319 --
+// two coordinate systems for one canvas, bridged by a x2 or /2 hidden in
+// every rotation formula. When DEVNOTES #10 halved the submission count it
+// preserved the border constants, which are POSITIONS, but silently changed
+// the meaning of landscape's `/ HAL_VIDEO_HEIGHT`, which is a RESAMPLING
+// RATIO -- turning a lossless upsample into a downsample that drops 16 of
+// 256 (or 48 of 288) native lines. See DEVNOTES #23, #75 and #76, and
+// DISPLAY_GEOMETRY.md.
+//
+// One coordinate space makes that class of bug unrepresentable, which is
+// the entire reason these are declared this way. A board whose display
+// repeats or scales submitted scanlines reports the CANVAS here and keeps
+// the repeat factor to itself.
 extern const uint32_t HAL_VIDEO_WIDTH;
 extern const uint32_t HAL_VIDEO_HEIGHT;
-
-// Number of hal_video_acquire_scanline()/hal_video_submit_scanline() calls
-// that make up one full frame. This can be LESS than HAL_VIDEO_HEIGHT if
-// the board's display peripheral internally repeats each submitted
-// scanline across more than one physical output row (e.g. Fruit Jam's DVI
-// peripheral currently only works reliably at a 2x vertical repeat -- see
-// hal_video_fruitjam.cpp for why). HAL_VIDEO_HEIGHT always divides evenly
-// by this. Callers computing per-scanline content should pass
-// `i * (HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME)` as the
-// effective physical Y coordinate for the i'th call of a frame.
-extern const uint32_t HAL_VIDEO_SCANLINES_PER_FRAME;
 
 // One-time setup: allocate buffers and configure the display peripheral.
 // MUST NOT start driving the physical signal yet -- see hal_video_run().
@@ -52,8 +60,8 @@ bool hal_video_init(void);
 uint16_t *hal_video_acquire_scanline(void);
 
 // Submit a filled scanline buffer for display. Callers must submit exactly
-// once per hal_video_acquire_scanline(), HAL_VIDEO_SCANLINES_PER_FRAME
-// times per frame, repeating forever. There is no separate "y" parameter:
+// once per hal_video_acquire_scanline(), HAL_VIDEO_HEIGHT times per frame,
+// repeating forever. There is no separate "y" parameter:
 // the board backend tracks scan position internally from call order,
 // matching the reference clone's queue design.
 void hal_video_submit_scanline(uint16_t *buf);

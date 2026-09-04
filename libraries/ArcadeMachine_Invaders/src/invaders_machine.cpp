@@ -129,9 +129,8 @@ void invaders_run_frame(arcade_system *system) {
     // tearing.
     const int cyc_start = cyc;
     const int cyc_total = (int)CYCLES_PER_FRAME - cyc_start;
-    const uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
 
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         // Exact proportional target (not repeated addition) so the final
         // slice lands precisely on CYCLES_PER_FRAME however that divides by
         // the scanline count -- same shape as lrescue_machine.cpp's and
@@ -143,13 +142,13 @@ void invaders_run_frame(arcade_system *system) {
         // warns about, measured at ~700us/frame when it was written that way
         // in Lunar Rescue first (problem #34).
         int target = cyc_start +
-            (cyc_total * (int)(i + 1)) / (int)HAL_VIDEO_SCANLINES_PER_FRAME;
+            (cyc_total * (int)(i + 1)) / (int)HAL_VIDEO_HEIGHT;
         while (int_state != 2 && cyc < target) {
             step_cpu(system, &cyc, &int_state);
         }
 
         uint16_t *buf = hal_video_acquire_scanline();
-        invaders_video_render_scanline(i * step, buf, system);
+        invaders_video_render_scanline(i, buf, system);
         hal_video_submit_scanline(buf);
     }
 

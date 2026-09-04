@@ -3389,11 +3389,19 @@ Derivations, the per-game aspect tables and the fix plan are in
   so libdvi reads **only `scanbuf[0..319]`** and doubles it across the line.
   Bytes 320..639 of every scanline buffer are read by nothing, ever.
 
-- **The HAL contract still says otherwise.** `HAL_VIDEO_WIDTH` is 640 and
-  `dvi_y` arrives in 0..479 with only even values ever used, so the project
-  carries **two coordinate systems for one canvas** -- x in 320-space, y in
-  480-space -- and every rotation formula silently bridges them with a x2 or
-  /2. That is not cosmetic; see the next point.
+- **The HAL contract used to say otherwise, and now does not (fixed).**
+  `HAL_VIDEO_WIDTH` was 640 and `dvi_y` arrived in 0..479 with only even
+  values ever used, so the project carried **two coordinate systems for one
+  canvas** -- x in 320-space, y in 480-space -- and every rotation formula
+  silently bridged them with a x2 or /2. `HAL_VIDEO_WIDTH`/`HAL_VIDEO_HEIGHT`
+  are now the canvas (320x240), `dvi_y` runs 0..239, and the third constant
+  `HAL_VIDEO_SCANLINES_PER_FRAME` -- which existed only to paper over the
+  mismatch -- is gone. **Verified byte-identical**: 44 PPM dumps (6 games x
+  4 rotations) captured before the sweep were unchanged after it, which is
+  exactly what the phase 0 dumper was built to make checkable. It also
+  deleted the 640-wide `memset` for free: DKong's `work` fell from
+  11.65-13.75ms to 11.18-13.30ms and `work_max` from 15803us to 15481us,
+  ~2% of the frame budget, for stores nothing ever read.
 
 - **A change to the sample rate is not a change to the geometry.** #10's
   summary -- *"preserved every existing TATE_BY/TATE_BX/LAND_BX calibration

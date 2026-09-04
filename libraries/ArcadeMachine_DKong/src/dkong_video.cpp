@@ -39,7 +39,7 @@
 // encodes h_active_pixels/2 source pixels across the full line -- so these
 // are computed against a 320-wide visible axis. See tools/README.md.
 // Tate: native rows (224) along DVI y x2 = 448; native cols (256) along DVI x x1.
-#define TATE_BY  16u    // (480 - 224*2) / 2
+#define TATE_BY   8u    // (240 - 224) / 2
 #define TATE_BX  32u    // (320 - 256)   / 2
 #define LAND_BX  32u    // (320 - 256)   / 2 -- landscape puts cols along DVI x
 
@@ -382,8 +382,8 @@ void dkong_video_render_scanline(const dkong_system *sys, uint32_t dvi_y, uint16
 
     case 1: {
         // 90 deg CCW (tate): DVI y -> native row (x2 scale), on demand.
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)DKONG_GAME_HEIGHT * 2u) return;
-        uint32_t dx = (dvi_y - TATE_BY) >> 1u;
+        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)DKONG_GAME_HEIGHT) return;
+        uint32_t dx = dvi_y - TATE_BY;
         if (mir) dx = (uint32_t)(DKONG_GAME_HEIGHT - 1) - dx;
         render_native_row(sys, dx, row);
         for (uint32_t col = 0; col < (uint32_t)DKONG_GAME_WIDTH; col++)
@@ -403,9 +403,9 @@ void dkong_video_render_scanline(const dkong_system *sys, uint32_t dvi_y, uint16
 
     case 3: {
         // 90 deg CW (tate) -- on demand, same as case 1.
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)DKONG_GAME_HEIGHT * 2u) return;
-        uint32_t dx = mir ? (dvi_y - TATE_BY) >> 1u
-                          : (uint32_t)(DKONG_GAME_HEIGHT - 1) - ((dvi_y - TATE_BY) >> 1u);
+        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)DKONG_GAME_HEIGHT) return;
+        uint32_t dx = mir ? (dvi_y - TATE_BY)
+                          : (uint32_t)(DKONG_GAME_HEIGHT - 1) - (dvi_y - TATE_BY);
         render_native_row(sys, dx, row);
         for (uint32_t col = 0; col < (uint32_t)DKONG_GAME_WIDTH; col++) {
             uint32_t rev = (uint32_t)(DKONG_GAME_WIDTH - 1u) - col;
@@ -424,16 +424,15 @@ void dkong_draw_frame(dkong_system *system) {
             render_native_row(system, y, frame_cache[y]);
     }
 
-    uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
-        dkong_video_render_scanline(system, i * step, buf);
+        dkong_video_render_scanline(system, i, buf);
         hal_video_submit_scanline(buf);
     }
 }
 
 void dkong_draw_error_frame(uint16_t color) {
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
         for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) buf[x] = color;
         hal_video_submit_scanline(buf);

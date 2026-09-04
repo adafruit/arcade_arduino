@@ -15,7 +15,10 @@
 // relative include) -- we only use the low-level dvi_inst/queue API it
 // pulls in, not its higher-level DVIGFX* framebuffer classes.
 //
-// Output: 640x480 @ 60 Hz RGB565. See ArcadeMachine_Invaders's
+// Output: 640x480 @ 60 Hz RGB565 physically, presented to the machine layer
+// as a 320x240 canvas of square logical pixels (both axes are doubled --
+// see DVI_VERTICAL_REPEAT_USED / DVI_HORIZONTAL_REPEAT_USED below).
+// See ArcadeMachine_Invaders's
 // invaders_video.cpp for the rotation/mirror math this geometry was
 // calibrated against.
 #include "pico/sync.h"     // next_striped_spin_lock_num()
@@ -35,20 +38,30 @@
 // produced a solid red screen outright (confirmed on real hardware) --
 // this fork's internals evidently don't support that combination cleanly.
 // Rather than fight it, we work with the default: submit half as many
-// scanlines per frame (see HAL_VIDEO_SCANLINES_PER_FRAME below), each
-// naturally shown twice to fill all 480 physical rows. Left as a variable
+// scanlines per frame (which is why HAL_VIDEO_HEIGHT below is 240, not
+// 480), each naturally shown twice to fill all 480 physical rows.
+// Left as a variable
 // (not a #define) since dvi_vertical_repeat itself is one upstream --
 // change this if a future fork update makes repeat=1 viable and you want
 // back the full 480-unique-row resolution.
 #define DVI_VERTICAL_REPEAT_USED 2
 
-const uint32_t HAL_VIDEO_WIDTH  = DVI_WIDTH;
-const uint32_t HAL_VIDEO_HEIGHT = DVI_HEIGHT;
-// Number of hal_video_acquire_scanline()/hal_video_submit_scanline() calls
-// that make up one full frame -- may be less than HAL_VIDEO_HEIGHT (see
-// above). Callers must pass `i * (HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME)`
-// as the effective physical Y coordinate for the i'th call.
-const uint32_t HAL_VIDEO_SCANLINES_PER_FRAME = DVI_HEIGHT / DVI_VERTICAL_REPEAT_USED;
+// HORIZONTAL doubling, the half that used to be missing from this contract.
+// libdvi's 16bpp path encodes `pixwidth / 2` source pixels across the full
+// line (_dvi_prepare_scanline_16bpp() in src/libdvi/dvi.c passes
+// `pixwidth / 2` to tmds_encode_data_channel_16bpp()), so it reads only
+// scanbuf[0..319] of a 640-pixel line and doubles each one -- exactly as
+// dvi_vertical_repeat = 2 doubles vertically. It is not configurable here:
+// DVI_SYMBOLS_PER_WORD defaults to 2 in dvi_config_defs.h.
+#define DVI_HORIZONTAL_REPEAT_USED 2
+
+// The canvas a renderer actually draws into: 320x240 logical pixels, each
+// shown as a 2x2 block of physical pixels. See arcade_hal_video.h for why
+// these are the canvas and not the 640x480 physical resolution -- reporting
+// the physical resolution here is what let DEVNOTES #23's landscape
+// resampling bug exist.
+const uint32_t HAL_VIDEO_WIDTH  = DVI_WIDTH  / DVI_HORIZONTAL_REPEAT_USED;
+const uint32_t HAL_VIDEO_HEIGHT = DVI_HEIGHT / DVI_VERTICAL_REPEAT_USED;
 
 static struct dvi_inst dvi;
 
@@ -64,6 +77,12 @@ static struct dvi_inst dvi;
 // is stuck. That's a full black screen, not a glitch -- if you see that
 // again, check this first.)
 #define N_SCANBUF 8
+// Still DVI_WIDTH (640) entries although libdvi reads only the first
+// HAL_VIDEO_WIDTH (320) of each -- 5,120 bytes of deliberate slack. Kept
+// for now so that a renderer which has not yet been converted to canvas
+// coordinates writes into unused space rather than over the next buffer.
+// Shrinking this to HAL_VIDEO_WIDTH is a separate step (DISPLAY_GEOMETRY.md
+// phase 5), to be taken once every renderer is known to stop at 320.
 static uint16_t scanbuf[N_SCANBUF][DVI_WIDTH];
 
 bool hal_video_init(void) {

@@ -114,7 +114,7 @@ uint8_t btime_bg_map[BTIME_BG_MAP_SIZE];
 // Tate maps the raster's vertical axis onto the 240 submitted scanlines and
 // its horizontal axis along the scanline buffer. Burger Time's raster is
 // SQUARE, so unlike its siblings both constants come out the same:
-#define TATE_BY  0u    // (480 - 240*2) / 2 -- fills every scanline, 1:1
+#define TATE_BY  0u    // (240 - 240) / 2 -- fills every canvas row, 1:1
 #define TATE_BX  40u   // (320 - 240)   / 2 -- centred, 40px pillarbox
 #define LAND_BX  40u   // (320 - 240)   / 2
 
@@ -531,14 +531,14 @@ static uint8_t frame_pen[BTIME_GAME_HEIGHT][BTIME_GAME_WIDTH];
 // Writes one tate scanline: `row` is the visible raster row (0..239) and
 // `reverse` mirrors the output along the buffer, which is what separates
 // 90 CCW from 90 CW.
-// Writes ALL 320 visible framebuffer columns, pillarbox included, so that
+// Writes ALL HAL_VIDEO_WIDTH canvas columns, pillarbox included, so that
 // btime_video_render_scanline() does not have to pre-clear the buffer.
-// That clear was not free: memset()ing HAL_VIDEO_WIDTH (640 uint16 = 1280
-// bytes) on every one of 240 scanlines is 307KB of stores per frame, most
-// of it immediately overwritten, and only the first 320 columns are ever
-// displayed anyway (libdvi's 16bpp path encodes h_active_pixels/2 source
-// pixels across the line -- see tools/README.md).
-#define VISIBLE_COLS 320u
+// That clear was not free: back when HAL_VIDEO_WIDTH was the PHYSICAL 640
+// rather than the 320-pixel canvas, memset()ing it on every one of 240
+// scanlines was 307KB of stores per frame, most of it immediately
+// overwritten and half of it into columns the display never reads. This
+// file stopping at 320 by hand is what the rest of the project now gets
+// for free from the corrected HAL geometry (DISPLAY_GEOMETRY.md phase 1).
 
 BTIME_VRAMFUNC static void emit_tate_row(uint16_t *buf, bool reverse) {
     const uint8_t *vis = &pen_row[BTIME_FIRST_VISIBLE_LINE]; // raw x 8..247
@@ -552,10 +552,10 @@ BTIME_VRAMFUNC static void emit_tate_row(uint16_t *buf, bool reverse) {
         // Spread 240 raster columns over all 320 framebuffer columns; see
         // this file's geometry comment. col * 3 / 4 is exact for 320 -> 240.
         if (!reverse) {
-            for (uint32_t col = 0; col < VISIBLE_COLS; col++)
+            for (uint32_t col = 0; col < HAL_VIDEO_WIDTH; col++)
                 buf[col] = pal565[vis[(col * 3u) >> 2]];
         } else {
-            for (uint32_t col = 0; col < VISIBLE_COLS; col++)
+            for (uint32_t col = 0; col < HAL_VIDEO_WIDTH; col++)
                 buf[col] = pal565[vis[BTIME_GAME_WIDTH - 1u - ((col * 3u) >> 2)]];
         }
     } else {
@@ -581,7 +581,7 @@ BTIME_VRAMFUNC static void emit_tate_row(uint16_t *buf, bool reverse) {
             for (uint32_t col = 0; col < BTIME_GAME_WIDTH; col++)
                 out[col] = pal565[rev[-(int)col]];
         }
-        for (uint32_t col = TATE_BX + BTIME_GAME_WIDTH; col < VISIBLE_COLS; col++)
+        for (uint32_t col = TATE_BX + BTIME_GAME_WIDTH; col < HAL_VIDEO_WIDTH; col++)
             buf[col] = 0; // right bar
     }
 }
@@ -601,7 +601,7 @@ BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t 
         // result is a mirror image rather than a rotation. Same shape as
         // invaders_video.cpp's case 0, which is the real-hardware-verified
         // original.
-        memset(buf, 0, VISIBLE_COLS * sizeof(uint16_t)); // pillarbox
+        memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t)); // pillarbox
         const uint32_t dy = (dvi_y * (uint32_t)BTIME_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
         const uint32_t col = (uint32_t)(BTIME_GAME_WIDTH - 1) - dy;
         for (uint32_t i = 0; i < (uint32_t)BTIME_GAME_HEIGHT; i++) {
@@ -617,10 +617,10 @@ BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t 
         // with no border and no clipping -- the only game here where that
         // is true.
         if (dvi_y >= HAL_VIDEO_HEIGHT) {
-            memset(buf, 0, VISIBLE_COLS * sizeof(uint16_t));
+            memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
             return;
         }
-        uint32_t row = dvi_y >> 1;
+        uint32_t row = dvi_y;
         if (mir) row = (uint32_t)(BTIME_GAME_HEIGHT - 1) - row;
         render_native_row(s, BTIME_FIRST_VISIBLE_LINE + row);
         emit_tate_row(buf, false);
@@ -631,7 +631,7 @@ BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t 
         // 180 deg: case 0 with both axes reversed relative to it, so `col`
         // is deliberately the un-reversed raw value and `dx`'s ternary is
         // the mirror of case 0's -- matching invaders_video.cpp's case 2.
-        memset(buf, 0, VISIBLE_COLS * sizeof(uint16_t)); // pillarbox
+        memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t)); // pillarbox
         const uint32_t col = (dvi_y * (uint32_t)BTIME_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
         for (uint32_t i = 0; i < (uint32_t)BTIME_GAME_HEIGHT; i++) {
             const uint32_t dx = mir ? i : (uint32_t)(BTIME_GAME_HEIGHT - 1) - i;
@@ -644,10 +644,10 @@ BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t 
         // 90 deg CW: the other tate, reversing both the scanline order and
         // the within-scanline order relative to case 1.
         if (dvi_y >= HAL_VIDEO_HEIGHT) {
-            memset(buf, 0, VISIBLE_COLS * sizeof(uint16_t));
+            memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
             return;
         }
-        const uint32_t r = dvi_y >> 1;
+        const uint32_t r = dvi_y;
         const uint32_t row = mir ? r : (uint32_t)(BTIME_GAME_HEIGHT - 1) - r;
         render_native_row(s, BTIME_FIRST_VISIBLE_LINE + row);
         emit_tate_row(buf, true);
@@ -669,16 +669,15 @@ void btime_draw_frame(btime_system *system) {
         }
     }
 
-    const uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
-        btime_video_render_scanline(system, i * step, buf);
+        btime_video_render_scanline(system, i, buf);
         hal_video_submit_scanline(buf);
     }
 }
 
 void btime_draw_error_frame(uint16_t color) {
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
         for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) buf[x] = color;
         hal_video_submit_scanline(buf);

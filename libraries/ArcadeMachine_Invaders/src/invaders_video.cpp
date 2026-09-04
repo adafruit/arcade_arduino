@@ -13,18 +13,28 @@
 #include "invaders_video.h"
 #include "arcade_hal_video.h"
 
-// Border/scale constants, calibrated for a 640x480 4:3 monitor -- see this
-// file's header comment and invaders_pico's DEVNOTES.md for the derivation.
-// Tate (90/270 deg): DVI x visible range is 0..319 (physical monitor width after rotation).
-//   Game columns (224) along DVI y x2 = 448 px; game rows (256) along DVI x x1 = 256 px.
-// Landscape (0/180 deg): DVI x visible range is still 0..319 (physical monitor height).
-//   DVI x pixels are 2x the physical size of DVI y pixels on this 4:3 monitor at this
-//   resolution, so game columns (224) go along DVI x x1, game rows (256) are stretched
-//   x1.875 into DVI y (dy = dvi_y * 256 / 480) to compensate -- fills all 480 scanlines,
-//   no crop, near-square pixels.
-#define TATE_BY  16u    // (480 - 224*2) / 2
-#define TATE_BX  32u    // (320 - 256)   / 2
-#define LAND_BX  48u    // (320 - 224)   / 2 -- centred in visible DVI x 0..319
+// Border constants, in CANVAS coordinates: 320x240 logical square pixels,
+// each displayed as a 2x2 block of physical pixels (see arcade_hal_video.h).
+// Tate (90/270 deg): the monitor is physically rotated, so canvas x is the
+//   screen's long axis and canvas y its short one. Game rows (256) run along
+//   canvas x; game columns (224) run along canvas y.
+// Landscape (0/180 deg): game columns (224) run along canvas x; game rows
+//   (256) are resampled onto the 240 canvas rows by
+//   `dy = dvi_y * 256 / HAL_VIDEO_HEIGHT`.
+//
+// THESE ARE POSITIONS, NOT RATIOS, and the difference is load-bearing: the
+// vertical one halved when the canvas stopped being declared as the physical
+// 480 rows, while the landscape divisor above did not change meaning at all
+// because it is written against HAL_VIDEO_HEIGHT. Getting that backwards is
+// DEVNOTES #23/#76.
+//
+// NOTE these do NOT make the picture match the original cabinet's aspect
+// ratio -- nothing here scales to the screen, so tate is 16.7% too wide for
+// its height and landscape 24.4%. That is a known, separate defect; see
+// DISPLAY_GEOMETRY.md section 2 and its phase 2.
+#define TATE_BY   8u    // (240 - 224) / 2
+#define TATE_BX  32u    // (320 - 256) / 2
+#define LAND_BX  48u    // (320 - 224) / 2
 
 #define COLOR_WHITE 0xFFFFu
 
@@ -39,7 +49,7 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
     switch (sys->rotation) {
 
     case 0: {
-        // Landscape: dx->DVI x x1, dy stretched x1.875 to fill 480 scanlines.
+        // Landscape: dx -> canvas x 1:1, dy resampled onto all 240 canvas rows.
         uint32_t dy  = ((uint32_t)dvi_y * (uint32_t)INVADERS_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
         uint32_t col = 255u - dy;
         for (uint32_t i = 0; i < (uint32_t)INVADERS_GAME_HEIGHT; i++) {
@@ -52,9 +62,10 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
     }
 
     case 1: {
-        // 90 deg CCW (tate): DVI y->dx(x2), DVI x->dy reversed(x1, x=BX->dy255/player).
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)INVADERS_GAME_HEIGHT * 2u) return;
-        uint32_t dx = (dvi_y - TATE_BY) >> 1u;
+        // 90 deg CCW (tate): canvas y->dx (1:1), canvas x->dy reversed
+        // (x=BX -> dy 255, the player end).
+        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)INVADERS_GAME_HEIGHT) return;
+        uint32_t dx = dvi_y - TATE_BY;
         if (mir) dx = (uint32_t)(INVADERS_GAME_HEIGHT - 1) - dx;
         for (uint32_t col = 0u; col < (uint32_t)INVADERS_GAME_WIDTH; col++) {
             uint8_t v = vram[dx * 32u + (col >> 3u)];
@@ -65,7 +76,7 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
     }
 
     case 2: {
-        // 180 deg (landscape upside-down): dx reversed, dy reversed x1.875.
+        // 180 deg (landscape upside-down): dx reversed, dy un-reversed.
         uint32_t col = ((uint32_t)dvi_y * (uint32_t)INVADERS_GAME_WIDTH) / HAL_VIDEO_HEIGHT; // reversed: top->dy255
         for (uint32_t i = 0; i < (uint32_t)INVADERS_GAME_HEIGHT; i++) {
             uint32_t dx = mir ? i : (uint32_t)(INVADERS_GAME_HEIGHT - 1) - i;
@@ -77,10 +88,11 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
     }
 
     case 3: {
-        // 90 deg CW (tate): DVI y reversed->dx(x2), DVI x->dy(x1, x=BX->dy0/score).
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)INVADERS_GAME_HEIGHT * 2u) return;
-        uint32_t dx = mir ? (dvi_y - TATE_BY) >> 1u
-                          : (uint32_t)(INVADERS_GAME_HEIGHT - 1) - ((dvi_y - TATE_BY) >> 1u);
+        // 90 deg CW (tate): canvas y reversed->dx (1:1), canvas x->dy
+        // (x=BX -> dy 0, the score end).
+        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)INVADERS_GAME_HEIGHT) return;
+        uint32_t dx = mir ? (dvi_y - TATE_BY)
+                          : (uint32_t)(INVADERS_GAME_HEIGHT - 1) - (dvi_y - TATE_BY);
         for (uint32_t col = 0u; col < (uint32_t)INVADERS_GAME_WIDTH; col++) {
             uint32_t rev = (uint32_t)(INVADERS_GAME_WIDTH - 1u) - col; // dy=0 at x=TATE_BX
             uint8_t v = vram[dx * 32u + (rev >> 3u)];
@@ -99,20 +111,17 @@ void invaders_video_render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_
 }
 
 void invaders_draw_frame(arcade_system *system) {
-    // HAL_VIDEO_SCANLINES_PER_FRAME may be less than HAL_VIDEO_HEIGHT (see
-    // arcade_hal_video.h) -- `step` maps each submission index back onto
-    // the physical-row coordinate space the rotation/mirror math above is
-    // calibrated against.
-    uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    // One submission per canvas row, in canvas coordinates -- there is no
+    // longer a submission-index-to-physical-row conversion to get wrong.
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
-        render_scanline(i * step, buf, system);
+        render_scanline(i, buf, system);
         hal_video_submit_scanline(buf);
     }
 }
 
 void invaders_draw_error_frame(uint16_t color) {
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
         for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) buf[x] = color;
         hal_video_submit_scanline(buf);

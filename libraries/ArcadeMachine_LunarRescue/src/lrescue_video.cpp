@@ -33,9 +33,10 @@
 
 // See invaders_video.cpp for the derivation of these constants -- identical
 // video RAM layout and target monitor, so identical border/scale math.
-#define TATE_BY  16u    // (480 - 224*2) / 2
-#define TATE_BX  32u    // (320 - 256)   / 2
-#define LAND_BX  48u    // (320 - 224)   / 2 -- centred in visible DVI x 0..319
+// Canvas coordinates: 320x240 logical square pixels (arcade_hal_video.h).
+#define TATE_BY   8u    // (240 - 224) / 2
+#define TATE_BX  32u    // (320 - 256) / 2
+#define LAND_BX  48u    // (320 - 224) / 2
 
 // Index i's bits map to (R=bit0, G=bit2, B=bit1) per palette_init_3bit_rbg()
 // above -- NOT the more intuitive bit0/1/2=R/G/B order the "RBG" name hints
@@ -71,7 +72,7 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
     switch (sys->rotation) {
 
     case 0: {
-        // Landscape: dx->DVI x x1, dy stretched x1.875 to fill 480 scanlines.
+        // Landscape: dx -> canvas x 1:1, dy resampled onto all 240 canvas rows.
         uint32_t dy  = ((uint32_t)dvi_y * (uint32_t)LRESCUE_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
         uint32_t col = 255u - dy;
         uint32_t chi = col >> 3u;
@@ -85,9 +86,10 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
     }
 
     case 1: {
-        // 90 deg CCW (tate): DVI y->dx(x2), DVI x->dy reversed(x1, x=BX->dy255/player).
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)LRESCUE_GAME_HEIGHT * 2u) return;
-        uint32_t dx = (dvi_y - TATE_BY) >> 1u;
+        // 90 deg CCW (tate): canvas y->dx (1:1), canvas x->dy reversed
+        // (x=BX -> dy 255, the player end).
+        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)LRESCUE_GAME_HEIGHT) return;
+        uint32_t dx = dvi_y - TATE_BY;
         if (mir) dx = (uint32_t)(LRESCUE_GAME_HEIGHT - 1) - dx;
         // Grouped by VRAM byte (chi) instead of iterating columns one at a
         // time: all 8 columns sharing one byte also share the same
@@ -118,7 +120,7 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
     }
 
     case 2: {
-        // 180 deg (landscape upside-down): dx reversed, dy reversed x1.875.
+        // 180 deg (landscape upside-down): dx reversed, dy un-reversed.
         uint32_t col = ((uint32_t)dvi_y * (uint32_t)LRESCUE_GAME_WIDTH) / HAL_VIDEO_HEIGHT; // reversed: top->dy255
         uint32_t chi = col >> 3u;
         for (uint32_t i = 0; i < (uint32_t)LRESCUE_GAME_HEIGHT; i++) {
@@ -131,10 +133,11 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
     }
 
     case 3: {
-        // 90 deg CW (tate): DVI y reversed->dx(x2), DVI x->dy(x1, x=BX->dy0/score).
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)LRESCUE_GAME_HEIGHT * 2u) return;
-        uint32_t dx = mir ? (dvi_y - TATE_BY) >> 1u
-                          : (uint32_t)(LRESCUE_GAME_HEIGHT - 1) - ((dvi_y - TATE_BY) >> 1u);
+        // 90 deg CW (tate): canvas y reversed->dx (1:1), canvas x->dy
+        // (x=BX -> dy 0, the score end).
+        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)LRESCUE_GAME_HEIGHT) return;
+        uint32_t dx = mir ? (dvi_y - TATE_BY)
+                          : (uint32_t)(LRESCUE_GAME_HEIGHT - 1) - (dvi_y - TATE_BY);
         // Same grouped-by-byte approach as case 1 above, mirrored for this
         // rotation's reversed column order. LRESCUE_GAME_WIDTH is a
         // multiple of 8, so WIDTH-1-col0 always ends in binary ...111 (low
@@ -197,13 +200,12 @@ void lrescue_draw_frame(arcade_system *system) {
     // across the whole frame here (not per-scanline-printed, unlike an
     // earlier version of this instrumentation) to keep overhead to just
     // cheap micros() reads, no Serial calls, in this loop.
-    uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
     uint32_t render_sum = 0, block_sum = 0;
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint32_t a = micros();
         uint16_t *buf = hal_video_acquire_scanline();
         uint32_t b = micros();
-        render_scanline(i * step, buf, system);
+        render_scanline(i, buf, system);
         uint32_t c = micros();
         hal_video_submit_scanline(buf);
         uint32_t d = micros();
@@ -215,7 +217,7 @@ void lrescue_draw_frame(arcade_system *system) {
 }
 
 void lrescue_draw_error_frame(uint16_t color) {
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
         for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) buf[x] = color;
         hal_video_submit_scanline(buf);

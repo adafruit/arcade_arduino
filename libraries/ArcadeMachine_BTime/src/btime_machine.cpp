@@ -293,7 +293,7 @@ static void run_scanline(btime_system *system, uint32_t line) {
 // the start.
 //
 // The mapping is unusually tidy on this machine: 240 of the 272 game
-// scanlines are visible, and HAL_VIDEO_SCANLINES_PER_FRAME is also 240, so
+// scanlines are visible, and HAL_VIDEO_HEIGHT is also 240, so
 // visible game line <-> submitted DVI row is 1:1 and the 32 blanking lines
 // carry CPU cycles and audio but no output.
 //
@@ -330,18 +330,17 @@ static void run_frame_interleaved(btime_system *system) {
         // line by up to 12% of a frame. That is deliberate and harmless --
         // the alternative is the starvation above, and every renderer here
         // already reads live VRAM mid-frame by design.
-        const uint32_t want = ((line + 1u) * HAL_VIDEO_SCANLINES_PER_FRAME)
+        const uint32_t want = ((line + 1u) * HAL_VIDEO_HEIGHT)
                               / BTIME_SCANLINES_PER_FRAME;
-        while (submitted < want && submitted < HAL_VIDEO_SCANLINES_PER_FRAME) {
-            const uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
+        while (submitted < want && submitted < HAL_VIDEO_HEIGHT) {
             uint16_t *buf = hal_video_acquire_scanline();
             const uint32_t r0 = COST_NOW();
-            btime_video_render_scanline(system, submitted * step, buf);
+            btime_video_render_scanline(system, submitted, buf);
             COST_ADD(g_render_us, r0);
             hal_video_submit_scanline(buf);
 
             const uint32_t a0 = COST_NOW();
-            btime_audio_run_slice(submitted, HAL_VIDEO_SCANLINES_PER_FRAME);
+            btime_audio_run_slice(submitted, HAL_VIDEO_HEIGHT);
             COST_ADD(g_audio_us, a0);
             submitted++;
         }

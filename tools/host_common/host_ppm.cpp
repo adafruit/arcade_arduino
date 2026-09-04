@@ -56,32 +56,34 @@ bool host_ppm_write(const char *path, host_ppm_render_fn render, void *ctx) {
     FILE *fp = fopen(path, "wb");
     if (!fp) { fprintf(stderr, "cannot write %s\n", path); return false; }
 
-    // One submitted scanline covers this many physical rows. The board
-    // backend's own contract (arcade_hal_video.h) states HAL_VIDEO_HEIGHT
-    // always divides evenly by HAL_VIDEO_SCANLINES_PER_FRAME.
-    const uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
+    // HAL_VIDEO_WIDTH/HEIGHT are the CANVAS (320x240 on this board -- see
+    // arcade_hal_video.h). The board displays each logical pixel as a 2x2
+    // block, so the file is twice the canvas on both axes and the dump
+    // keeps looking like the monitor.
+    const uint32_t REPEAT = 2u;
+    const uint32_t out_w  = HAL_VIDEO_WIDTH  * REPEAT;
+    const uint32_t out_h  = HAL_VIDEO_HEIGHT * REPEAT;
 
     static uint16_t row[4096];
     static uint8_t  out[4096 * 3];
 
-    fprintf(fp, "P6\n%u %u\n255\n", HAL_VIDEO_WIDTH, HAL_VIDEO_HEIGHT);
+    fprintf(fp, "P6\n%u %u\n255\n", out_w, out_h);
 
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t y = 0; y < HAL_VIDEO_HEIGHT; y++) {
         memset(row, 0, sizeof(uint16_t) * HAL_VIDEO_WIDTH);
-        render(ctx, i * step, row);
+        render(ctx, y, row);
 
-        for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) {
+        for (uint32_t x = 0; x < out_w; x++) {
             // Horizontal pixel doubling -- see this file's header.
-            const uint16_t c = row[x >> 1];
+            const uint16_t c = row[x / REPEAT];
             out[x * 3u + 0u] = (uint8_t)(((c >> 11) & 0x1F) * 255 / 31);
             out[x * 3u + 1u] = (uint8_t)(((c >>  5) & 0x3F) * 255 / 63);
             out[x * 3u + 2u] = (uint8_t)(( c        & 0x1F) * 255 / 31);
         }
 
-        // Vertical repeat: the same submitted scanline on `step` physical
-        // rows, which is what dvi_vertical_repeat = 2 does on the board.
-        for (uint32_t r = 0; r < step; r++)
-            fwrite(out, 1, (size_t)HAL_VIDEO_WIDTH * 3u, fp);
+        // Vertical repeat, which is what dvi_vertical_repeat = 2 does.
+        for (uint32_t r = 0; r < REPEAT; r++)
+            fwrite(out, 1, (size_t)out_w * 3u, fp);
     }
 
     fclose(fp);

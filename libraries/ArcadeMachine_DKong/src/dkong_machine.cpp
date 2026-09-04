@@ -96,7 +96,7 @@ bool dkong_load_assets(dkong_system *system, uint16_t *out_error_color) {
 }
 
 // Runs the frame's cycles INTERLEAVED with scanline submission, spreading
-// DKONG_CYCLES_PER_FRAME evenly across the HAL_VIDEO_SCANLINES_PER_FRAME
+// DKONG_CYCLES_PER_FRAME evenly across the HAL_VIDEO_HEIGHT
 // acquire/submit calls rather than running them all in one burst before the
 // first call. This is the fix DEVNOTES.md problems #20/#34/#36 applied to
 // every other game here, built in from the start rather than back-applied:
@@ -119,23 +119,22 @@ bool dkong_load_assets(dkong_system *system, uint16_t *out_error_color) {
 // not `long`.
 static void run_frame_interleaved(dkong_system *system) {
     uint32_t start = system->cpu.cyc;
-    uint32_t step  = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
 
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint32_t target_delta =
-            (uint32_t)((uint64_t)DKONG_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_SCANLINES_PER_FRAME);
+            (uint32_t)((uint64_t)DKONG_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_HEIGHT);
         while ((uint32_t)(system->cpu.cyc - start) < target_delta) {
             z80_step(&system->cpu);
         }
 
         uint16_t *buf = hal_video_acquire_scanline();
-        dkong_video_render_scanline(system, i * step, buf);
+        dkong_video_render_scanline(system, i, buf);
         hal_video_submit_scanline(buf);
 
         // A slice of this frame's sound, here rather than after the loop:
         // see dkong_audio_run_slice()'s comment for what running it all at
         // the end does to the DVI queue.
-        dkong_audio_run_slice(i, HAL_VIDEO_SCANLINES_PER_FRAME);
+        dkong_audio_run_slice(i, HAL_VIDEO_HEIGHT);
     }
 }
 

@@ -59,9 +59,9 @@ void mspacman_video_build_caches(void);
 // below for why tate/CW drives its own loop instead.
 void mspacman_draw_frame(mspacman_system *system);
 
-// Renders one physical scanline (dvi_y, the same "physical row, before
-// HAL_VIDEO_SCANLINES_PER_FRAME accounting" coordinate invaders_video.cpp
-// uses) into `buf`. Exposed (not static) so mspacman_machine.cpp's
+// Renders one canvas scanline (dvi_y, 0..HAL_VIDEO_HEIGHT-1 -- the same
+// canvas coordinate every renderer here uses; see arcade_hal_video.h)
+// into `buf`. Exposed (not static) so mspacman_machine.cpp's
 // mspacman_run_frame() can call it once per scanline, interleaved with the
 // Z80 cycles that update the VRAM/sprite state it reads -- see that
 // function's own comment (arcade_arduino/DEVNOTES.md problem #19) for why

@@ -47,7 +47,7 @@ static uint16_t sprite_pen_rgb[64][4];
 // byte-for-byte the same as PACMAN_GAME_WIDTH/HEIGHT (same Namco video-
 // generator family/raster timing, verified in galaga_machine.h's header
 // comment) -- not re-derived, just reused.
-#define TATE_BY  16u    // (480 - 224*2) / 2
+#define TATE_BY   8u    // (240 - 224) / 2
 #define TATE_BX  16u    // (320 - 288)   / 2
 #define LAND_BX  48u    // (320 - 224)   / 2
 
@@ -575,14 +575,14 @@ GALAGA_VID_RAMFUNC void galaga_video_render_scanline(const galaga_system *sys, u
     // path; the general switch is for the two landscape modes, which are
     // not defaults and already carry their own known stall risk.**
     if (sys->rotation == 1 || sys->rotation == 3) {
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)GALAGA_GAME_HEIGHT * 2u) {
+        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)GALAGA_GAME_HEIGHT) {
             memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
             return;
         }
         memset(buf, 0, TATE_BX * sizeof(uint16_t));
         memset(buf + TATE_BX + GALAGA_GAME_WIDTH, 0,
                (HAL_VIDEO_WIDTH - TATE_BX - (uint32_t)GALAGA_GAME_WIDTH) * sizeof(uint16_t));
-        uint32_t d = (dvi_y - TATE_BY) >> 1u;
+        uint32_t d = dvi_y - TATE_BY;
         // Same dx each case computed before; rotation 3 is rotation 1 with
         // both axes reversed, so the row index reverses here and the column
         // order reverses inside render_native_row().
@@ -625,16 +625,15 @@ void galaga_draw_frame(galaga_system *system) {
             render_native_row(system, y, frame_cache[y], false);
     }
 
-    uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
-        galaga_video_render_scanline(system, i * step, buf);
+        galaga_video_render_scanline(system, i, buf);
         hal_video_submit_scanline(buf);
     }
 }
 
 void galaga_draw_error_frame(uint16_t color) {
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
         for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) buf[x] = color;
         hal_video_submit_scanline(buf);

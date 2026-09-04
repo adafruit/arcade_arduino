@@ -35,25 +35,41 @@ So bytes 320..639 of every scanline buffer are read by nothing, ever, and
 one logical pixel is a 2x2 block of physical pixels. On a 4:3 panel that
 makes logical pixels **square** (320/240 = 4/3).
 
-This is already recorded in prose in several places — `tools/README.md`'s
-"PPM dumps and the half-width buffer", `btime_video.cpp`'s geometry
-comment, and every `TATE_BX`/`LAND_BX` constant written as `(320 - N) / 2`.
-What it is *not* recorded in is the HAL contract, which still declares
-`HAL_VIDEO_WIDTH = 640` and still hands renderers a `dvi_y` in 0..479 of
-which only even values ever arrive. **The project carries two coordinate
-systems for one canvas: x in 320-space, y in 480-space.** Section 4 is what
-that costs.
+This was already recorded in prose in several places — `tools/README.md`,
+`btime_video.cpp`'s geometry comment, and every `TATE_BX`/`LAND_BX` constant
+written as `(320 - N) / 2`. What it was *not* recorded in was the HAL
+contract, which declared `HAL_VIDEO_WIDTH = 640` and handed renderers a
+`dvi_y` in 0..479 of which only even values ever arrived. **The project
+carried two coordinate systems for one canvas: x in 320-space, y in
+480-space.** Section 4 is what that cost.
+
+**FIXED in phase 1.** `HAL_VIDEO_WIDTH` and `HAL_VIDEO_HEIGHT` are now the
+canvas (320x240), `dvi_y` runs 0..239, `HAL_VIDEO_SCANLINES_PER_FRAME` is
+gone, and every x2 and /2 with it.
 
 ### Side effects of the undeclared horizontal halving
 
 - Invaders, Pac-Man, Ms. Pac-Man and DKong `memset()` 640 `uint16` per
   scanline. Half of that — 640 bytes x 240 rows = 153KB per frame,
-  **9.2MB/s** — is stores into memory the display never reads, on the same
-  SRAM bus Core 1's DVI DMA is competing for. Galaga's border clear runs to
-  640 too. BTime is the only renderer that already stops at 320
-  (`VISIBLE_COLS`), and its comment says why.
-- The 8 scanline buffers are allocated 640 `uint16` wide when 320 is what
-  libdvi reads: 5,120 bytes of dead SRAM.
+  **9.2MB/s** — was stores into memory the display never reads, on the same
+  SRAM bus Core 1's DVI DMA is competing for. Galaga's border clear ran to
+  640 too. BTime was the only renderer that already stopped at 320, and its
+  comment said why.
+
+  **Fixed for free by phase 1**, since these all clear `HAL_VIDEO_WIDTH`.
+  Measured on hardware, Donkey Kong in tate with sound:
+
+  | | before | after |
+  |---|---|---|
+  | `work` | 11.65-13.75ms | **11.18-13.30ms** |
+  | `work_max` | 15803us | **15481us** |
+
+  ~450us a frame, ~2% of the 16.66ms budget, for deleting stores nothing
+  ever read.
+
+- The 8 scanline buffers are still allocated 640 `uint16` wide when 320 is
+  what libdvi reads: 5,120 bytes of dead SRAM. Deliberately left until every
+  renderer is known to stop at 320 — phase 5.
 
 ---
 
@@ -368,12 +384,27 @@ replaced by the shared `tools/host_common/host_ppm.cpp`; see section 6 for
 what it fixes and the dumps that verify it. Byte-compare baselines need
 regenerating.
 
-**Phase 1 — one coordinate space.** `HAL_VIDEO_WIDTH` -> 320,
-`HAL_VIDEO_HEIGHT` -> 240, `dvi_y` becomes 0..239, and every x2 and /2
-disappears. Make the HAL contract say what the hardware is. Mechanical
-sweep of ~30 files; the output must be pixel-identical apart from the
-intended change. This makes the section 3 class of bug unrepresentable, and
-it ends the 640-wide `memset` for free.
+**Phase 1 — one coordinate space. DONE.** `HAL_VIDEO_WIDTH` -> 320,
+`HAL_VIDEO_HEIGHT` -> 240, `dvi_y` runs 0..239,
+`HAL_VIDEO_SCANLINES_PER_FRAME` removed entirely, and every x2 and /2 gone
+with it. The HAL contract now names the canvas, not the physical
+resolution, which makes the section 3 class of bug unrepresentable.
+
+*Verification.* 44 PPM dumps — 6 games x 4 rotations, captured before the
+sweep with the phase 0 dumper — came back **byte-identical** afterwards.
+That is the whole point of doing phase 0 first: this sweep touched 20 files
+and every rotation formula in the project, and "pixel-identical" is a claim
+that can be checked rather than asserted. All 8 sketches compile; Donkey
+Kong confirmed on hardware in tate (`starve 0/60`, `frame` pinned at
+16.66ms) and in landscape (`starve 120/60`, unchanged — phase 1 was not
+meant to fix that). Free win measured: see section 1.
+
+*Note on the landscape divisor.* `dy = dvi_y * GAME_WIDTH / HAL_VIDEO_HEIGHT`
+did not change, and did not need to: written against `HAL_VIDEO_HEIGHT`, it
+gives the same answer at 240 samples of a 240-row canvas as it did at 240
+samples of a 480-row one. It is still the wrong *target* (it fills 240 rows
+against a 224-column axis instead of 180) — that is phase 2's job, not
+phase 1's.
 
 **Phase 2 — one shared geometry module.** `ArcadeHAL/src/arcade_video_geom.h`,
 with `av_geom_init(long_px, short_px)` building four Bresenham LUTs (tate:

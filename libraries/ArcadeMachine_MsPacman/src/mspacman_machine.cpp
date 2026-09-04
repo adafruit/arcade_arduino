@@ -128,7 +128,7 @@ static void run_frame_sequential(mspacman_system *system) {
 }
 
 // Runs the frame's cycles INTERLEAVED with scanline submission, evenly
-// spreading MSPACMAN_CYCLES_PER_FRAME across the HAL_VIDEO_SCANLINES_PER_FRAME
+// spreading MSPACMAN_CYCLES_PER_FRAME across the HAL_VIDEO_HEIGHT
 // acquire/submit calls instead of running them all in one uninterrupted
 // burst before the first call. Fixes arcade_arduino/DEVNOTES.md problem
 // #19: even after fixing the renderer itself (problem #18), a real,
@@ -154,20 +154,19 @@ static void run_frame_sequential(mspacman_system *system) {
 // explanation (arcade_arduino/DEVNOTES.md problem #22).
 static void run_frame_interleaved(mspacman_system *system) {
     uint32_t start = system->cpu.cyc;
-    uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
 
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         // Exact proportional target delta (not repeated addition) so the
         // final slice lands exactly on MSPACMAN_CYCLES_PER_FRAME elapsed
         // regardless of how that divides by the scanline count.
         uint32_t target_delta =
-            (uint32_t)((uint64_t)MSPACMAN_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_SCANLINES_PER_FRAME);
+            (uint32_t)((uint64_t)MSPACMAN_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_HEIGHT);
         while ((uint32_t)(system->cpu.cyc - start) < target_delta) {
             z80_step(&system->cpu);
         }
 
         uint16_t *buf = hal_video_acquire_scanline();
-        mspacman_video_render_scanline(system, i * step, buf);
+        mspacman_video_render_scanline(system, i, buf);
         hal_video_submit_scanline(buf);
     }
 

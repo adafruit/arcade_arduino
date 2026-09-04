@@ -69,7 +69,7 @@ static uint16_t rgb565_palette[32];
 // from Invaders' (256). As with the original tuning, fine pixel alignment
 // should be confirmed on real hardware (see CLAUDE.md -- flashing and
 // observing the physical display is the only real verification here).
-#define TATE_BY  16u    // (480 - 224*2) / 2
+#define TATE_BY   8u    // (240 - 224) / 2
 #define TATE_BX  16u    // (320 - 288)   / 2
 #define LAND_BX  48u    // (320 - 224)   / 2 -- centred in visible DVI x 0..319
 
@@ -280,8 +280,8 @@ void pacman_video_render_scanline(const pacman_system *sys, uint32_t dvi_y, uint
         // 90 deg CCW (tate, default): DVI y -> native row (x2 scale).
         // Computed here, on demand, one row per call -- see this cache's
         // header comment for why tate must NOT read frame_cache.
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)PACMAN_GAME_HEIGHT * 2u) return;
-        uint32_t dx = (dvi_y - TATE_BY) >> 1u;
+        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)PACMAN_GAME_HEIGHT) return;
+        uint32_t dx = dvi_y - TATE_BY;
         if (mir) dx = (uint32_t)(PACMAN_GAME_HEIGHT - 1) - dx;
         render_native_row(sys, dx, row);
         for (uint32_t col = 0; col < (uint32_t)PACMAN_GAME_WIDTH; col++)
@@ -306,9 +306,9 @@ void pacman_video_render_scanline(const pacman_system *sys, uint32_t dvi_y, uint
 
     case 3: {
         // 90 deg CW (tate) -- on demand, same as case 1.
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)PACMAN_GAME_HEIGHT * 2u) return;
-        uint32_t dx = mir ? (dvi_y - TATE_BY) >> 1u
-                          : (uint32_t)(PACMAN_GAME_HEIGHT - 1) - ((dvi_y - TATE_BY) >> 1u);
+        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)PACMAN_GAME_HEIGHT) return;
+        uint32_t dx = mir ? (dvi_y - TATE_BY)
+                          : (uint32_t)(PACMAN_GAME_HEIGHT - 1) - (dvi_y - TATE_BY);
         render_native_row(sys, dx, row);
         for (uint32_t col = 0; col < (uint32_t)PACMAN_GAME_WIDTH; col++) {
             uint32_t rev = (uint32_t)(PACMAN_GAME_WIDTH - 1u) - col;
@@ -332,16 +332,15 @@ void pacman_draw_frame(pacman_system *system) {
             render_native_row(system, y, frame_cache[y]);
     }
 
-    uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
-        pacman_video_render_scanline(system, i * step, buf);
+        pacman_video_render_scanline(system, i, buf);
         hal_video_submit_scanline(buf);
     }
 }
 
 void pacman_draw_error_frame(uint16_t color) {
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
         for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) buf[x] = color;
         hal_video_submit_scanline(buf);

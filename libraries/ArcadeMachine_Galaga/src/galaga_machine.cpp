@@ -219,7 +219,7 @@ static void run_frame_sequential(galaga_system *system) {
 }
 
 // Tate/CW rotation: interleaves the 3-CPU stepping WITH per-scanline
-// rendering, evenly spread across HAL_VIDEO_SCANLINES_PER_FRAME calls --
+// rendering, evenly spread across HAL_VIDEO_HEIGHT calls --
 // same DEVNOTES.md problem #19 rationale pacman_machine.cpp's
 // run_frame_interleaved() documents in full (never run a whole frame's
 // CPU cycles before the first hal_video_acquire_scanline() call).
@@ -227,16 +227,15 @@ GALAGA_M_RAMFUNC static void run_frame_interleaved(galaga_system *system) {
     uint32_t start_main = system->cpu_main.cyc;
     uint32_t start_sub  = system->cpu_sub.cyc;
     uint32_t start_sub2 = system->cpu_sub2.cyc;
-    uint32_t step = HAL_VIDEO_HEIGHT / HAL_VIDEO_SCANLINES_PER_FRAME;
     system->nmi2_fired_a = false;
     system->nmi2_fired_b = false;
     galaga_video_begin_frame(system); // latch this frame's sprites (see galaga_video.h)
     uint32_t nmi2_mark_a = start_sub2 + GALAGA_CYCLES_PER_FRAME / 4;
     uint32_t nmi2_mark_b = start_sub2 + 3UL * GALAGA_CYCLES_PER_FRAME / 4;
 
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint32_t target_delta =
-            (uint32_t)((uint64_t)GALAGA_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_SCANLINES_PER_FRAME);
+            (uint32_t)((uint64_t)GALAGA_CYCLES_PER_FRAME * (i + 1) / HAL_VIDEO_HEIGHT);
         interleave_to_target(system, start_main, start_sub, start_sub2, target_delta,
                               nmi2_mark_a, nmi2_mark_b);
 
@@ -272,7 +271,7 @@ GALAGA_M_RAMFUNC static void run_frame_interleaved(galaga_system *system) {
             g_noblock_run = 0;
         }
         uint32_t r0 = micros();
-        galaga_video_render_scanline(system, i * step, buf);
+        galaga_video_render_scanline(system, i, buf);
         uint32_t r_us = micros() - r0;
         if (r_us > g_render_max_us) g_render_max_us = r_us;
         hal_video_submit_scanline(buf);

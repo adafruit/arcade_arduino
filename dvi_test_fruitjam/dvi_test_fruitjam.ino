@@ -64,13 +64,14 @@ void loop() {
     static uint32_t frame = 0;
     uint32_t band_width = HAL_VIDEO_WIDTH / 8;
 
-    // Must submit exactly HAL_VIDEO_SCANLINES_PER_FRAME times per frame --
-    // NOT HAL_VIDEO_HEIGHT times. On Fruit Jam these differ (see
-    // arcade_hal_video.h): the DVI peripheral here only works reliably at a
-    // 2x vertical repeat, so each submitted scanline is physically shown
-    // twice. This pattern doesn't vary by row, so no coordinate mapping is
-    // needed beyond just submitting the right number of times.
-    for (uint32_t i = 0; i < HAL_VIDEO_SCANLINES_PER_FRAME; i++) {
+    // Submit exactly HAL_VIDEO_HEIGHT times per frame, filling
+    // HAL_VIDEO_WIDTH pixels each. Those are the CANVAS dimensions
+    // (320x240 here), not the physical 640x480: the board doubles both
+    // axes on the way out, and that is its business, not ours. See
+    // arcade_hal_video.h -- this used to require submitting
+    // HAL_VIDEO_SCANLINES_PER_FRAME times against a HAL_VIDEO_HEIGHT of
+    // 480, and getting that pairing wrong is what DEVNOTES #76 is about.
+    for (uint32_t i = 0; i < HAL_VIDEO_HEIGHT; i++) {
         uint16_t *buf = hal_video_acquire_scanline();
         for (uint32_t x = 0; x < HAL_VIDEO_WIDTH; x++) {
             buf[x] = bar_color((x + frame) / band_width);

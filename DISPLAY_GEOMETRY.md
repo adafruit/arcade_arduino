@@ -47,6 +47,12 @@ CPU chapter, not this one. Its long-axis merge stays off: worth only +7-13%
 of lit pixels here against Pac-Man's +41%, and it cost more starvation than
 it cured.
 
+**Burger Time's aspect correction was re-tested after the #85 runway change
+and still does not fit** -- it costs ~1,712us a frame, taking mean work to
+16,195us against a 16,667us frame and dropping it below 60fps (DEVNOTES #88).
+A deeper queue absorbs bursts, not sustained deficits. The lever is still the
+shared wide-store upsampling emit below.
+
 **Burger Time runs all four rotations at 60fps but keeps its aspect error.**
 It needs the correction most of any game (33.3%, a square raster) and cannot
 afford it -- 1.1ms of headroom against a 1.6ms cost. It joins Donkey Kong in

@@ -4234,3 +4234,61 @@ emulation and it is uniform across rotations rather than rendering-related.
 The same mirrored-twin asymmetry as #86 shows up identically: rot 3 costs
 945us more than rot 1, rot 0 costs 44us more than rot 2. Same cause, same
 harmlessness at this runway.
+
+### 88. Burger Time in gameplay, and a clean negative: the deeper queue does NOT buy the aspect correction
+
+Burger Time is the tightest game in the project and the one whose numbers
+were least trustworthy -- every figure it had ever produced came from attract
+mode, where the demo looks enough like real play that it was mistaken for it
+once already (#81). Measured with a credit in, chef walking and throwing
+pepper, all four rotations, ~3 minutes each:
+
+| rot | | work mean | work peak | worst runway |
+|---|---|---|---|---|
+| 0 | landscape, upright | 13,962us | 14,706us | 25/32 |
+| 1 | tate, upright | 14,483us | 15,290us | 24/32 |
+| 2 | landscape, mirrored | 14,025us | 14,825us | 23/32 |
+| 3 | tate, mirrored | 14,506us | 15,380us | 23/32 |
+
+`starve` reads 5 in every rotation -- it is a lifetime total in this sketch,
+and 5 identical across four independent runs is the boot transient before
+the pipeline fills, not gameplay starvation.
+
+**The tate peaks exceed the active-video window.** 15,290 and 15,380us
+against 15,238us. That used to be a red line and now is not: the queue never
+dropped below 23 of 32, i.e. it never spent more than 9 buffers of the 32
+available. This is the #85 runway doing exactly what it was added for.
+
+**And attract was NOT an underestimate here.** The previously recorded
+attract figure was `work_max` 15,513us, which is *higher* than any gameplay
+peak measured now. Burger Time's cost is dominated by its fixed tilemap and
+sprite layers rather than by how many enemies are alive, so the standing
+"measure in gameplay" warning -- which is real, and cost Galaga five failed
+optimisations -- simply does not bite on this game. Worth recording so the
+warning is applied with judgement rather than as a ritual.
+
+**The negative result, which is the useful part.** 32 buffers is 2032us of
+runway, more than the whole 1429us vblank, so the entire vblank is now
+bankable where 8 buffers could only hold 508us of it. That raises the
+SUSTAINABLE work ceiling from ~15,746us to the full 16,667us frame, and the
+obvious question was whether Burger Time could finally afford the aspect
+correction it has always needed most (33.3%, a square raster) and never been
+able to run. Measured, rotation 1, `-DTEST_STRETCH=1`:
+
+```
+work_MEAN 16,195us   work_max 17,489us   minq 0/32   starve 711,872   frame 16,981us
+```
+
+No. The correction costs ~1,712us a frame, which puts mean work over the
+16,667us frame budget outright -- frame time went to 16,981us, i.e. it stopped
+holding 60fps. The queue emptied completely and starvation went to six
+figures.
+
+**This is the burst-vs-sustained distinction of #85 confirmed from the other
+side.** Runway absorbs a burst; it does nothing whatsoever for a sustained
+deficit, because there is no surplus anywhere in the frame to refill it from.
+Galaga starved with 2ms of average headroom and was fixed by runway alone.
+Burger Time with the correction on has *negative* headroom and no amount of
+buffering can help it. The lever for Burger Time is still what
+DISPLAY_GEOMETRY.md says it is: a shared wide-store upsampling emit, so the
+correction costs less than 1.7ms in the first place.

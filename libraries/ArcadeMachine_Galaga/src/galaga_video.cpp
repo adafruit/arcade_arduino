@@ -490,7 +490,10 @@ GALAGA_VID_RAMFUNC void galaga_video_begin_frame(const galaga_system *sys) {
     g_sprite_count = n;
 
     // Bucket them by column, in list order so the draw order (later sprite
-    // over earlier) is preserved exactly.
+    // over earlier) is preserved exactly. YOKO ONLY: tate never reads these
+    // buckets, and building them is ~2048 appends a frame that its budget
+    // should not be paying for.
+    if (sys->rotation != 0 && sys->rotation != 2) return;
     for (uint32_t c = 0; c < (uint32_t)GALAGA_GAME_WIDTH; c++) g_spr_col_n[c] = 0;
     for (int si = 0; si < n; si++) {
         const galaga_sprite_ent *e = &g_sprites[si];

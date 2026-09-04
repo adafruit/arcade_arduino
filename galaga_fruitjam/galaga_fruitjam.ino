@@ -111,6 +111,20 @@ void loop() {
     bool rotate = hal_input_read(HAL_BTN_ROTATE);
     bool mirror = hal_input_read(HAL_BTN_MIRROR);
 
+    // Scripted coin+start, so the first level's alien entry -- the heaviest
+    // thing this game draws -- is reachable without a hand on the buttons
+    // and lands on the same frame every run:
+    //   --build-property compiler.cpp.extra_flags=-DTEST_AUTOSTART=1
+    // Frames chosen to clear the boot RAM test before coining.
+#ifdef TEST_AUTOSTART
+    {
+        static uint32_t autof = 0;
+        autof++;
+        if (autof > 300 && autof < 312) coin   = true;
+        if (autof > 360 && autof < 372) start1 = true;
+    }
+#endif
+
     galaga_input_update(&g_system, coin, start1, start2, left, right, fire, rotate, mirror);
 
     // Frame-budget instrument. NOT scratch debugging -- keep it.

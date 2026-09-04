@@ -3427,6 +3427,38 @@ expensive columns land LATE in the frame, after the vblank slack is spent;
 rotation 0's land early. Measured directly: `noblock_run` 95 against 71, on
 identical `render_max`.
 
+**AND THEN, FROM ACTUALLY PLAYING IT: every rotation red-lines during the
+first level's alien entry -- INCLUDING TATE, whose renderer and frame loop
+Phase 3 never touched.** Reported from the screen and then measured on the
+shipped tate path with 43-45 sprites on screen:
+
+| | attract (what I had been measuring) | level 1 entry |
+|---|---|---|
+| `render_max` | 105-130us | **218-311us** |
+| `work_max` | 13.8-14.4ms | 14.8-15.3ms |
+| `starve` | <= 5 a window | **123-3027 a window** |
+
+Against a 69us DVI line rate, a 311us scanline is 4.5x over. The 8-buffer
+queue (~555us) cannot absorb a run of those, and `noblock_run` sits at
+175-220.
+
+**This is a pre-existing Galaga limit, not a Phase 3 regression**, and the
+reason it was never seen is that nobody had measured the game while
+PLAYING it. #35 says `work` can sit inside budget while the queue starves;
+this adds a second half to that -- the attract loop peaks at 22-29 sprites
+and the first level opens with 45, so every number in this file taken from
+attract mode understates the real peak by 2-3x. The one thing I contributed
+to tate's frame was building the per-column sprite buckets it never reads;
+that is now gated to yoko.
+
+**It is a sprite-cost problem, not a geometry one.** `render_max` scales
+with sprite count in both orientations, and the row renderer indexes
+`sprite_pixels[code][px2][py2]` with px2 varying -- a stride of 16 per
+pixel, where the column renderer's fixed-px2 walk is contiguous. That is
+the same access-pattern trap Burger Time hit in #81, in the shipped code
+this time. Fixing it is its own piece of work and belongs outside the
+display-geometry series.
+
 **That is the #35 lesson in its purest form.** 2.9ms of average headroom and
 it still starves, because the DVI queue holds 8 scanlines and cares only
 about a RUN of scanlines slower than the 69us line rate. Two of my three

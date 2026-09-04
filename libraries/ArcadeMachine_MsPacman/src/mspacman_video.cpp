@@ -395,7 +395,7 @@ void mspacman_video_render_scanline(const mspacman_system *sys, uint32_t dvi_y, 
             uint16_t *out = buf + av_tate.x0;
             for (uint32_t c = 0; c < (uint32_t)MSPACMAN_GAME_WIDTH; c++) out[c] = row[c];
         } else {
-            av_emit_row(buf, row, &av_tate);
+            av_emit_row_wide(buf, row, &av_tate);
         }
         break;
     }
@@ -435,7 +435,7 @@ void mspacman_video_render_scanline(const mspacman_system *sys, uint32_t dvi_y, 
             for (uint32_t c = 0; c < (uint32_t)MSPACMAN_GAME_WIDTH; c++)
                 out[c] = row[(uint32_t)(MSPACMAN_GAME_WIDTH - 1u) - c];
         } else {
-            av_emit_row_rev(buf, row, &av_tate);
+            av_emit_row_wide_rev(buf, row, &av_tate);
         }
         break;
     }

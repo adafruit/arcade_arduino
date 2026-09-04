@@ -57,6 +57,34 @@ static void build_rep(av_map_t *m, uint32_t src_px) {
     m->src_n = (uint16_t)(src_px < AV_CANVAS_W ? src_px : AV_CANVAS_W);
 }
 
+// Sets m->dbl_k for the wide-store emit, or leaves it 0.
+//
+// VERIFIES the shape against rep[] rather than inferring it from the ratio.
+// The ratio arithmetic says every upsample here should be "every k-th
+// sample doubled, first of its group", and a quick check says it is -- but
+// col[] is built by integer division and rep[] is derived from col[], so
+// the only thing that can be trusted is rep[] itself. If it ever fails to
+// match, dbl_k stays 0 and the callers use the scalar emit: slower, never
+// wrong. See av_map_t::dbl_k and DEVNOTES #89.
+static void build_dbl_k(av_map_t *m) {
+    m->dbl_k = 0;
+    const uint32_t dst_n = (uint32_t)(m->x1 - m->x0);
+    const uint32_t n     = m->src_n;
+    if (n == 0u || dst_n <= n) return;      // 1:1 or a downsample
+    if (m->x0 & 1u) return;                 // pairs must start 4-byte aligned
+    const uint32_t extra = dst_n - n;
+    if (n % extra) return;                  // not a uniform ratio
+    const uint32_t k = n / extra;
+    // Only the group sizes with a wide-store loop in the header.
+    if (k != 3u && k != 4u && k != 9u) return;
+    // Odd k consumes one group per iteration, even k two.
+    const uint32_t grp = (k & 1u) ? k : 2u * k;
+    if (n % grp) return;
+    for (uint32_t sx = 0; sx < n; sx++)
+        if (m->rep[sx] != ((sx % k) == 0u ? 2u : 1u)) return;
+    m->dbl_k = (uint16_t)k;
+}
+
 // rowrep[y]: how many raster samples collapse into canvas row y. Derived
 // from row[] for the same reason build_rep() is derived from col[] -- one
 // mapping, one formula, no chance of the two disagreeing.
@@ -90,6 +118,8 @@ static void rebuild(void) {
         build_rep(&av_yoko, s_short_px);
         build_rowrep(&av_tate, s_short_px);
         build_rowrep(&av_yoko, s_long_px);
+        build_dbl_k(&av_tate);
+        build_dbl_k(&av_yoko);
     } else {
         // Historical layout: 1:1 with pillar/letterboxing, EXCEPT yoko's
         // row axis, which already resampled LONG onto all 240 canvas rows
@@ -107,6 +137,8 @@ static void rebuild(void) {
         build_rep(&av_yoko, s_short_px);
         build_rowrep(&av_tate, s_short_px);
         build_rowrep(&av_yoko, s_long_px);
+        build_dbl_k(&av_tate);
+        build_dbl_k(&av_yoko);
     }
 }
 

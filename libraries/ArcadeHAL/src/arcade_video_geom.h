@@ -122,6 +122,28 @@ typedef struct {
     // Pac-Man: sampling one line per canvas row keeps 58.2% of the lit
     // pixels, merging both axes keeps 82.3%.
     uint8_t  rowrep[AV_CANVAS_H];
+
+    // UPSAMPLE SHAPE, or 0 when this axis is not a uniform upsample.
+    //
+    // Every upsampling ratio in this project turns out to be the same
+    // shape: "every k-th source pixel is doubled, and it is the FIRST of
+    // each group of k".
+    //
+    //     240 -> 320  k=3      256 -> 320  k=4
+    //     288 -> 320  k=9      224 -> 240  k=14
+    //
+    // That is not a coincidence -- each is n -> n*(k+1)/k, because the
+    // canvas is 320 and the rasters are what they are. It is what makes a
+    // WIDE-STORE emit possible: a group of k source pixels produces exactly
+    // k+1 canvas pixels, so for odd k (and for two groups when k is even)
+    // the group lands on a whole number of 32-bit words and can be written
+    // two pixels at a time.
+    //
+    // Set only after VERIFYING rep[] actually has that shape, never inferred
+    // from the ratio alone -- see build_dbl_k(). Only the values with a
+    // wide-store loop below (3, 4, 9) are ever stored; anything else stays 0
+    // and the callers fall back to the scalar emit.
+    uint16_t dbl_k;
 } av_map_t;
 
 // Tate (rotations 1 and 3): col indexes the LONG axis, row the SHORT axis.
@@ -249,6 +271,170 @@ static inline void av_emit_row_rev(uint16_t *dst, const uint16_t *src,
     }
     dst[x1]      = 0;
     dst[x1 + 1u] = 0;
+}
+
+// ---------------------------------------------------------------------------
+// WIDE-STORE UPSAMPLING EMIT
+//
+// The scalar av_emit_row() above writes TWO 16-bit stores per source pixel.
+// At 240 source samples that is 480 halfword stores a scanline, against the
+// 120 word stores a 1:1 path needs -- and it is why aspect correction was
+// unaffordable: measured on Burger Time it cost 1,712us a frame, putting
+// mean work over the whole 16,667us frame budget (DEVNOTES #88).
+//
+// This writes TWO CANVAS PIXELS PER 32-BIT STORE, the same trick
+// btime_video.cpp's 1:1 path has always used, which was believed impossible
+// for an upsample because the run pattern is irregular. It is not
+// irregular. Every upsample here is "every k-th source pixel doubled, first
+// of its group" (see av_map_t::dbl_k), so a group of k source pixels is
+// exactly k+1 canvas pixels, and:
+//
+//   k=3  3 src -> 4 dst  = 2 words   (240 -> 320, Burger Time)
+//   k=9  9 src -> 10 dst = 5 words   (288 -> 320, the Namco games)
+//   k=4  8 src -> 10 dst = 5 words   (256 -> 320, Invaders/LRescue/DKong)
+//
+// k=4 takes TWO groups because 4+1 is odd and a single group would leave
+// the pointer half-word aligned; two groups restore it. Odd k needs only
+// one group.
+//
+// The group bodies are macros so the pattern exists ONCE. Every emit below
+// -- forward, reversed, direct, palette-indexed -- instantiates the same
+// three macros with a different FETCH. That is deliberate: the reversed
+// variants are where this project has twice shipped a slow or wrong twin
+// (DEVNOTES #81, and av_emit_row_rev()'s own warning), and a macro cannot
+// drift from its sibling.
+//
+// FETCH(i) must yield the i-th SOURCE sample as a uint32_t already in
+// canvas pixel format.
+#define AV__W_K3(FETCH, O, N)                                                 \
+    do {                                                                      \
+        const uint32_t g_ = (N) / 3u;                                         \
+        for (uint32_t i_ = 0; i_ < g_; i_++) {                                \
+            const uint32_t s_ = i_ * 3u;                                      \
+            const uint32_t a0 = FETCH(s_ + 0u);                               \
+            const uint32_t a1 = FETCH(s_ + 1u);                               \
+            const uint32_t a2 = FETCH(s_ + 2u);                               \
+            (O)[i_ * 2u + 0u] = a0 | (a0 << 16);                              \
+            (O)[i_ * 2u + 1u] = a1 | (a2 << 16);                              \
+        }                                                                     \
+    } while (0)
+
+#define AV__W_K9(FETCH, O, N)                                                 \
+    do {                                                                      \
+        const uint32_t g_ = (N) / 9u;                                         \
+        for (uint32_t i_ = 0; i_ < g_; i_++) {                                \
+            const uint32_t s_ = i_ * 9u;                                      \
+            const uint32_t a0 = FETCH(s_ + 0u), a1 = FETCH(s_ + 1u);          \
+            const uint32_t a2 = FETCH(s_ + 2u), a3 = FETCH(s_ + 3u);          \
+            const uint32_t a4 = FETCH(s_ + 4u), a5 = FETCH(s_ + 5u);          \
+            const uint32_t a6 = FETCH(s_ + 6u), a7 = FETCH(s_ + 7u);          \
+            const uint32_t a8 = FETCH(s_ + 8u);                               \
+            (O)[i_ * 5u + 0u] = a0 | (a0 << 16);                              \
+            (O)[i_ * 5u + 1u] = a1 | (a2 << 16);                              \
+            (O)[i_ * 5u + 2u] = a3 | (a4 << 16);                              \
+            (O)[i_ * 5u + 3u] = a5 | (a6 << 16);                              \
+            (O)[i_ * 5u + 4u] = a7 | (a8 << 16);                              \
+        }                                                                     \
+    } while (0)
+
+// Two k=4 groups at once: 8 src -> 10 dst. a0 and a4 are the doubled ones.
+#define AV__W_K4(FETCH, O, N)                                                 \
+    do {                                                                      \
+        const uint32_t g_ = (N) / 8u;                                         \
+        for (uint32_t i_ = 0; i_ < g_; i_++) {                                \
+            const uint32_t s_ = i_ * 8u;                                      \
+            const uint32_t a0 = FETCH(s_ + 0u), a1 = FETCH(s_ + 1u);          \
+            const uint32_t a2 = FETCH(s_ + 2u), a3 = FETCH(s_ + 3u);          \
+            const uint32_t a4 = FETCH(s_ + 4u), a5 = FETCH(s_ + 5u);          \
+            const uint32_t a6 = FETCH(s_ + 6u), a7 = FETCH(s_ + 7u);          \
+            (O)[i_ * 5u + 0u] = a0 | (a0 << 16);                              \
+            (O)[i_ * 5u + 1u] = a1 | (a2 << 16);                              \
+            (O)[i_ * 5u + 2u] = a3 | (a4 << 16);                              \
+            (O)[i_ * 5u + 3u] = a4 | (a5 << 16);                              \
+            (O)[i_ * 5u + 4u] = a6 | (a7 << 16);                              \
+        }                                                                     \
+    } while (0)
+
+// Dispatch. `dbl_k` is 0 unless build_dbl_k() verified the shape AND x0 is
+// even, so the only remaining risk is a scanline buffer that is not itself
+// 4-byte aligned -- checked once per row, not per pixel, and falling back
+// rather than making an unaligned word store.
+#define AV__W_DISPATCH(FETCH, DST, M, FALLBACK)                               \
+    do {                                                                      \
+        const uint16_t k_ = (M)->dbl_k;                                       \
+        uint32_t *o_ = (uint32_t *)(void *)((DST) + (M)->x0);                 \
+        if (k_ == 0u || (((uintptr_t)o_) & 3u) != 0u) { FALLBACK; return; }   \
+        const uint32_t n_ = (M)->src_n;                                       \
+        if (k_ == 3u)      AV__W_K3(FETCH, o_, n_);                           \
+        else if (k_ == 4u) AV__W_K4(FETCH, o_, n_);                           \
+        else               AV__W_K9(FETCH, o_, n_);                           \
+    } while (0)
+
+// Scalar palette-indexed emits: av_emit_row()/_rev() for renderers whose
+// row is 8-bit pen indices rather than canvas pixels. These are the
+// fallbacks for the wide versions below, and exist so a paletted renderer
+// never has to make an extra uint16 pass just to call the shared emit --
+// which would cost more than the emit saves (DEVNOTES #79).
+static inline void av_emit_row_pal(uint16_t *dst, const uint8_t *pen,
+                                   const uint16_t *pal, const av_map_t *m) {
+    const uint8_t *rep = m->rep;
+    const uint32_t n   = m->src_n;
+    const uint32_t x1  = m->x1;
+    uint32_t x = m->x0;
+    for (uint32_t s = 0; s < n; s++) {
+        const uint16_t v = pal[pen[s]];
+        dst[x] = v; dst[x + 1] = v;
+        x += rep[s];
+    }
+    dst[x1] = 0; dst[x1 + 1u] = 0;
+}
+
+static inline void av_emit_row_pal_rev(uint16_t *dst, const uint8_t *pen,
+                                       const uint16_t *pal, const av_map_t *m) {
+    const uint8_t *rep = m->rep;      // FORWARDS -- only values mirror
+    const uint32_t n   = m->src_n;
+    const uint32_t x1  = m->x1;
+    const uint32_t last = n - 1u;
+    uint32_t x = m->x0;
+    for (uint32_t s = 0; s < n; s++) {
+        const uint16_t v = pal[pen[last - s]];
+        dst[x] = v; dst[x + 1] = v;
+        x += rep[s];
+    }
+    dst[x1] = 0; dst[x1 + 1u] = 0;
+}
+
+// The four wide emits. Each writes exactly the picture's own columns
+// [x0, x1) and nothing else -- unlike the scalar versions there is NO
+// overspill, so a caller that clears its borders separately is done.
+static inline void av_emit_row_wide(uint16_t *dst, const uint16_t *src,
+                                    const av_map_t *m) {
+#define AV__F(i) ((uint32_t)src[(i)])
+    AV__W_DISPATCH(AV__F, dst, m, av_emit_row(dst, src, m));
+#undef AV__F
+}
+
+static inline void av_emit_row_wide_rev(uint16_t *dst, const uint16_t *src,
+                                        const av_map_t *m) {
+    const uint32_t last_ = (uint32_t)m->src_n - 1u;
+#define AV__F(i) ((uint32_t)src[last_ - (i)])
+    AV__W_DISPATCH(AV__F, dst, m, av_emit_row_rev(dst, src, m));
+#undef AV__F
+}
+
+static inline void av_emit_row_wide_pal(uint16_t *dst, const uint8_t *pen,
+                                        const uint16_t *pal, const av_map_t *m) {
+#define AV__F(i) ((uint32_t)pal[pen[(i)]])
+    AV__W_DISPATCH(AV__F, dst, m, av_emit_row_pal(dst, pen, pal, m));
+#undef AV__F
+}
+
+static inline void av_emit_row_wide_pal_rev(uint16_t *dst, const uint8_t *pen,
+                                            const uint16_t *pal, const av_map_t *m) {
+    const uint32_t last_ = (uint32_t)m->src_n - 1u;
+#define AV__F(i) ((uint32_t)pal[pen[last_ - (i)]])
+    AV__W_DISPATCH(AV__F, dst, m, av_emit_row_pal_rev(dst, pen, pal, m));
+#undef AV__F
 }
 
 #ifdef __cplusplus

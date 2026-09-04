@@ -4292,3 +4292,82 @@ Burger Time with the correction on has *negative* headroom and no amount of
 buffering can help it. The lever for Burger Time is still what
 DISPLAY_GEOMETRY.md says it is: a shared wide-store upsampling emit, so the
 correction costs less than 1.7ms in the first place.
+
+### 89. The shared wide-store upsampling emit: aspect correction goes from 1,712us to 66us
+
+#88 measured the aspect correction at 1,712us a frame on Burger Time and
+concluded it could not be afforded. The cost was not the resampling. It was
+the STORES.
+
+**The observation that unlocked it.** The scalar `av_emit_row()` writes two
+16-bit stores per source pixel -- 480 halfword stores a scanline at 240
+samples -- where a 1:1 path writes 120 word stores using the two-pixels-per-
+32-bit-store trick `btime_video.cpp` has used since #81. That trick was
+believed impossible for an upsample because the run pattern is irregular.
+
+**It is not irregular.** Every upsampling ratio in this project is the same
+shape: *every k-th source pixel is doubled, and it is the first of its
+group.* Verified against the maps' own `rep[]`, not assumed:
+
+```
+240 -> 320  k=3      256 -> 320  k=4
+288 -> 320  k=9      224 -> 240  k=14
+```
+
+That is forced by the geometry -- each is n -> n*(k+1)/k because the canvas
+is 320 -- so a group of k source pixels is exactly k+1 canvas pixels:
+
+```
+k=3   3 src -> 4 dst  = 2 words   (Burger Time)
+k=9   9 src -> 10 dst = 5 words   (the Namco games)
+k=4   8 src -> 10 dst = 5 words   (Invaders/LRescue/DKong; TWO groups,
+                                   because 4+1 is odd and one group would
+                                   leave the pointer half-word aligned)
+```
+
+`av_emit_row_wide()`, `_rev()`, `_pal()` and `_pal_rev()` in
+`arcade_video_geom.h`. Three group-body macros hold the pattern ONCE and all
+four emits instantiate them with a different fetch -- deliberate, because the
+reversed twin is exactly where this project has twice shipped something slow
+or wrong (#81, and `av_emit_row_rev()`'s own palindrome warning), and a macro
+cannot drift from its sibling.
+
+**The paletted variants are not a convenience.** Burger Time's row is 8-bit
+pen indices. Converting it to a uint16 row so a plain `av_emit_row_wide()`
+could be used would add a whole extra pass over the raster and cost more than
+the wide store saves (the #79 lesson). Passing `pen` + `pal` keeps the lookup
+inside the emit's own loop.
+
+**Safety.** `dbl_k` is 0 unless `build_dbl_k()` verified rep[] really has the
+shape AND x0 is even; the emit additionally checks the scanline buffer's own
+4-byte alignment once per row, and falls back to the scalar emit rather than
+making an unaligned word store. Every path is proved byte-identical to
+`dst[x] = src[col[x]]` by `tools/geom_test`, for all three rasters, both
+directions, direct and paletted. No hardware needed to catch a wrong index.
+
+**Measured, Burger Time, gameplay, all four rotations:**
+
+| rot | | stretch off | stretch ON (was) | stretch ON (now) | fps | runway |
+|---|---|---|---|---|---|---|
+| 0 | yoko | 13,962us | -- | 15,116us | 60.03 | 17/32 |
+| 1 | tate | 14,483us | **16,195us** | **14,549us** | 60.00 | 23/32 |
+| 2 | yoko, mir | 14,025us | -- | 15,364us | 60.03 | 13/32 |
+| 3 | tate, mir | 14,506us | -- | 14,610us | 60.01 | 23/32 |
+
+**The aspect correction now costs 66us a frame in tate, not 1,712us.** 26x
+cheaper, and Burger Time -- the game with the worst geometry error in the
+project, 33.3%, and the one that could never afford the fix -- runs
+aspect-correct in all four rotations at a flat 60fps.
+
+Yoko still costs ~1.2ms because it is a DOWNsample and goes through
+`av_emit_row_merge()`, which this work did not touch: a merge writes
+conditionally (a non-background sample must never lose to a background one,
+#80) and cannot blindly pair two pixels into one store. It holds 60fps with
+13-17 buffers in hand, so it is not urgent, but it is the obvious next
+target if yoko ever gets tight.
+
+**Wired into DKong, Galaga, Pac-Man and Ms. Pac-Man too** -- the tate emits
+have the same signature, so it is a one-line swap each, and the fallback
+makes it a no-op wherever stretch is off. Pac-Man and Ms. Pac-Man ship with
+stretch ON by default, so their tate rotations are now taking the new path
+and want a hardware look; both should also get slightly faster.

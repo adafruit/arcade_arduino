@@ -463,7 +463,7 @@ void dkong_video_render_scanline(const dkong_system *sys, uint32_t dvi_y, uint16
             uint16_t *out = buf + av_tate.x0;
             for (uint32_t c = 0; c < (uint32_t)DKONG_GAME_WIDTH; c++) out[c] = row[c];
         } else {
-            av_emit_row(buf, row, &av_tate);
+            av_emit_row_wide(buf, row, &av_tate);
         }
         DK_COST_ADD(g_emit_us, te);
         break;
@@ -515,7 +515,7 @@ void dkong_video_render_scanline(const dkong_system *sys, uint32_t dvi_y, uint16
             for (uint32_t c = 0; c < (uint32_t)DKONG_GAME_WIDTH; c++)
                 out[c] = row[(uint32_t)(DKONG_GAME_WIDTH - 1u) - c];
         } else {
-            av_emit_row_rev(buf, row, &av_tate);
+            av_emit_row_wide_rev(buf, row, &av_tate);
         }
         break;
     }

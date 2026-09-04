@@ -821,24 +821,21 @@ BTIME_VRAMFUNC static void emit_tate_row(uint16_t *buf, bool reverse) {
         // one column writes one pixel too far and the next iteration
         // overwrites it. The final overspill lands at x1, which the border
         // clear below mops up.
-        const uint8_t *rep  = av_tate.rep;
-        const uint32_t n    = av_tate.src_n;
-        const uint32_t last = n - 1u;
-        uint32_t x = av_tate.x0;
-
-        if (!reverse) {
-            for (uint32_t s = 0; s < n; s++) {
-                const uint16_t v = pal565[vis[s]];
-                buf[x] = v; buf[x + 1] = v;
-                x += rep[s];
-            }
-        } else {
-            for (uint32_t s = 0; s < n; s++) {
-                const uint16_t v = pal565[vis[last - s]];
-                buf[x] = v; buf[x + 1] = v;
-                x += rep[s];
-            }
-        }
+        // WIDE-STORE, two canvas pixels per 32-bit store -- the same trick
+        // the 1:1 path below has always used, now available to the
+        // upsampled path because 240->320 is "every 3rd source pixel
+        // doubled" and so lands 3 source pixels onto exactly 2 words. The
+        // per-pixel scalar version this replaces is what made the aspect
+        // correction cost 1,712us a frame and put this game over its frame
+        // budget (DEVNOTES #88/#89).
+        //
+        // The paletted form matters: passing pen indices and the palette
+        // keeps the lookup inside the emit's own loop. Converting pen_row
+        // to a uint16 row first, so a plain av_emit_row_wide() could be
+        // used, would add a whole extra pass over the raster and cost more
+        // than the wide store saves.
+        if (!reverse) av_emit_row_wide_pal(buf, vis, pal565, &av_tate);
+        else          av_emit_row_wide_pal_rev(buf, vis, pal565, &av_tate);
 
         for (uint32_t i = 0; i < av_tate.x0; i++) buf[i] = 0;
         for (uint32_t i = av_tate.x1; i < HAL_VIDEO_WIDTH; i++) buf[i] = 0;

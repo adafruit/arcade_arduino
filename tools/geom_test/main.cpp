@@ -87,6 +87,59 @@ static void check_emit(const char *tag, const av_map_t &m) {
     }
 }
 
+// The WIDE-STORE emits must produce byte-identical output to the scalar
+// ones, in all four combinations (direct/paletted x forward/reversed).
+//
+// This matters more than a normal equivalence test. The wide emits write
+// two pixels per 32-bit store from a hand-derived group pattern -- get one
+// index wrong in AV__W_K4 and the picture is subtly sheared in ONE game, in
+// ONE rotation, in a way that looks like a rendering bug rather than a
+// resampling one. The reversed variants are worse: this project has twice
+// shipped a reversed twin that was slower or wrong (DEVNOTES #81, and
+// av_emit_row_rev()'s own palindrome warning). Proving them here costs
+// nothing and needs no hardware.
+static void check_emit_wide(const char *tag, const av_map_t &m) {
+    static uint16_t src[512], got[1024], want[1024];
+    static uint8_t  pen[512];
+    static uint16_t pal[256];
+    for (uint32_t i = 0; i < 512; i++) src[i] = (uint16_t)(i * 7u + 1u);
+    // A paletted source that maps back to the SAME values, so one `want`
+    // serves both variants: pen[i] = i & 0xFF, pal[p] chosen per group.
+    for (uint32_t i = 0; i < 256; i++) pal[i] = (uint16_t)(i * 3u + 11u);
+    for (uint32_t i = 0; i < 512; i++) pen[i] = (uint8_t)(i & 0xFFu);
+
+    for (int rev = 0; rev < 2; rev++) {
+        // --- direct ---
+        for (uint32_t i = 0; i < 1024; i++) { got[i] = 0; want[i] = 0; }
+        for (uint32_t x = m.x0; x < m.x1; x++)
+            want[x] = rev ? src[m.src_n - 1u - m.col[x]] : src[m.col[x]];
+        if (rev) av_emit_row_wide_rev(got, src, &m); else av_emit_row_wide(got, src, &m);
+        for (uint32_t x = m.x0; x < m.x1; x++)
+            if (got[x] != want[x]) {
+                printf("  FAIL: %s wide%s x=%u got %u want %u (dbl_k=%u)\n",
+                       tag, rev ? " (rev)" : "", x, got[x], want[x], m.dbl_k);
+                fails++; return;
+            }
+        for (uint32_t x = 0; x < m.x0; x++) if (got[x]) { printf("  FAIL: %s wide left bleed\n", tag); fails++; return; }
+        for (uint32_t x = m.x1; x < 1000; x++) if (got[x]) { printf("  FAIL: %s wide right bleed at %u\n", tag, x); fails++; return; }
+
+        // --- palette-indexed, same expected picture ---
+        for (uint32_t i = 0; i < 1024; i++) { got[i] = 0; want[i] = 0; }
+        for (uint32_t x = m.x0; x < m.x1; x++) {
+            const uint32_t si = rev ? (m.src_n - 1u - m.col[x]) : m.col[x];
+            want[x] = pal[pen[si]];
+        }
+        if (rev) av_emit_row_wide_pal_rev(got, pen, pal, &m);
+        else     av_emit_row_wide_pal(got, pen, pal, &m);
+        for (uint32_t x = m.x0; x < m.x1; x++)
+            if (got[x] != want[x]) {
+                printf("  FAIL: %s wide_pal%s x=%u got %u want %u\n",
+                       tag, rev ? " (rev)" : "", x, got[x], want[x]);
+                fails++; return;
+            }
+    }
+}
+
 int main() {
     struct { const char *n; uint32_t L, S; } games[] = {
         {"Invaders/LRescue/DKong", 256, 224},
@@ -102,6 +155,9 @@ int main() {
             report("yoko", av_yoko, g.S, g.L);
             check_emit("tate", av_tate);
             check_emit("yoko", av_yoko);
+            check_emit_wide("tate", av_tate);
+            check_emit_wide("yoko", av_yoko);
+            printf("      dbl_k: tate=%u yoko=%u\n", av_tate.dbl_k, av_yoko.dbl_k);
             if (st) {
                 // aspect-correct destinations, identical for every game
                 CHECK(av_tate.x1 - av_tate.x0 == 320);

@@ -841,8 +841,8 @@ GALAGA_VID_RAMFUNC void galaga_video_render_scanline(const galaga_system *sys, u
         // reversal for rotation 3 is done here rather than inside
         // render_native_row(), so the memoised row above is orientation-
         // independent and both rotations share it.
-        if (sys->rotation == 1) av_emit_row(buf, scratch, &av_tate);
-        else                    av_emit_row_rev(buf, scratch, &av_tate);
+        if (sys->rotation == 1) av_emit_row_wide(buf, scratch, &av_tate);
+        else                    av_emit_row_wide_rev(buf, scratch, &av_tate);
         return;
     }
 

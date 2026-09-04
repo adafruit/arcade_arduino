@@ -4207,3 +4207,30 @@ Two things worth keeping:
   different work, which is the same asymmetry that hid two unoptimised
   mirrored twins in Burger Time (#81). Small here, and harmless with this
   much runway, but it is why every rotation gets measured rather than one.
+
+### 87. Ms. Pac-Man re-verified after the queue change, also in gameplay
+
+Same treatment as #86: `-DTEST_AUTOSTART=1` on the sketch, a credit in, the
+maze actually walked, all four rotations, aspect correction on, ~4 minutes
+each.
+
+| rot | | work mean | work max | starve | worst runway |
+|---|---|---|---|---|---|
+| 0 | landscape, mirrored | 11,099us | 11,321us | 0 | 27/32 |
+| 1 | tate, mirrored | 11,954us | 12,193us | 0 | 27/32 |
+| 2 | landscape, upright | 11,055us | 11,284us | 0 | 27/32 |
+| 3 | tate, upright | 12,899us | 13,124us | 0 | 26/32 |
+
+Zero starvation, never below 26 of 32 buffers, 2.1-4.2ms of headroom against
+the 15,238us active-video window.
+
+**Ms. Pac-Man costs consistently ~900us more than Pac-Man** in every rotation
+(12,899 vs 11,969 in tate-upright, 11,055 vs 10,150 in landscape-upright).
+That is expected -- it runs the larger ROM set with the extra board's banked
+decryption on top of the same Pac-Man hardware -- and it is worth having as a
+number, because it is the per-frame price of the Ms. Pac-Man daughterboard
+emulation and it is uniform across rotations rather than rendering-related.
+
+The same mirrored-twin asymmetry as #86 shows up identically: rot 3 costs
+945us more than rot 1, rot 0 costs 44us more than rot 2. Same cause, same
+harmlessness at this runway.

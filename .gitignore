@@ -30,6 +30,11 @@ build/
 tools/*_host/*_host
 tools/*_host/*.dSYM/
 
+# Screen-geometry conformance runner (tools/geom_test/) -- its binary and
+# macOS debug bundle. Same shape as the m6502 runner below.
+tools/geom_test/geom_test
+tools/geom_test/*.dSYM/
+
 # CPU conformance runner (tools/m6502_test/) -- its binary, and the
 # third-party 6502 test programs it runs, which are fetched rather than
 # vendored (see that tool's main.cpp header).

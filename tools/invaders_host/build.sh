@@ -33,6 +33,7 @@ cc -O2 -g -std=c11 -Wall $INC -c "$LIBS/ArcadeCPU_i8080/src/i8080.c" -o "$OBJ/i8
 
 c++ -O2 -g -std=c++17 -Wall -Wno-unused-parameter $INC \
     "$MACHINE_SRC"/*.cpp \
+    "$LIBS/ArcadeHAL/src"/*.cpp \
     "$HERE/../host_common/hal_host.cpp" \
     "$HERE/../host_common/host_ppm.cpp" \
     "$HERE/main.cpp" \

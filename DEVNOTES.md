@@ -3295,6 +3295,95 @@ it is a known quantity rather than a mystery.
 
 ## Display geometry (`DISPLAY_GEOMETRY.md`)
 
+### 77. Donkey Kong's landscape picture was 16 pixels left of centre, and a byte-compare found it
+
+**Symptom:** none anybody had reported -- which is the point.
+
+**Found by:** replacing the seven renderers' hand-derived
+`TATE_BX`/`TATE_BY`/`LAND_BX` constants with one shared module
+(`ArcadeHAL/src/arcade_video_geom.*`) and then byte-comparing 44 PPM dumps
+before and after. Forty were identical. The four that differed were Donkey
+Kong's two yoko rotations, and the diff was a pure 16-canvas-pixel
+translation with the vacated columns black -- verified programmatically, not
+eyeballed.
+
+**Cause:** `dkong_video.cpp` had
+
+```c
+#define LAND_BX  32u    // (320 - 256)   / 2 -- landscape puts cols along DVI x
+```
+
+but its landscape loop writes `DKONG_GAME_HEIGHT` (224) entries, not 256. So
+the constant was derived from the LONG axis while the loop walked the SHORT
+one, and the picture sat at canvas columns 32..255 instead of centred at
+48..271. Every other game computed the same constant as `(320 - 224) / 2 =
+48`. It is a copy of the file's own `TATE_BX` -- correct there, wrong one
+line down.
+
+**Why it survived:** it is 16 pixels, in an orientation that already showed
+red bars (#75), on a game whose yoko modes were "reported working". Nothing
+about it looks like a defect on a photographed screen.
+
+**What generalises:** this is the fourth bug in the same family as #21, #23
+and #33 -- a per-game constant derived by hand from a sibling's rather than
+from one source of truth. The fix for the family is not to check the
+constants more carefully; it is to stop having seven copies of them. **And
+the thing that actually caught it was a byte-compare against a
+known-good baseline, not a review of the constant** -- the constant reads
+plausibly, and its comment even shows the arithmetic, which is right for the
+number it computes and wrong for the axis it is used on.
+
+### 78. The aspect-ratio correction is right, and Donkey Kong cannot afford it
+
+**What was built:** `arcade_video_geom.h`'s `av_geom_set_stretch()`, which
+retargets every game from the historical 1:1-plus-pillarbox layout onto the
+cabinet-correct one -- 320x240 filled in tate, 180x240 in yoko. Verified by
+`tools/geom_test/` and by measuring rendered dumps. **Default is OFF.**
+
+**Measured on hardware, Donkey Kong in tate with sound** (its default
+rotation, and the project's tightest frame budget):
+
+| | `work` | `work_max` | `starve`/60 | `frame` |
+|---|---|---|---|---|
+| stretch off | 12.2-14.5ms | 14809us | **0** | 16.66ms pinned |
+| stretch ON  | 15.0-17.2ms | **17543us** | **8448-11148** | 18.2-18.4ms |
+
+Over budget, ~150 starvation events per frame, and no longer 60fps. **The
+correction is geometrically right and currently unaffordable on this game.**
+
+**Where the cost is.** Two places, and the smaller one was the predicted one:
+
+1. The 224->240 upsample makes 16 of the 240 canvas rows repeat a raster
+   row, so `render_native_row()` runs 240 times instead of 224 (+7%). This
+   was predicted and is memoisable -- consecutive duplicates are adjacent,
+   so a "same row as last call" guard would remove it. NOT yet done.
+2. The bigger one, which was NOT predicted: the per-pixel column map turns a
+   linear `out[c] = row[c]` copy into a double-indirect
+   `buf[x] = row[col[x]]` over 320 pixels instead of 256. That is a
+   dependent load pair plus a store, 76,800 times a frame, on the same SRAM
+   the DVI DMA is hammering.
+
+**Point 2 bit the DEFAULT path first, and that is the lesson.** The initial
+conversion routed *both* modes through the table, on the reasoning that a
+table lookup has "no division and no branch in any inner loop". True, and
+still 1.6ms a frame slower: `work_max` went 15481us -> 17126us with the
+stretch OFF, i.e. past the budget while changing not one pixel. Restoring a
+`col_1to1` fast path -- the linear copy, taken whenever the map is an
+identity shift -- brought it back to 14809us. **A lookup table is not free
+just because it removes arithmetic; on this part an indirection in the
+innermost loop can cost more than the arithmetic it replaced.**
+`galaga_video.cpp` already knew this (#33) and its fast path was kept from
+the start; the other renderers had to learn it again by measurement.
+
+**Next, if the correction is to ship on by default:** memoise the duplicated
+rows, and replace the per-pixel indirection with a source-driven emit (walk
+the 256 source pixels, write each once or twice from a precomputed
+repeat-count table) so the inner loop is one load and two stores with no
+dependent second load. Whether that is enough for Donkey Kong specifically
+is an open question -- it sits at 14.8ms of 16.66ms before any correction at
+all, so it may need the renderer itself to get cheaper. Every other game has
+more room.
+
 A full audit of the display path -- what the canvas actually is, whether
 either orientation matches the original cabinet's aspect ratio, and why
 landscape goes red -- is in `DISPLAY_GEOMETRY.md`, together with a phased

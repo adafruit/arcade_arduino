@@ -18,6 +18,7 @@
 // Core 0: game emulation, input polling, board-to-game input mapping.
 // Core 1: hal_video_run() -- drives the DVI signal; never returns.
 #include <arcade_hal_video.h>
+#include <arcade_video_geom.h>
 #include <arcade_hal_input.h>
 #include <dkong_machine.h>
 #include <dkong_video.h>
@@ -57,6 +58,16 @@ void setup() {
     g_system.rotation = (uint8_t)(TEST_ROTATION);
     Serial.print("[dkong] TEST_ROTATION override -> ");
     Serial.println((int)g_system.rotation);
+#endif
+
+    // Aspect-ratio correction (arcade_video_geom.h), same build-flag shape:
+    //   --build-property compiler.cpp.extra_flags=-DTEST_STRETCH=1
+    // This game is the project's tightest frame budget, so it is the one to
+    // measure the correction's cost on.
+#ifdef TEST_STRETCH
+    av_geom_set_stretch(TEST_STRETCH != 0);
+    Serial.print("[dkong] TEST_STRETCH -> ");
+    Serial.println((int)av_geom_get_stretch());
 #endif
 
     // Storage/ROM/PROM loading -- blocking, can be slow (SD card retries).

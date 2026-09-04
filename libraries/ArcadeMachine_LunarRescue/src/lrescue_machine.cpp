@@ -17,6 +17,7 @@
 #include "lrescue_audio.h"
 #include "lrescue_assets.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 #include "arcade_hal_audio.h"
 #include "arcade_hal_storage.h"
 #include "arcade_hal_input.h"
@@ -55,6 +56,13 @@
 
 void lrescue_init(arcade_system *system) {
     memset(&system->state, 0, sizeof(system->state));
+
+    // Build the canvas mapping for this raster (arcade_video_geom.h). Must
+    // happen before the first frame -- the renderer reads av_tate/av_yoko on
+    // every scanline and they are all zeroes until this runs. LONG axis
+    // first (GAME_WIDTH), then SHORT (GAME_HEIGHT).
+    av_geom_init(LRESCUE_GAME_WIDTH, LRESCUE_GAME_HEIGHT);
+
 
     // IMPORTANT: leave state.mirror_2000_at_4000 false (its memset default).
     // Space Invaders' PCB incompletely decodes its address bus and aliases

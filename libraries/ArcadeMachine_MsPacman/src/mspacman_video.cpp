@@ -56,6 +56,7 @@
 #include <string.h>
 #include "mspacman_video.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 
 uint8_t mspacman_gfx_rom[MSPACMAN_GFX_ROM_SIZE];
 uint8_t mspacman_palette_prom[MSPACMAN_PALETTE_PROM_SIZE];
@@ -76,9 +77,6 @@ static uint16_t rgb565_palette[32];
 // from Invaders' (256). As with the original tuning, fine pixel alignment
 // should be confirmed on real hardware (see CLAUDE.md -- flashing and
 // observing the physical display is the only real verification here).
-#define TATE_BY   8u    // (240 - 224) / 2
-#define TATE_BX  16u    // (320 - 288)   / 2
-#define LAND_BX  48u    // (320 - 224)   / 2 -- centred in visible DVI x 0..319
 
 // Maps logical tilemap (col 0-35, row 0-27) to its video_ram/color_ram
 // byte offset. Ported verbatim from pacman_state::pacman_scan_rows() --
@@ -262,64 +260,91 @@ void mspacman_video_render_scanline(const mspacman_system *sys, uint32_t dvi_y, 
     switch (sys->rotation) {
 
     case 0: {
-        // Landscape: same shape as invaders_video.cpp's case 0 -- the raw
-        // hardware's horizontal axis (288, "col") stretches to fill all
-        // 480 DVI scanlines; its vertical axis (224, "dx"/native row)
-        // fills the 320-wide visible window 1:1. The `(W-1) - dy` here is
-        // NOT cosmetic -- a 90-degree rotation must reverse the direction
-        // of exactly one axis relative to tate mode (case 1, which does
-        // NOT reverse its equivalent axis), or the result is a mirror
-        // image instead of a rotation. Ported verbatim from
-        // invaders_video.cpp's case 0 (real-hardware-verified there) --
-        // an earlier version of this file dropped this reversal, which is
-        // exactly what made switching from tate to landscape look
-        // mirrored on real hardware.
-        uint32_t dy = ((uint32_t)dvi_y * (uint32_t)MSPACMAN_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
-        uint32_t col = (uint32_t)(MSPACMAN_GAME_WIDTH - 1) - dy;
-        for (uint32_t i = 0; i < (uint32_t)MSPACMAN_GAME_HEIGHT; i++) {
-            uint32_t dx = mir ? (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - i : i;
-            buf[LAND_BX + i] = frame_cache[dx][col];
+        // Landscape. `av_yoko.row` maps this canvas row onto the raster's
+        // LONG axis; `av_yoko.col` maps canvas columns onto the SHORT axis
+        // -- and in yoko the SHORT axis is the one that must NARROW (180
+        // canvas columns, not MSPACMAN_GAME_HEIGHT's worth at 1:1). See
+        // arcade_video_geom.h.
+        //
+        // The `(W-1) - dy` reversal is NOT cosmetic: a 90-degree rotation
+        // must reverse exactly one axis relative to tate (case 1, which
+        // does not reverse its equivalent), or the result is a mirror
+        // image rather than a rotation (DEVNOTES #21).
+        const uint32_t dy  = av_yoko.row[dvi_y];
+        const uint32_t col = (uint32_t)(MSPACMAN_GAME_WIDTH - 1) - dy;
+        if (av_yoko.col_1to1) {
+            uint16_t *out = buf + av_yoko.x0;
+            for (uint32_t i = 0; i < (uint32_t)MSPACMAN_GAME_HEIGHT; i++) {
+                const uint32_t dx = mir ? (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - i : i;
+                out[i] = frame_cache[dx][col];
+            }
+        } else {
+            for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
+                const uint32_t i  = av_yoko.col[x];
+                const uint32_t dx = mir ? (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - i : i;
+                buf[x] = frame_cache[dx][col];
+            }
         }
         break;
     }
 
     case 1: {
-        // 90 deg CCW (tate, default): DVI y -> native row (x2 scale).
-        // Computed here, on demand, one row per call -- see this cache's
-        // header comment for why tate must NOT read frame_cache.
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)MSPACMAN_GAME_HEIGHT) return;
-        uint32_t dx = dvi_y - TATE_BY;
+        // 90 deg CCW (tate). Rendered on demand, one raster row per call --
+        // see frame_cache's header comment for why tate must NOT read it.
+        if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) return;
+        uint32_t dx = av_tate.row[dvi_y];
         if (mir) dx = (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - dx;
         render_native_row(sys, dx, row);
-        for (uint32_t col = 0; col < (uint32_t)MSPACMAN_GAME_WIDTH; col++)
-            buf[TATE_BX + col] = row[col];
+        // The 1:1 branch is a MEASURED requirement, not tidiness: going
+        // through av_tate.col[] unconditionally cost this family +1.6ms a
+        // frame and put Donkey Kong's work_max past the budget. See
+        // av_map_t::col_1to1.
+        if (av_tate.col_1to1) {
+            uint16_t *out = buf + av_tate.x0;
+            for (uint32_t c = 0; c < (uint32_t)MSPACMAN_GAME_WIDTH; c++) out[c] = row[c];
+        } else {
+            for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
+                buf[x] = row[av_tate.col[x]];
+        }
         break;
     }
 
     case 2: {
-        // 180 deg (landscape upside-down): case 0 with BOTH axes reversed
-        // relative to it (a 180 is two 90s) -- so `col` here is
-        // deliberately the *un*-reversed raw value (case 0 already
-        // reversed it once; reversing case 0's own reversal again would
-        // just cancel out, matching invaders_video.cpp's case 2 exactly),
-        // while `dx`'s ternary below is the mirror image of case 0's.
-        uint32_t col = ((uint32_t)dvi_y * (uint32_t)MSPACMAN_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
-        for (uint32_t i = 0; i < (uint32_t)MSPACMAN_GAME_HEIGHT; i++) {
-            uint32_t dx = mir ? i : (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - i;
-            buf[LAND_BX + i] = frame_cache[dx][col];
+        // 180 deg: case 0 with BOTH axes reversed relative to it (a 180 is
+        // two 90s), so `col` is deliberately the *un*-reversed raw value
+        // (case 0 already reversed it once; reversing that again would
+        // cancel out) and `dx`'s ternary is the mirror of case 0's.
+        const uint32_t col = av_yoko.row[dvi_y];
+        if (av_yoko.col_1to1) {
+            uint16_t *out = buf + av_yoko.x0;
+            for (uint32_t i = 0; i < (uint32_t)MSPACMAN_GAME_HEIGHT; i++) {
+                const uint32_t dx = mir ? i : (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - i;
+                out[i] = frame_cache[dx][col];
+            }
+        } else {
+            for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
+                const uint32_t i  = av_yoko.col[x];
+                const uint32_t dx = mir ? i : (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - i;
+                buf[x] = frame_cache[dx][col];
+            }
         }
         break;
     }
 
     case 3: {
-        // 90 deg CW (tate) -- on demand, same as case 1.
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)MSPACMAN_GAME_HEIGHT) return;
-        uint32_t dx = mir ? (dvi_y - TATE_BY)
-                          : (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - (dvi_y - TATE_BY);
+        // 90 deg CW (tate) -- case 1 with both the scanline order and the
+        // within-scanline order reversed.
+        if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) return;
+        const uint32_t d  = av_tate.row[dvi_y];
+        const uint32_t dx = mir ? d : (uint32_t)(MSPACMAN_GAME_HEIGHT - 1) - d;
         render_native_row(sys, dx, row);
-        for (uint32_t col = 0; col < (uint32_t)MSPACMAN_GAME_WIDTH; col++) {
-            uint32_t rev = (uint32_t)(MSPACMAN_GAME_WIDTH - 1u) - col;
-            buf[TATE_BX + col] = row[rev];
+        if (av_tate.col_1to1) {
+            uint16_t *out = buf + av_tate.x0;
+            for (uint32_t c = 0; c < (uint32_t)MSPACMAN_GAME_WIDTH; c++)
+                out[c] = row[(uint32_t)(MSPACMAN_GAME_WIDTH - 1u) - c];
+        } else {
+            for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
+                buf[x] = row[(uint32_t)(MSPACMAN_GAME_WIDTH - 1u) - av_tate.col[x]];
         }
         break;
     }

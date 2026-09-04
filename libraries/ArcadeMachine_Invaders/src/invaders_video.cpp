@@ -12,29 +12,16 @@
 #include <string.h>
 #include "invaders_video.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 
-// Border constants, in CANVAS coordinates: 320x240 logical square pixels,
-// each displayed as a 2x2 block of physical pixels (see arcade_hal_video.h).
-// Tate (90/270 deg): the monitor is physically rotated, so canvas x is the
-//   screen's long axis and canvas y its short one. Game rows (256) run along
-//   canvas x; game columns (224) run along canvas y.
-// Landscape (0/180 deg): game columns (224) run along canvas x; game rows
-//   (256) are resampled onto the 240 canvas rows by
-//   `dy = dvi_y * 256 / HAL_VIDEO_HEIGHT`.
+// Where the picture lands on the canvas, and how it is resampled to get
+// there, comes from ArcadeHAL's arcade_video_geom.h -- av_tate and av_yoko,
+// built by av_geom_init(INVADERS_GAME_WIDTH, INVADERS_GAME_HEIGHT) in
+// invaders_init(). This file used to carry its own TATE_BX/TATE_BY/LAND_BX,
+// and every other renderer in the project was derived from those constants
+// by hand; that copying is what produced DEVNOTES #21, #23 and #33.
 //
-// THESE ARE POSITIONS, NOT RATIOS, and the difference is load-bearing: the
-// vertical one halved when the canvas stopped being declared as the physical
-// 480 rows, while the landscape divisor above did not change meaning at all
-// because it is written against HAL_VIDEO_HEIGHT. Getting that backwards is
-// DEVNOTES #23/#76.
-//
-// NOTE these do NOT make the picture match the original cabinet's aspect
-// ratio -- nothing here scales to the screen, so tate is 16.7% too wide for
-// its height and landscape 24.4%. That is a known, separate defect; see
-// DISPLAY_GEOMETRY.md section 2 and its phase 2.
-#define TATE_BY   8u    // (240 - 224) / 2
-#define TATE_BX  32u    // (320 - 256) / 2
-#define LAND_BX  48u    // (320 - 224) / 2
+// Read arcade_video_geom.h before touching the loops below.
 
 #define COLOR_WHITE 0xFFFFu
 
@@ -49,55 +36,59 @@ static void render_scanline(uint32_t dvi_y, uint16_t *buf, const arcade_system *
     switch (sys->rotation) {
 
     case 0: {
-        // Landscape: dx -> canvas x 1:1, dy resampled onto all 240 canvas rows.
-        uint32_t dy  = ((uint32_t)dvi_y * (uint32_t)INVADERS_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
-        uint32_t col = 255u - dy;
-        for (uint32_t i = 0; i < (uint32_t)INVADERS_GAME_HEIGHT; i++) {
-            uint32_t dx = mir ? (uint32_t)(INVADERS_GAME_HEIGHT - 1) - i : i;
-            uint8_t v = vram[dx * 32u + (col >> 3u)];
-            if ((v >> (col & 7u)) & 1u)
-                buf[LAND_BX + i] = COLOR_WHITE;
+        // Landscape. av_yoko.row maps the canvas row onto the raster's LONG
+        // axis (dy); av_yoko.col maps canvas columns onto the SHORT axis --
+        // and in yoko the SHORT axis is the one that must NARROW to 180
+        // canvas columns, not sit at 1:1. See arcade_video_geom.h.
+        const uint32_t col = 255u - av_yoko.row[dvi_y];
+        const uint8_t  chi = (uint8_t)(col >> 3u);
+        const uint8_t  bit = (uint8_t)(col & 7u);
+        for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
+            const uint32_t i  = av_yoko.col[x];
+            const uint32_t dx = mir ? (uint32_t)(INVADERS_GAME_HEIGHT - 1) - i : i;
+            if ((vram[dx * 32u + chi] >> bit) & 1u) buf[x] = COLOR_WHITE;
         }
         break;
     }
 
     case 1: {
-        // 90 deg CCW (tate): canvas y->dx (1:1), canvas x->dy reversed
-        // (x=BX -> dy 255, the player end).
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)INVADERS_GAME_HEIGHT) return;
-        uint32_t dx = dvi_y - TATE_BY;
+        // 90 deg CCW (tate): canvas y -> dx, canvas x -> dy REVERSED.
+        // VRAM's bit index is 255-dy (see the layout note above), so the
+        // loop variable `col` IS 255-dy: x = x0 is dy 255, the player end.
+        if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) return;
+        uint32_t dx = av_tate.row[dvi_y];
         if (mir) dx = (uint32_t)(INVADERS_GAME_HEIGHT - 1) - dx;
-        for (uint32_t col = 0u; col < (uint32_t)INVADERS_GAME_WIDTH; col++) {
-            uint8_t v = vram[dx * 32u + (col >> 3u)];
-            if ((v >> (col & 7u)) & 1u)
-                buf[TATE_BX + col] = COLOR_WHITE;
+        const uint8_t *row = vram + dx * 32u;
+        for (uint32_t x = av_tate.x0; x < av_tate.x1; x++) {
+            const uint32_t col = av_tate.col[x];
+            if ((row[col >> 3u] >> (col & 7u)) & 1u) buf[x] = COLOR_WHITE;
         }
         break;
     }
 
     case 2: {
         // 180 deg (landscape upside-down): dx reversed, dy un-reversed.
-        uint32_t col = ((uint32_t)dvi_y * (uint32_t)INVADERS_GAME_WIDTH) / HAL_VIDEO_HEIGHT; // reversed: top->dy255
-        for (uint32_t i = 0; i < (uint32_t)INVADERS_GAME_HEIGHT; i++) {
-            uint32_t dx = mir ? i : (uint32_t)(INVADERS_GAME_HEIGHT - 1) - i;
-            uint8_t v = vram[dx * 32u + (col >> 3u)];
-            if ((v >> (col & 7u)) & 1u)
-                buf[LAND_BX + i] = COLOR_WHITE;
+        const uint32_t col = av_yoko.row[dvi_y];
+        const uint8_t  chi = (uint8_t)(col >> 3u);
+        const uint8_t  bit = (uint8_t)(col & 7u);
+        for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
+            const uint32_t i  = av_yoko.col[x];
+            const uint32_t dx = mir ? i : (uint32_t)(INVADERS_GAME_HEIGHT - 1) - i;
+            if ((vram[dx * 32u + chi] >> bit) & 1u) buf[x] = COLOR_WHITE;
         }
         break;
     }
 
     case 3: {
-        // 90 deg CW (tate): canvas y reversed->dx (1:1), canvas x->dy
-        // (x=BX -> dy 0, the score end).
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)INVADERS_GAME_HEIGHT) return;
-        uint32_t dx = mir ? (dvi_y - TATE_BY)
-                          : (uint32_t)(INVADERS_GAME_HEIGHT - 1) - (dvi_y - TATE_BY);
-        for (uint32_t col = 0u; col < (uint32_t)INVADERS_GAME_WIDTH; col++) {
-            uint32_t rev = (uint32_t)(INVADERS_GAME_WIDTH - 1u) - col; // dy=0 at x=TATE_BX
-            uint8_t v = vram[dx * 32u + (rev >> 3u)];
-            if ((v >> (rev & 7u)) & 1u)
-                buf[TATE_BX + col] = COLOR_WHITE;
+        // 90 deg CW (tate): both axes reversed relative to case 1, so
+        // x = x0 is dy 0 -- the score end.
+        if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) return;
+        const uint32_t d  = av_tate.row[dvi_y];
+        const uint32_t dx = mir ? d : (uint32_t)(INVADERS_GAME_HEIGHT - 1) - d;
+        const uint8_t *row = vram + dx * 32u;
+        for (uint32_t x = av_tate.x0; x < av_tate.x1; x++) {
+            const uint32_t rev = (uint32_t)(INVADERS_GAME_WIDTH - 1u) - av_tate.col[x];
+            if ((row[rev >> 3u] >> (rev & 7u)) & 1u) buf[x] = COLOR_WHITE;
         }
         break;
     }

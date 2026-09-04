@@ -12,6 +12,7 @@
 #include "invaders_audio.h"
 #include "invaders_assets.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 #include "arcade_hal_audio.h"
 #include "arcade_hal_storage.h"
 #include "arcade_hal_input.h"
@@ -21,6 +22,13 @@
 
 void invaders_init(arcade_system *system) {
     memset(&system->state, 0, sizeof(system->state));
+
+    // Build the canvas mapping for this raster (arcade_video_geom.h). Must
+    // happen before the first frame -- the renderer reads av_tate/av_yoko on
+    // every scanline and they are all zeroes until this runs. LONG axis
+    // first (GAME_WIDTH), then SHORT (GAME_HEIGHT).
+    av_geom_init(INVADERS_GAME_WIDTH, INVADERS_GAME_HEIGHT);
+
 
     // Space Invaders' original PCB incompletely decodes its address bus,
     // aliasing RAM at 0x2000-0x3fff onto 0x4000-0x5fff; the self-test code

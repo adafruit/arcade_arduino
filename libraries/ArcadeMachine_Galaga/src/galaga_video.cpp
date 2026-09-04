@@ -9,6 +9,7 @@
 #include <string.h>
 #include "galaga_video.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 
 uint8_t galaga_gfx1_rom[GALAGA_GFX1_SIZE];
 uint8_t galaga_gfx2_rom[GALAGA_GFX2_SIZE];
@@ -47,9 +48,6 @@ static uint16_t sprite_pen_rgb[64][4];
 // byte-for-byte the same as PACMAN_GAME_WIDTH/HEIGHT (same Namco video-
 // generator family/raster timing, verified in galaga_machine.h's header
 // comment) -- not re-derived, just reused.
-#define TATE_BY   8u    // (240 - 224) / 2
-#define TATE_BX  16u    // (320 - 288)   / 2
-#define LAND_BX  48u    // (320 - 224)   / 2
 
 // Maps logical tilemap (col 0-35, row 0-27) to its video_ram byte offset
 // within the tile-code half (0x000-0x3FF). Verified against MAME's
@@ -575,42 +573,69 @@ GALAGA_VID_RAMFUNC void galaga_video_render_scanline(const galaga_system *sys, u
     // path; the general switch is for the two landscape modes, which are
     // not defaults and already carry their own known stall risk.**
     if (sys->rotation == 1 || sys->rotation == 3) {
-        if (dvi_y < TATE_BY || dvi_y >= TATE_BY + (uint32_t)GALAGA_GAME_HEIGHT) {
+        if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) {
             memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
             return;
         }
-        memset(buf, 0, TATE_BX * sizeof(uint16_t));
-        memset(buf + TATE_BX + GALAGA_GAME_WIDTH, 0,
-               (HAL_VIDEO_WIDTH - TATE_BX - (uint32_t)GALAGA_GAME_WIDTH) * sizeof(uint16_t));
-        uint32_t d = dvi_y - TATE_BY;
-        // Same dx each case computed before; rotation 3 is rotation 1 with
-        // both axes reversed, so the row index reverses here and the column
-        // order reverses inside render_native_row().
+        const uint32_t d = av_tate.row[dvi_y];
+        // Rotation 3 is rotation 1 with both axes reversed, so the row index
+        // reverses here and the column order reverses below.
         uint32_t dx;
         if (sys->rotation == 1) dx = mir ? (uint32_t)(GALAGA_GAME_HEIGHT - 1) - d : d;
         else                    dx = mir ? d : (uint32_t)(GALAGA_GAME_HEIGHT - 1) - d;
-        render_native_row(sys, dx, buf + TATE_BX, sys->rotation == 3);
+
+        if (av_tate.col_1to1) {
+            // The direct path described above: render straight into the
+            // caller's buffer, clearing only the side borders. Available
+            // only while the column map is an identity shift -- see
+            // av_map_t::col_1to1.
+            memset(buf, 0, av_tate.x0 * sizeof(uint16_t));
+            memset(buf + av_tate.x1, 0,
+                   (HAL_VIDEO_WIDTH - av_tate.x1) * sizeof(uint16_t));
+            render_native_row(sys, dx, buf + av_tate.x0, sys->rotation == 3);
+            return;
+        }
+
+        // Aspect-corrected: the raster no longer lands one-to-one on the
+        // canvas, so it has to go through a scratch row. This costs the
+        // extra clear-and-copy that DEVNOTES #33 measured as enough to blow
+        // this game's headroom -- Galaga peaks at 14946us of 16660us, so
+        // MEASURE ON HARDWARE before shipping the stretch on as this
+        // machine's default.
+        static uint16_t scratch[GALAGA_GAME_WIDTH];
+        render_native_row(sys, dx, scratch, false);
+        memset(buf, 0, av_tate.x0 * sizeof(uint16_t));
+        memset(buf + av_tate.x1, 0, (HAL_VIDEO_WIDTH - av_tate.x1) * sizeof(uint16_t));
+        if (sys->rotation == 1) {
+            for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
+                buf[x] = scratch[av_tate.col[x]];
+        } else {
+            for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
+                buf[x] = scratch[(uint32_t)(GALAGA_GAME_WIDTH - 1u) - av_tate.col[x]];
+        }
         return;
     }
 
     memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
     switch (sys->rotation) {
 
-    case 0: { // landscape -- ported from pacman_video.cpp's case 0 (real-hardware-verified there)
-        uint32_t dy = ((uint32_t)dvi_y * (uint32_t)GALAGA_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
-        uint32_t col = (uint32_t)(GALAGA_GAME_WIDTH - 1) - dy;
-        for (uint32_t i = 0; i < (uint32_t)GALAGA_GAME_HEIGHT; i++) {
-            uint32_t dx = mir ? (uint32_t)(GALAGA_GAME_HEIGHT - 1) - i : i;
-            buf[LAND_BX + i] = frame_cache[dx][col];
+    case 0: { // landscape -- see arcade_video_geom.h; yoko NARROWS the short axis
+        const uint32_t dy  = av_yoko.row[dvi_y];
+        const uint32_t col = (uint32_t)(GALAGA_GAME_WIDTH - 1) - dy;
+        for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
+            const uint32_t i  = av_yoko.col[x];
+            const uint32_t dx = mir ? (uint32_t)(GALAGA_GAME_HEIGHT - 1) - i : i;
+            buf[x] = frame_cache[dx][col];
         }
         break;
     }
 
     case 2: { // 180 deg
-        uint32_t col = ((uint32_t)dvi_y * (uint32_t)GALAGA_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
-        for (uint32_t i = 0; i < (uint32_t)GALAGA_GAME_HEIGHT; i++) {
-            uint32_t dx = mir ? i : (uint32_t)(GALAGA_GAME_HEIGHT - 1) - i;
-            buf[LAND_BX + i] = frame_cache[dx][col];
+        const uint32_t col = av_yoko.row[dvi_y];
+        for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
+            const uint32_t i  = av_yoko.col[x];
+            const uint32_t dx = mir ? i : (uint32_t)(GALAGA_GAME_HEIGHT - 1) - i;
+            buf[x] = frame_cache[dx][col];
         }
         break;
     }

@@ -406,20 +406,46 @@ samples of a 480-row one. It is still the wrong *target* (it fills 240 rows
 against a 224-column axis instead of 180) — that is phase 2's job, not
 phase 1's.
 
-**Phase 2 — one shared geometry module.** `ArcadeHAL/src/arcade_video_geom.h`,
-with `av_geom_init(long_px, short_px)` building four Bresenham LUTs (tate:
-320 cols -> long axis, 240 rows -> short axis; yoko: 240 rows -> long,
-180 cols -> short). Every game's `TATE_BX`/`LAND_BX` and every
-`dvi_y * W / H` becomes a lookup. Put it behind a runtime flag defaulting
-off, so the hardware A/B is one button press — the same discipline
-`btime_video.cpp` already uses.
+**Phase 2 — one shared geometry module. BUILT; correction stays OFF by
+default.** `ArcadeHAL/src/arcade_video_geom.h` owns the geometry for all
+seven machines: `av_geom_init(long_px, short_px)` builds `av_tate`/`av_yoko`,
+and every per-game `TATE_BX`/`TATE_BY`/`LAND_BX` is gone.
+`av_geom_set_stretch()` switches between the historical layout and the
+cabinet-correct one.
 
-> **Budget risk, must not be skipped.** Tate's 224 -> 240 upsample
-> duplicates 16 rows, i.e. 16 extra `render_native_row()` calls per frame
-> (+6.7% render). DKong peaks at 15.8ms of a 16.66ms budget with sound.
-> Memoize — `if (lut[i] == lut[i-1])` reuse the last rendered row — or this
-> phase puts DKong back into red. Phase 1's dropped `memset` pays some of
-> it back.
+*Verification.* `tools/geom_test/` asserts both directly: with the
+correction off the maps reproduce every historical constant exactly
+(Invaders tate `x[32,288)`, Pac-Man `x[16,304)`, `y[8,232)`, yoko
+`x[48,272)`, Burger Time `x[40,280)`), and with it on every game lands on
+the same destination — `320x240` tate, `180x240` at x0=70 yoko — plus
+monotonicity and in-range indices. 40 of the 44 byte-compare dumps were
+unchanged; see below for the 4 that were not. With the correction on,
+DKong and Galaga fill their windows edge to edge (yoko content exactly
+70..249, tate 0..319 x 0..239).
+
+*It found a bug.* Donkey Kong's landscape picture had been 16 canvas pixels
+left of centre, because its `LAND_BX` was derived from the LONG axis (256)
+while the loop walked the SHORT one (224). Those are the 4 differing dumps,
+and the diff is a pure translation. DEVNOTES #77.
+
+> **The budget risk was real, and bigger than predicted — DEVNOTES #78.**
+> Measured on DKong in tate with sound: stretch off `work_max` 14809us and
+> `starve` 0/60; stretch ON `work_max` **17543us**, `starve`
+> **8448-11148/60**, `frame` 18.2ms. Over budget, red, not 60fps.
+>
+> The predicted cost — 16 duplicated rows, +7% of render — is the *smaller*
+> half and is still un-memoised. The larger half was not predicted: the
+> per-pixel column map turns a linear copy into a double-indirect
+> `buf[x] = row[col[x]]`, and **that cost hit the DEFAULT path first**,
+> pushing `work_max` to 17126us with the correction OFF and not one pixel
+> changed. A `col_1to1` fast path (linear copy whenever the map is an
+> identity shift, as `galaga_video.cpp` already did) restored it to 14809us.
+> A lookup table is not free just because it removes arithmetic.
+>
+> To ship the correction on: memoise duplicated rows, and replace the
+> per-pixel indirection with a source-driven emit (one load, two stores, a
+> precomputed repeat count, no dependent second load). Whether that suffices
+> for DKong is open — it is at 14.8ms of 16.66ms before any correction.
 
 **Phase 3 — `render_native_column()`, which deletes the red at its source.**
 Landscape and 180 then interleave exactly like tate; `frame_cache` and

@@ -25,6 +25,7 @@ cc -O2 -g -std=c11 -Wall $INC -c "$LIBS/ArcadeCPU_Z80/src/z80.c" -o "$OBJ/z80.o"
 
 c++ -O2 -g -std=c++17 -Wall -Wno-unused-parameter $INC \
     "$LIBS/ArcadeMachine_Pacman/src"/*.cpp \
+    "$LIBS/ArcadeHAL/src"/*.cpp \
     "$HERE/../host_common/hal_host.cpp" \
     "$HERE/../host_common/host_ppm.cpp" \
     "$HERE/main.cpp" \

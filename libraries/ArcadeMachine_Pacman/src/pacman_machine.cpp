@@ -12,6 +12,7 @@
 #include "pacman_audio.h"
 #include "pacman_assets.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 #include "arcade_hal_audio.h"
 #include "arcade_hal_storage.h"
 #include "arcade_hal_input.h"
@@ -30,6 +31,13 @@ void pacman_init(pacman_system *system) {
 
     z80_init(&system->cpu);
     pacman_ports_wire(system);
+
+    // Build the canvas mapping for this raster. Must happen before the
+    // first frame -- pacman_video.cpp reads av_tate/av_yoko on every
+    // scanline and they are all zeroes until this runs. LONG axis first
+    // (GAME_WIDTH, 288), then SHORT (GAME_HEIGHT, 224); see
+    // arcade_video_geom.h for why those names and not width/height.
+    av_geom_init(PACMAN_GAME_WIDTH, PACMAN_GAME_HEIGHT);
 
     // Screen rotation 3 (90 deg CW), NOT 1. This is the value that puts the
     // game upright on the same physically-rotated monitor that

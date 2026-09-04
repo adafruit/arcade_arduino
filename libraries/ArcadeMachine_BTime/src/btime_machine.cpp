@@ -12,6 +12,7 @@
 #include "btime_audio.h"
 #include "btime_assets.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 #include "arcade_hal_audio.h"
 #include "arcade_hal_storage.h"
 #include "arcade_hal_input.h"
@@ -70,6 +71,13 @@ void btime_init(btime_system *system) {
     m6502_init(&system->cpu);
     m6502_init(&system->audiocpu);
     btime_ports_wire(system);
+
+    // Build the canvas mapping for this raster (arcade_video_geom.h). Must
+    // happen before the first frame -- the renderer reads av_tate/av_yoko on
+    // every scanline and they are all zeroes until this runs. LONG axis
+    // first (GAME_WIDTH), then SHORT (GAME_HEIGHT).
+    av_geom_init(BTIME_GAME_WIDTH, BTIME_GAME_HEIGHT);
+
 
     // ROTATION 1 (90 deg CCW), predicted from MAME and still to be
     // confirmed against the framebuffer invariant.

@@ -28,6 +28,7 @@ cc -O2 -g -std=c11 -Wall $INC -c "$LIBS/ArcadeCPU_MCS48/src/mcs48.c" -o "$OBJ/mc
 
 c++ -O2 -g -std=c++17 -Wall -Wno-unused-parameter $INC \
     "$LIBS/ArcadeMachine_DKong/src"/*.cpp \
+    "$LIBS/ArcadeHAL/src"/*.cpp \
     "$HERE/../host_common/hal_host.cpp" \
     "$HERE/../host_common/host_ppm.cpp" \
     "$HERE/main.cpp" \

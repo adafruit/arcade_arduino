@@ -19,6 +19,7 @@ mspacman_host/   ArcadeMachine_MsPacman (1x Z80, banked/encrypted ROM)
 dkong_host/      ArcadeMachine_DKong    (1x Z80 + i8257 DMA + 8035 sound CPU)
 btime_host/      ArcadeMachine_BTime    (2x 6502, one of them encrypted)
 m6502_test/      ArcadeCPU_M6502 conformance runner -- NOT a machine harness
+geom_test/       arcade_video_geom conformance runner -- NOT a machine harness
 ```
 
 ```sh
@@ -30,6 +31,22 @@ m6502_test/      ArcadeCPU_M6502 conformance runner -- NOT a machine harness
 ./btime_host/build.sh    && ./btime_host/btime_host       --frames 5000 \
                               --rom ../../btime_assets/rom
 ```
+
+`geom_test/` checks ArcadeHAL's shared screen geometry
+(`arcade_video_geom.*`) directly, with no machine attached:
+
+```sh
+./geom_test/build.sh && ./geom_test/geom_test
+```
+
+It exists because that geometry fails SILENTLY -- a wrong border constant
+does not crash, it shifts the picture, and nobody notices until someone
+photographs a screen and measures it (DEVNOTES.md #21, #23, #33, #77). It
+asserts that with the aspect correction OFF the maps reproduce the
+project's historical hand-derived layout exactly, that with it ON every game
+lands on the same cabinet-correct destination (320x240 tate, 180x240 yoko),
+and that every index a renderer's inner loop will use is monotonic and
+inside the raster.
 
 `m6502_test/` is the odd one out: it runs only the CPU core, against the
 standard 6502 test suites (Klaus Dormann's functional test, Bruce Clark's

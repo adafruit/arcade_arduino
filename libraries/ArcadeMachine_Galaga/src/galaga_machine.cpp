@@ -15,6 +15,7 @@
 #include "galaga_assets.h"
 #include "galaga_audio.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 #include "arcade_hal_audio.h"
 #include "arcade_hal_input.h"
 #include "arcade_hal_storage.h"
@@ -294,6 +295,13 @@ void galaga_init(galaga_system *system) {
     z80_init(&system->cpu_sub);
     z80_init(&system->cpu_sub2);
     galaga_ports_wire(system);
+
+    // Build the canvas mapping for this raster (arcade_video_geom.h). Must
+    // happen before the first frame -- the renderer reads av_tate/av_yoko on
+    // every scanline and they are all zeroes until this runs. LONG axis
+    // first (GAME_WIDTH), then SHORT (GAME_HEIGHT).
+    av_geom_init(GALAGA_GAME_WIDTH, GALAGA_GAME_HEIGHT);
+
 
     galaga_51xx_init(&system->io51);
     galaga_54xx_init(&system->io54);

@@ -67,6 +67,7 @@
 #include <string.h>
 #include "btime_video.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 
 // SRAM placement for the per-scanline render path. Measured at 36% of the
 // frame in the host harness after the decode caches landed (and 62% before
@@ -114,9 +115,6 @@ uint8_t btime_bg_map[BTIME_BG_MAP_SIZE];
 // Tate maps the raster's vertical axis onto the 240 submitted scanlines and
 // its horizontal axis along the scanline buffer. Burger Time's raster is
 // SQUARE, so unlike its siblings both constants come out the same:
-#define TATE_BY  0u    // (240 - 240) / 2 -- fills every canvas row, 1:1
-#define TATE_BX  40u   // (320 - 240)   / 2 -- centred, 40px pillarbox
-#define LAND_BX  40u   // (320 - 240)   / 2
 
 // ...and unlike its siblings, 1:1 is visibly wrong. In tate the monitor is
 // physically rotated, so the raster's horizontal axis lands on the screen's
@@ -139,10 +137,10 @@ uint8_t btime_bg_map[BTIME_BG_MAP_SIZE];
 // integer-scaled; the stretch is one call away and the two should be
 // compared on the physical display before either becomes the shipped
 // default. See BTIME_PORT_PLAN.md section 5.7.
-static bool g_aspect_stretch = false;
-
-void btime_video_set_aspect_stretch(bool enable) { g_aspect_stretch = enable; }
-bool btime_video_get_aspect_stretch(void) { return g_aspect_stretch; }
+// Kept as this game's existing API, now delegating to the shared
+// aspect correction so there is one switch for the whole project.
+void btime_video_set_aspect_stretch(bool enable) { av_geom_set_stretch(enable); }
+bool btime_video_get_aspect_stretch(void) { return av_geom_get_stretch(); }
 
 // --- palette -------------------------------------------------------------
 //
@@ -548,42 +546,47 @@ BTIME_VRAMFUNC static void emit_tate_row(uint16_t *buf, bool reverse) {
     // writer into pen_row produces 0-7 (chars, sprites) or 8-15 (the
     // background cache, base baked in), so the values are already in range
     // and an `& 0x0F` per pixel would be 320 wasted operations per scanline.
-    if (g_aspect_stretch) {
-        // Spread 240 raster columns over all 320 framebuffer columns; see
-        // this file's geometry comment. col * 3 / 4 is exact for 320 -> 240.
+    if (!av_tate.col_1to1) {
+        // Aspect-corrected: av_tate.col spreads the raster's 240 columns
+        // over all 320 canvas columns. This game had the project's only
+        // working version of this correction, as a private `col * 3 / 4`;
+        // the shared table gives the identical mapping (320->240 is exactly
+        // x3/4) and now every game gets it. See arcade_video_geom.h.
         if (!reverse) {
-            for (uint32_t col = 0; col < HAL_VIDEO_WIDTH; col++)
-                buf[col] = pal565[vis[(col * 3u) >> 2]];
+            for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
+                buf[x] = pal565[vis[av_tate.col[x]]];
         } else {
-            for (uint32_t col = 0; col < HAL_VIDEO_WIDTH; col++)
-                buf[col] = pal565[vis[BTIME_GAME_WIDTH - 1u - ((col * 3u) >> 2)]];
+            for (uint32_t x = av_tate.x0; x < av_tate.x1; x++)
+                buf[x] = pal565[vis[BTIME_GAME_WIDTH - 1u - av_tate.col[x]]];
+        }
+        return;
+    }
+
+    for (uint32_t col = 0; col < av_tate.x0; col++) buf[col] = 0; // left bar
+    uint16_t *out = buf + av_tate.x0;
+    if (!reverse) {
+        // Two pixels per 32-bit store. av_tate.x0 is 40 here and the buffer
+        // is 16-bit, so `out` is 4-byte aligned and this is safe; it halves
+        // the store count into the DVI scanline buffer, which matters more
+        // than it looks because Core 1's DVI DMA is hammering the same
+        // SRAM. Unrolled by 4 pixels (240 divides exactly) to cut loop
+        // overhead as well. Only valid while the column map is an identity
+        // shift, which is what the branch above tests.
+        uint32_t *out32 = (uint32_t *)out;
+        for (uint32_t i = 0; i < BTIME_GAME_WIDTH / 4u; i++) {
+            const uint32_t c = i * 4u;
+            out32[i * 2u + 0] = (uint32_t)pal565[vis[c + 0]] |
+                                ((uint32_t)pal565[vis[c + 1]] << 16);
+            out32[i * 2u + 1] = (uint32_t)pal565[vis[c + 2]] |
+                                ((uint32_t)pal565[vis[c + 3]] << 16);
         }
     } else {
-        for (uint32_t col = 0; col < TATE_BX; col++) buf[col] = 0; // left bar
-        uint16_t *out = buf + TATE_BX;
-        if (!reverse) {
-            // Two pixels per 32-bit store. TATE_BX is 40 and the buffer
-            // is 16-bit, so `out` is 4-byte aligned and this is safe; it
-            // halves the store count into the DVI scanline buffer, which
-            // matters more than it looks because Core 1's DVI DMA is
-            // hammering the same SRAM. Unrolled by 4 pixels (240 divides
-            // exactly) to cut loop overhead as well.
-            uint32_t *out32 = (uint32_t *)out;
-            for (uint32_t i = 0; i < BTIME_GAME_WIDTH / 4u; i++) {
-                const uint32_t c = i * 4u;
-                out32[i * 2u + 0] = (uint32_t)pal565[vis[c + 0]] |
-                                    ((uint32_t)pal565[vis[c + 1]] << 16);
-                out32[i * 2u + 1] = (uint32_t)pal565[vis[c + 2]] |
-                                    ((uint32_t)pal565[vis[c + 3]] << 16);
-            }
-        } else {
-            const uint8_t *rev = vis + BTIME_GAME_WIDTH - 1u;
-            for (uint32_t col = 0; col < BTIME_GAME_WIDTH; col++)
-                out[col] = pal565[rev[-(int)col]];
-        }
-        for (uint32_t col = TATE_BX + BTIME_GAME_WIDTH; col < HAL_VIDEO_WIDTH; col++)
-            buf[col] = 0; // right bar
+        const uint8_t *rev = vis + BTIME_GAME_WIDTH - 1u;
+        for (uint32_t col = 0; col < BTIME_GAME_WIDTH; col++)
+            out[col] = pal565[rev[-(int)col]];
     }
+    for (uint32_t col = av_tate.x1; col < HAL_VIDEO_WIDTH; col++)
+        buf[col] = 0; // right bar
 }
 
 BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t dvi_y,
@@ -593,34 +596,33 @@ BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t 
     switch (s->rotation) {
 
     case 0: {
-        // Landscape: the raster's horizontal axis (240 columns) stretches
-        // across all 480 DVI scanlines; its vertical axis fills the
-        // 320-wide window 1:1. The `(W-1) - dy` reversal is NOT cosmetic --
-        // a 90-degree rotation must reverse exactly one axis relative to
-        // tate (case 1, which does not reverse its equivalent), or the
-        // result is a mirror image rather than a rotation. Same shape as
-        // invaders_video.cpp's case 0, which is the real-hardware-verified
-        // original.
+        // Landscape. av_yoko.row maps the canvas row onto the raster's LONG
+        // axis; av_yoko.col maps canvas columns onto the SHORT axis, which
+        // in yoko must NARROW to 180 canvas columns. The `(W-1) - dy`
+        // reversal is NOT cosmetic: a 90-degree rotation must reverse
+        // exactly one axis relative to tate (case 1, which does not reverse
+        // its equivalent), or the result is a mirror image rather than a
+        // rotation (DEVNOTES #21).
         memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t)); // pillarbox
-        const uint32_t dy = (dvi_y * (uint32_t)BTIME_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
+        const uint32_t dy  = av_yoko.row[dvi_y];
         const uint32_t col = (uint32_t)(BTIME_GAME_WIDTH - 1) - dy;
-        for (uint32_t i = 0; i < (uint32_t)BTIME_GAME_HEIGHT; i++) {
+        for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
+            const uint32_t i  = av_yoko.col[x];
             const uint32_t dx = mir ? (uint32_t)(BTIME_GAME_HEIGHT - 1) - i : i;
-            buf[LAND_BX + i] = pal565[frame_pen[dx][col]];
+            buf[x] = pal565[frame_pen[dx][col]];
         }
         break;
     }
 
     case 1: {
-        // 90 deg CCW (tate, the default). TATE_BY is 0 and the raster is
-        // 240 rows tall against 240 submitted scanlines, so this is 1:1
-        // with no border and no clipping -- the only game here where that
-        // is true.
-        if (dvi_y >= HAL_VIDEO_HEIGHT) {
+        // 90 deg CCW (tate, the default). Burger Time's raster is 240 rows
+        // against 240 canvas rows, so av_tate.row is 1:1 here with no
+        // letterbox -- the only game in the project where that is true.
+        if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) {
             memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
             return;
         }
-        uint32_t row = dvi_y;
+        uint32_t row = av_tate.row[dvi_y];
         if (mir) row = (uint32_t)(BTIME_GAME_HEIGHT - 1) - row;
         render_native_row(s, BTIME_FIRST_VISIBLE_LINE + row);
         emit_tate_row(buf, false);
@@ -630,12 +632,13 @@ BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t 
     case 2: {
         // 180 deg: case 0 with both axes reversed relative to it, so `col`
         // is deliberately the un-reversed raw value and `dx`'s ternary is
-        // the mirror of case 0's -- matching invaders_video.cpp's case 2.
+        // the mirror of case 0's.
         memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t)); // pillarbox
-        const uint32_t col = (dvi_y * (uint32_t)BTIME_GAME_WIDTH) / HAL_VIDEO_HEIGHT;
-        for (uint32_t i = 0; i < (uint32_t)BTIME_GAME_HEIGHT; i++) {
+        const uint32_t col = av_yoko.row[dvi_y];
+        for (uint32_t x = av_yoko.x0; x < av_yoko.x1; x++) {
+            const uint32_t i  = av_yoko.col[x];
             const uint32_t dx = mir ? i : (uint32_t)(BTIME_GAME_HEIGHT - 1) - i;
-            buf[LAND_BX + i] = pal565[frame_pen[dx][col]];
+            buf[x] = pal565[frame_pen[dx][col]];
         }
         break;
     }
@@ -643,11 +646,11 @@ BTIME_VRAMFUNC void btime_video_render_scanline(const btime_system *s, uint32_t 
     case 3: {
         // 90 deg CW: the other tate, reversing both the scanline order and
         // the within-scanline order relative to case 1.
-        if (dvi_y >= HAL_VIDEO_HEIGHT) {
+        if (dvi_y < av_tate.y0 || dvi_y >= av_tate.y1) {
             memset(buf, 0, HAL_VIDEO_WIDTH * sizeof(uint16_t));
             return;
         }
-        const uint32_t r = dvi_y;
+        const uint32_t r   = av_tate.row[dvi_y];
         const uint32_t row = mir ? r : (uint32_t)(BTIME_GAME_HEIGHT - 1) - r;
         render_native_row(s, BTIME_FIRST_VISIBLE_LINE + row);
         emit_tate_row(buf, true);

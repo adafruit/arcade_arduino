@@ -27,6 +27,7 @@
 #include "galaga_input.h"
 #include "galaga_audio.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 #include "host_ppm.h" // HAL_VIDEO_WIDTH/HEIGHT, for the PPM dump
 #include "z80.h"
 
@@ -378,6 +379,7 @@ int main(int argc, char **argv) {
     const char *rom_arg    = NULL;
     long        frames     = 3000;
     long        rotation   = -1;
+    bool stretch = false;
     long        stall_lim  = 180;
     long        every      = 0;
     long        ppm_every  = 0;
@@ -397,6 +399,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc)          rom_arg = argv[++i];
         else if (!strcmp(argv[i], "--rotation") && i + 1 < argc) rotation = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--stretch"))                   stretch = true;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)  frames = atol(argv[++i]);
         else if (!strcmp(argv[i], "--stall") && i + 1 < argc)   stall_lim = atol(argv[++i]);
         else if (!strcmp(argv[i], "--every") && i + 1 < argc)   every = atol(argv[++i]);
@@ -435,6 +438,9 @@ int main(int argc, char **argv) {
     // (see that machine's *_init). Lets an orientation be checked in the
     // harness rather than by flashing and physically turning a monitor.
     if (rotation >= 0 && rotation <= 3) g_system.rotation = (uint8_t)rotation;
+    // Aspect-ratio correction (arcade_video_geom.h), applied after the
+    // machine init that built the maps.
+    if (stretch) av_geom_set_stretch(true);
 
     uint16_t err = 0;
     if (!galaga_load_assets(&g_system, &err)) {

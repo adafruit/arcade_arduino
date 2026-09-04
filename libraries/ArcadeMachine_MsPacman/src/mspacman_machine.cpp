@@ -15,6 +15,7 @@
 #include "mspacman_audio.h"
 #include "mspacman_assets.h"
 #include "arcade_hal_video.h"
+#include "arcade_video_geom.h"
 #include "arcade_hal_audio.h"
 #include "arcade_hal_storage.h"
 #include "arcade_hal_input.h"
@@ -32,6 +33,13 @@ void mspacman_init(mspacman_system *system) {
     memset(system, 0, sizeof(*system));
 
     z80_init(&system->cpu);
+
+    // Build the canvas mapping for this raster (arcade_video_geom.h). Must
+    // happen before the first frame -- the renderer reads av_tate/av_yoko on
+    // every scanline and they are all zeroes until this runs. LONG axis
+    // first (GAME_WIDTH), then SHORT (GAME_HEIGHT).
+    av_geom_init(MSPACMAN_GAME_WIDTH, MSPACMAN_GAME_HEIGHT);
+
     mspacman_ports_wire(system);
 
     // The aux board powers up with the decrypted bank selected -- MAME's

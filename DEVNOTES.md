@@ -2331,13 +2331,30 @@ problem #33)** — video
 `pacman_assets/rom/` ROM/PROM set, after fixing problems #18-20 above; no
 red-line/queue-starvation artifacts, no visible tearing from problem #20's
 interleaved-rendering trade-off. The attract loop has also run unattended
-overnight with no hang (problem #22 fixed and confirmed). Problem #21's
-mirror-orientation fix was applied but not independently re-confirmed by
-observation afterward -- worth a quick visual check next time tate/Yoko
-switching comes up. **Not yet tested/fixed:** landscape/180-degree
-rotation (known stall risk from problem #18, plus the separate aspect-
-ratio/aliasing issues in problem #23), two-player mode, extended sessions
-across multiple levels.
+overnight with no hang (problem #22 fixed and confirmed).
+
+**ALL FOUR ROTATIONS NOW CONFIRMED ON HARDWARE, at the correct aspect
+ratio** (#79/#80), which makes this the first game in the project that is
+complete in every orientation. Observed on the physical display: landscape
+and tate both clean, **no red lines, smooth motion**, and the picture
+correctly proportioned rather than the 24.4%-too-wide "squat" landscape that
+shipped before. Measured alongside: `starve` 0/60 in every rotation with
+`frame` pinned at 16665us, `work_max` 13065us of a 16660us budget with the
+aspect correction on.
+
+That closes three things this section previously listed as open: the
+landscape/180 stall risk (#18), the aspect-ratio and aliasing issues (#23),
+and problem #21's mirror-orientation fix, which is now re-confirmed by
+observation -- all four rotations were switched through and read correctly.
+
+Worth knowing when cycling with the ROTATE button: **rotation 2 is this
+game's upright landscape and rotation 0 is upside-down**, matching its tate
+default being 3 rather than 1 (#33 -- the Namco cabinets mount their
+monitors opposite to the 8080bw ones). Cycling passes through two inverted
+orientations, which is correct behaviour and not a bug.
+
+**Still not tested:** two-player mode, extended sessions across multiple
+levels.
 
 `galaga_fruitjam` (the full Galaga game) in **portrait (rotation 3)** — all three
 Z80 CPUs, all three video layers (05XX starfield, sprites, tilemap),

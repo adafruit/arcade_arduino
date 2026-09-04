@@ -756,6 +756,38 @@ BTIME_VRAMFUNC static void emit_yoko_col(uint16_t *buf, bool reverse) {
     const uint32_t x1   = av_yoko.x1;
     const uint32_t last = n - 1u;
 
+    // 1:1 FAST PATH -- the aspect correction is off on this game (see
+    // btime_machine.cpp), so this is what actually ships. Two pixels per
+    // 32-bit store, unrolled by four, exactly as emit_tate_row() does:
+    // BTIME_GAME_HEIGHT is 240 and x0 is 40, so `buf + x0` is 4-byte
+    // aligned and 240 divides by 4. Without this, yoko cost ~400us a frame
+    // more than tate for identical output, which on this game's headroom
+    // was the difference between clean and red lines in the busy attract
+    // scenes (DEVNOTES #81).
+    if (av_yoko.col_1to1) {
+        uint32_t *out32 = (uint32_t *)(buf + x0);
+        if (!reverse) {
+            for (uint32_t i = 0; i < (uint32_t)BTIME_GAME_HEIGHT / 4u; i++) {
+                const uint32_t c = i * 4u;
+                out32[i * 2u + 0] = (uint32_t)pal565[vis[c + 0]] |
+                                    ((uint32_t)pal565[vis[c + 1]] << 16);
+                out32[i * 2u + 1] = (uint32_t)pal565[vis[c + 2]] |
+                                    ((uint32_t)pal565[vis[c + 3]] << 16);
+            }
+        } else {
+            for (uint32_t i = 0; i < (uint32_t)BTIME_GAME_HEIGHT / 4u; i++) {
+                const int c = (int)(i * 4u);
+                out32[i * 2u + 0] = (uint32_t)pal565[vis[last - (uint32_t)c]] |
+                                    ((uint32_t)pal565[vis[last - (uint32_t)(c + 1)]] << 16);
+                out32[i * 2u + 1] = (uint32_t)pal565[vis[last - (uint32_t)(c + 2)]] |
+                                    ((uint32_t)pal565[vis[last - (uint32_t)(c + 3)]] << 16);
+            }
+        }
+        for (uint32_t i = 0;  i < x0;              i++) buf[i] = 0;
+        for (uint32_t i = x1; i < HAL_VIDEO_WIDTH; i++) buf[i] = 0;
+        return;
+    }
+
     uint32_t x = x0;
     for (uint32_t s = 0; s < n; s++) {
         const uint8_t pen = reverse ? vis[last - s] : vis[s];
@@ -832,9 +864,22 @@ BTIME_VRAMFUNC static void emit_tate_row(uint16_t *buf, bool reverse) {
                                 ((uint32_t)pal565[vis[c + 3]] << 16);
         }
     } else {
+        // The SAME two-pixels-per-32-bit-store trick as the forward path.
+        // It used to be a plain per-pixel loop, which made rotation 3 cost
+        // ~600us a frame more than rotation 1 for identical output -- and on
+        // this game's ~1.1ms of headroom that was the difference between
+        // clean and red lines during the busy attract scenes (DEVNOTES #81).
+        // A reversed read is still a sequential read; there was never a
+        // reason for the slow path.
+        uint32_t *out32 = (uint32_t *)out;
         const uint8_t *rev = vis + BTIME_GAME_WIDTH - 1u;
-        for (uint32_t col = 0; col < BTIME_GAME_WIDTH; col++)
-            out[col] = pal565[rev[-(int)col]];
+        for (uint32_t i = 0; i < BTIME_GAME_WIDTH / 4u; i++) {
+            const int c = (int)(i * 4u);
+            out32[i * 2u + 0] = (uint32_t)pal565[rev[-c]] |
+                                ((uint32_t)pal565[rev[-(c + 1)]] << 16);
+            out32[i * 2u + 1] = (uint32_t)pal565[rev[-(c + 2)]] |
+                                ((uint32_t)pal565[rev[-(c + 3)]] << 16);
+        }
     }
     for (uint32_t col = av_tate.x1; col < HAL_VIDEO_WIDTH; col++)
         buf[col] = 0; // right bar

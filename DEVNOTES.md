@@ -3420,9 +3420,38 @@ pen column to RGB, then call the shared `av_emit_row_merge()` -- costs three
 passes where the row path takes two. **On a frame with 1.1ms to spare, an
 extra pass over 240 pixels is not a detail.**
 
-Landscape now costs what tate costs (`work_max` 14252us against 13455us,
-`starve` ~0 in both) and **all four rotations run at 60fps** -- the first
-time this game has had a working landscape at all.
+**AND THEN IT STILL SHOWED RED LINES, in one tate mode and one yoko mode.**
+Reported from the screen, after the numbers above said every rotation was
+clean. Both my per-rotation runs were only ~1000 frames of the quiet attract
+screens; the busy scenes come later, and there `render` swings from 3175us
+to 5516us. Over a longer window rotation 3 peaked at `work_max` 16131us and
+`starve` climbed in bursts of ~105 a frame exactly during those scenes.
+**A short run on a game with 1.1ms of headroom measures nothing.** Content
+varies the render by 2.3ms; the peak is the only number that matters.
+
+The cause was the same class of thing twice more, and both were mine:
+
+- `emit_tate_row`'s REVERSED branch was a plain per-pixel loop while the
+  forward branch used two pixels per 32-bit store, unrolled by four. Same
+  output, ~600us a frame apart -- which is why exactly ONE of the two tate
+  rotations showed red. A reversed read is still a sequential read; there
+  was never a reason for the slow path.
+- `emit_yoko_col` had no wide-store path at all, costing yoko ~400us more
+  than tate, and one of the two yoko rotations sat the wrong side of the
+  line.
+
+|  | before | after |
+|---|---|---|
+| rot 0 landscape | 14252us | **14795us** |
+| rot 1 tate CCW | 13455us | **15421us** |
+| rot 2 landscape | 15889us, starve 108751 | **14745us, starve 19** |
+| rot 3 tate CW | 16131us, starve 241757 | **15507us, starve 134** |
+
+(The rot 0/1 "before" figures are the misleadingly low short-run ones; the
+"after" column is a long run in every case.) All four are now stable with
+`starve` frozen rather than climbing, and **all four run at 60fps** -- the
+first time this game has had a working landscape at all. Yoko is now the
+CHEAPER pair, at ~14.75ms against tate's ~15.5ms.
 
 **SECOND CORRECTION: the aspect ratio stays wrong on this game.** It needs
 the correction more than any other -- a square 240x240 raster is 33.3% too
